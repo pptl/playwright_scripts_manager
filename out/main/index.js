@@ -4,6 +4,27 @@ const path = require("path");
 const playwrightCore = require("playwright-core");
 const uuid = require("uuid");
 const fs = require("fs");
+const vm = require("vm");
+const module$1 = require("module");
+function _interopNamespaceDefault(e) {
+  const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
+  if (e) {
+    for (const k in e) {
+      if (k !== "default") {
+        const d = Object.getOwnPropertyDescriptor(e, k);
+        Object.defineProperty(n, k, d.get ? d : {
+          enumerable: true,
+          get: () => e[k]
+        });
+      }
+    }
+  }
+  n.default = e;
+  return Object.freeze(n);
+}
+const path__namespace = /* @__PURE__ */ _interopNamespaceDefault(path);
+const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
+const vm__namespace = /* @__PURE__ */ _interopNamespaceDefault(vm);
 const IPC_CHANNELS = {
   // Renderer → Main
   BROWSER_LAUNCH: "browser:launch",
@@ -55,6 +76,12 @@ class BrowserController {
     return this.browser !== null && this.browser.isConnected() && this.page !== null && !this.page.isClosed();
   }
 }
+const NAV_SUPPRESSION_MS = 5e3;
+function shouldSuppressNav(navigationTime, last) {
+  if (!last) return false;
+  if (!["click", "press", "fill"].includes(last.type)) return false;
+  return navigationTime - last.time < NAV_SUPPRESSION_MS;
+}
 function generateDescription(kind, label, value, selectedText) {
   switch (kind) {
     case "click":
@@ -71,11 +98,227 @@ function generateDescription(kind, label, value, selectedText) {
       return `在「${label}」按下 ${value}`;
   }
 }
+function extractSource3() {
+  const _req = module$1.createRequire(require("url").pathToFileURL(__filename).href);
+  let coreBundlePath;
+  try {
+    coreBundlePath = _req.resolve("playwright-core/lib/coreBundle.js");
+  } catch {
+    coreBundlePath = path__namespace.join(process.cwd(), "node_modules", "playwright-core", "lib", "coreBundle.js");
+  }
+  const src = fs__namespace.readFileSync(coreBundlePath, "utf8");
+  const startMarker = "source3 = '";
+  const markerIdx = src.indexOf(startMarker);
+  if (markerIdx < 0) throw new Error("[FlowTest] Could not locate source3 in playwright-core/lib/coreBundle.js");
+  const contentStart = markerIdx + startMarker.length;
+  let firstNewline = -1;
+  for (let i = contentStart; i < src.length; i++) {
+    if (src.charCodeAt(i) === 10) {
+      firstNewline = i;
+      break;
+    }
+  }
+  if (firstNewline < 0) throw new Error("[FlowTest] Could not find end of source3 in coreBundle.js");
+  const escaped = src.slice(contentStart, firstNewline - 2);
+  return vm__namespace.runInNewContext(`'${escaped}'`);
+}
+let _initScript = null;
+function getBrowserInitScript() {
+  if (_initScript !== null) return _initScript;
+  try {
+    const source3 = extractSource3();
+    const opts = JSON.stringify({
+      testIdAttributeName: "data-testid",
+      stableRafCount: 1,
+      browserName: "chromium",
+      shouldPrependErrorPrefix: false,
+      isUtilityWorld: false,
+      customEngines: []
+    });
+    _initScript = `(function(){
+var module={exports:{}};
+${source3}
+try{
+  window.__ftInjected=new(module.exports.InjectedScript())(globalThis,${opts});
+  window.__ftGetLocator=function(el){
+    try{
+      var sel=window.__ftInjected.generateSelectorSimple(el);
+      var loc=asLocator('javascript',sel);
+      return loc||null;
+    }catch(e){return null;}
+  };
+}catch(e){
+  window.__ftGetLocator=function(){return null;};
+}
+})();`;
+  } catch (e) {
+    console.warn("[FlowTest] Playwright InjectedScript extraction failed — falling back to built-in locator logic:", e);
+    _initScript = "";
+  }
+  return _initScript;
+}
+function getDOMCaptureScript() {
+  return () => {
+    function generateCSSSelector(el) {
+      const h = el;
+      const testId = h.getAttribute("data-testid");
+      if (testId) return `[data-testid="${testId}"]`;
+      if (h.id) return `#${h.id}`;
+      const aria = h.getAttribute("aria-label");
+      if (aria) return `[aria-label="${aria}"]`;
+      const name = h.getAttribute("name");
+      if (name) return `[name="${name}"]`;
+      const tag = el.tagName.toLowerCase();
+      const type = (el.type || "").toLowerCase();
+      return type && !["text", ""].includes(type) ? `${tag}[type="${type}"]` : tag;
+    }
+    function getLocatorExpr(el) {
+      const loc = window.__ftGetLocator?.(el);
+      if (loc) return loc;
+      return `locator(${JSON.stringify(generateCSSSelector(el))})`;
+    }
+    function extractLabel(locatorExpr, el) {
+      const q = `['"]([^'"]+)['"]`;
+      const patterns = [
+        new RegExp(`\\bname:\\s*${q}`),
+        new RegExp(`getByLabel\\(${q}`),
+        new RegExp(`getByPlaceholder\\(${q}`),
+        new RegExp(`getByTestId\\(${q}`),
+        new RegExp(`getByText\\(${q}`),
+        new RegExp(`hasText:\\s*${q}`)
+      ];
+      for (const re of patterns) {
+        const m = locatorExpr.match(re);
+        if (m) return m[1];
+      }
+      const h = el;
+      return h.getAttribute("aria-label")?.trim() || h.getAttribute("placeholder") || h.getAttribute("name") || el.tagName.toLowerCase();
+    }
+    function isTextInput(el) {
+      const tag = el.tagName.toLowerCase();
+      if (tag === "textarea") return true;
+      if (tag !== "input") return false;
+      const t = (el.type || "").toLowerCase();
+      return !["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "color", "hidden"].includes(t);
+    }
+    function report(data) {
+      try {
+        ;
+        window.__flowtest_report(data);
+      } catch (_) {
+      }
+    }
+    const focusValues = /* @__PURE__ */ new WeakMap();
+    document.addEventListener("click", (e) => {
+      let el = e.target;
+      if (!el?.tagName) return;
+      if (isTextInput(el)) return;
+      if (el.tagName.toLowerCase() === "select") return;
+      let cur = el;
+      let foundInteractive = false;
+      while (cur) {
+        const t = cur.tagName.toLowerCase();
+        const r = cur.getAttribute("role");
+        const interactive = t === "button" || t === "a" || r === "button" || r === "link" || r === "menuitem" || r === "tab" || r === "option";
+        if (interactive) {
+          el = cur;
+          foundInteractive = true;
+          break;
+        }
+        if (["form", "main", "section", "article", "nav", "header", "footer"].includes(t)) break;
+        cur = cur.parentElement;
+      }
+      const tag = el.tagName.toLowerCase();
+      const type = (el.type || "").toLowerCase();
+      const nativeInteractive = ["button", "a", "input", "select", "textarea", "label"].includes(tag);
+      if (!foundInteractive && !nativeInteractive) return;
+      const locatorExpr = getLocatorExpr(el);
+      const label = extractLabel(locatorExpr, el);
+      if (tag === "input" && (type === "checkbox" || type === "radio")) {
+        report({ kind: el.checked ? "check" : "uncheck", locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href });
+        return;
+      }
+      report({ kind: "click", locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href });
+    }, true);
+    document.addEventListener("focus", (e) => {
+      const el = e.target;
+      if (!el?.tagName || !isTextInput(el)) return;
+      focusValues.set(el, el.value ?? "");
+    }, true);
+    document.addEventListener("blur", (e) => {
+      const el = e.target;
+      if (!el?.tagName || !isTextInput(el)) return;
+      const initial = focusValues.get(el);
+      const current = el.value ?? "";
+      focusValues.delete(el);
+      if (initial === void 0 || current === initial) return;
+      const locatorExpr = getLocatorExpr(el);
+      report({ kind: "fill", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href });
+    }, true);
+    document.addEventListener("change", (e) => {
+      const el = e.target;
+      if (el.tagName.toLowerCase() !== "select") return;
+      const opt = el.options[el.selectedIndex];
+      const locatorExpr = getLocatorExpr(el);
+      report({ kind: "selectOption", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: el.value, selectedText: opt?.text?.trim(), timestamp: Date.now(), url: window.location.href });
+    }, true);
+    document.addEventListener("keydown", (e) => {
+      if (!["Enter", "Escape"].includes(e.key)) return;
+      const el = e.target;
+      if (!el?.tagName) return;
+      if (e.key === "Enter" && el.tagName.toLowerCase() === "textarea" && !e.ctrlKey && !e.metaKey) return;
+      if (!isTextInput(el) && !["button", "a", "select"].includes(el.tagName.toLowerCase())) return;
+      const locatorExpr = getLocatorExpr(el);
+      report({ kind: "press", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: e.key, timestamp: Date.now(), url: window.location.href });
+    }, true);
+  };
+}
+function buildAction(raw) {
+  let type;
+  let value;
+  switch (raw.kind) {
+    case "click":
+      type = "click";
+      break;
+    case "fill":
+      type = "fill";
+      value = raw.value;
+      break;
+    case "selectOption":
+      type = "selectOption";
+      value = raw.value;
+      break;
+    case "check":
+      type = "check";
+      break;
+    case "uncheck":
+      type = "uncheck";
+      break;
+    case "press":
+      type = "press";
+      value = raw.value;
+      break;
+    default:
+      return null;
+  }
+  return {
+    id: uuid.v4(),
+    type,
+    selector: raw.selector,
+    locatorExpr: raw.locatorExpr,
+    value,
+    description: generateDescription(raw.kind, raw.label, raw.value, raw.selectedText),
+    timestamp: raw.timestamp || Date.now(),
+    url: raw.url,
+    isPageNavigation: false
+  };
+}
 class CodegenCapture {
   context;
   onAction;
   active = false;
   lastGotoUrl = "";
+  lastInteraction = null;
   constructor(context, onAction) {
     this.context = context;
     this.onAction = onAction;
@@ -83,386 +326,47 @@ class CodegenCapture {
   async start() {
     this.active = true;
     this.lastGotoUrl = "";
+    this.lastInteraction = null;
     const pages = this.context.pages();
     const page = pages[0];
     if (!page) throw new Error("No page available in browser context");
-    await page.addInitScript(() => {
-      function getCSSPseudoContent(el, pseudo) {
-        try {
-          const raw = window.getComputedStyle(el, pseudo).content;
-          if (!raw || raw === "none" || raw === "normal") return "";
-          if (!/^["']/.test(raw)) return "";
-          return raw.slice(1, -1);
-        } catch {
-          return "";
-        }
-      }
-      function collectText(el) {
-        const htmlEl = el;
-        const parts = [];
-        parts.push(getCSSPseudoContent(htmlEl, "::before"));
-        for (const child of el.childNodes) {
-          if (child.nodeType === Node.TEXT_NODE) {
-            parts.push(child.textContent || "");
-          } else if (child.nodeType === Node.ELEMENT_NODE) {
-            const childEl = child;
-            if (childEl.getAttribute("aria-hidden") === "true") continue;
-            if (childEl.hidden) continue;
-            const childAriaLabel = childEl.getAttribute("aria-label")?.trim();
-            if (childAriaLabel) {
-              parts.push(childAriaLabel);
-              continue;
-            }
-            const childText = collectText(childEl);
-            if (!childText.trim()) continue;
-            const display = window.getComputedStyle(childEl).display || "inline";
-            parts.push(display === "inline" ? childText : " " + childText + " ");
-          }
-        }
-        parts.push(getCSSPseudoContent(htmlEl, "::after"));
-        return parts.join("");
-      }
-      function computeAriaName(el) {
-        const htmlEl = el;
-        const ariaLabel = htmlEl.getAttribute("aria-label")?.trim();
-        if (ariaLabel) return ariaLabel;
-        const labelledByIds = htmlEl.getAttribute("aria-labelledby")?.trim();
-        if (labelledByIds) {
-          const text = labelledByIds.split(/\s+/).map((id) => {
-            const ref = document.getElementById(id);
-            return ref ? computeAriaName(ref) : "";
-          }).filter(Boolean).join(" ");
-          if (text) return text.replace(/\s+/g, " ").trim();
-        }
-        const inp = el;
-        if (inp.labels && inp.labels.length > 0) {
-          const text = inp.labels[0].textContent?.replace(/\s+/g, " ").trim();
-          if (text) return text;
-        }
-        return collectText(el).replace(/\s+/g, " ").trim();
-      }
-      function getRole(el) {
-        const explicit = el.getAttribute("role");
-        if (explicit) return explicit.trim().split(/\s+/)[0];
-        const tag = el.tagName.toLowerCase();
-        const type = (el.type || "").toLowerCase();
-        if (tag === "button") return "button";
-        if (tag === "a" && el.href) return "link";
-        if (tag === "input") {
-          if (type === "checkbox") return "checkbox";
-          if (type === "radio") return "radio";
-          if (["button", "submit", "reset", "image"].includes(type)) return "button";
-          if (type === "range") return "slider";
-          if (type === "number") return "spinbutton";
-          if (type === "search") return "searchbox";
-          return "textbox";
-        }
-        if (tag === "select") return "combobox";
-        if (tag === "textarea") return "textbox";
-        return null;
-      }
-      const INTERACTIVE_ROLES = /* @__PURE__ */ new Set([
-        "button",
-        "link",
-        "checkbox",
-        "radio",
-        "combobox",
-        "textbox",
-        "searchbox",
-        "spinbutton",
-        "slider",
-        "menuitem",
-        "tab",
-        "switch",
-        "option",
-        "treeitem",
-        "gridcell",
-        "menuitemcheckbox",
-        "menuitemradio"
-      ]);
-      function uniqueCSS(selector) {
-        try {
-          return document.querySelectorAll(selector).length === 1;
-        } catch {
-          return false;
-        }
-      }
-      function countByRoleAndName(role, name) {
-        const byAttr = [...document.querySelectorAll(`[role="${role}"]`)];
-        const byTag = [];
-        if (role === "button") byTag.push(...document.querySelectorAll("button"));
-        if (role === "link") byTag.push(...document.querySelectorAll("a"));
-        if (role === "combobox") byTag.push(...document.querySelectorAll("select"));
-        if (role === "textbox") byTag.push(...document.querySelectorAll('input:not([type]),input[type="text"],input[type="email"],input[type="password"],input[type="tel"],input[type="url"],textarea'));
-        if (role === "checkbox") byTag.push(...document.querySelectorAll('input[type="checkbox"]'));
-        if (role === "radio") byTag.push(...document.querySelectorAll('input[type="radio"]'));
-        const candidates = [.../* @__PURE__ */ new Set([...byAttr, ...byTag])];
-        return candidates.filter((el) => {
-          const n = computeAriaName(el).replace(/\s+/g, " ").trim();
-          return n === name;
-        }).length;
-      }
-      function countByLabel(labelText) {
-        const associated = /* @__PURE__ */ new Set();
-        document.querySelectorAll("label").forEach((lbl) => {
-          const clone = lbl.cloneNode(true);
-          clone.querySelectorAll("input,select,textarea,button").forEach((n) => n.remove());
-          const text = clone.textContent?.replace(/\s+/g, " ").trim();
-          if (text !== labelText) return;
-          const forId = lbl.getAttribute("for");
-          if (forId) {
-            const el = document.getElementById(forId);
-            if (el) associated.add(el);
-          }
-          lbl.querySelectorAll("input,select,textarea").forEach((el) => associated.add(el));
-        });
-        return associated.size;
-      }
-      function q(s) {
-        return JSON.stringify(s);
-      }
-      function generateLocator(el) {
-        const htmlEl = el;
-        const tag = el.tagName.toLowerCase();
-        const type = (el.type || "").toLowerCase();
-        const role = getRole(el);
-        const testId = htmlEl.getAttribute("data-testid") || htmlEl.dataset?.testid;
-        if (testId && uniqueCSS(`[data-testid="${testId}"]`))
-          return `getByTestId(${q(testId)})`;
-        if (role && INTERACTIVE_ROLES.has(role)) {
-          const name = computeAriaName(el);
-          if (name && countByRoleAndName(role, name) === 1)
-            return `getByRole(${q(role)}, { name: ${q(name)}, exact: true })`;
-        }
-        if (["input", "select", "textarea"].includes(tag)) {
-          const inp = el;
-          let labelText;
-          if (inp.labels && inp.labels.length > 0)
-            labelText = inp.labels[0].textContent?.replace(/\s+/g, " ").trim() || void 0;
-          if (!labelText) {
-            const parentLabel = el.closest("label");
-            if (parentLabel) {
-              const clone = parentLabel.cloneNode(true);
-              clone.querySelectorAll("input,select,textarea,button").forEach((n) => n.remove());
-              labelText = clone.textContent?.replace(/\s+/g, " ").trim() || void 0;
-            }
-          }
-          if (labelText && countByLabel(labelText) === 1)
-            return `getByLabel(${q(labelText)})`;
-        }
-        const nameAttr = htmlEl.getAttribute("name");
-        if (nameAttr && ["input", "select", "textarea"].includes(tag) && uniqueCSS(`[name="${nameAttr}"]`))
-          return `locator(${q(`[name="${nameAttr}"]`)})`;
-        const placeholder = htmlEl.getAttribute("placeholder");
-        if (placeholder && uniqueCSS(`[placeholder="${placeholder}"]`))
-          return `getByPlaceholder(${q(placeholder)})`;
-        const id = htmlEl.id;
-        if (id && !/^[0-9a-f-]{20,}$|^[0-9a-f]{8}-/.test(id) && uniqueCSS(`#${id}`))
-          return `locator(${q("#" + id)})`;
-        const ariaLabel = htmlEl.getAttribute("aria-label");
-        if (ariaLabel && uniqueCSS(`[aria-label="${ariaLabel}"]`))
-          return `locator(${q(`[aria-label="${ariaLabel}"]`)})`;
-        const fallback = type && !["text", ""].includes(type) ? `${tag}[type="${type}"]` : tag;
-        return `locator(${q(fallback)})`;
-      }
-      function generateCSSSelector(el) {
-        const htmlEl = el;
-        const testId = htmlEl.getAttribute("data-testid");
-        if (testId) return `[data-testid="${testId}"]`;
-        if (htmlEl.id) return `#${htmlEl.id}`;
-        const ariaLabel = htmlEl.getAttribute("aria-label");
-        if (ariaLabel) return `[aria-label="${ariaLabel}"]`;
-        const name = htmlEl.getAttribute("name");
-        if (name) return `[name="${name}"]`;
-        const tag = el.tagName.toLowerCase();
-        const type = (el.type || "").toLowerCase();
-        return type && !["text", ""].includes(type) ? `${tag}[type="${type}"]` : tag;
-      }
-      function getLabel(el) {
-        const name = computeAriaName(el);
-        if (name) return name;
-        const htmlEl = el;
-        const placeholder = htmlEl.getAttribute("placeholder");
-        if (placeholder) return placeholder;
-        const nameAttr = htmlEl.getAttribute("name");
-        if (nameAttr) return nameAttr;
-        return el.tagName.toLowerCase();
-      }
-      function isTextInput(el) {
-        const tag = el.tagName.toLowerCase();
-        if (tag === "textarea") return true;
-        if (tag !== "input") return false;
-        const t = (el.type || "").toLowerCase();
-        return !["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "color", "hidden"].includes(t);
-      }
-      function report(data) {
-        try {
-          ;
-          window.__flowtest_report(data);
-        } catch (_) {
-        }
-      }
-      const focusValues = /* @__PURE__ */ new WeakMap();
-      document.addEventListener("click", (e) => {
-        let el = e.target;
-        if (!el?.tagName) return;
-        if (isTextInput(el)) return;
-        if (el.tagName.toLowerCase() === "select") return;
-        let cur = el;
-        let foundInteractive = false;
-        while (cur) {
-          const t = cur.tagName.toLowerCase();
-          const r = cur.getAttribute("role");
-          const interactive = t === "button" || t === "a" || r === "button" || r === "link" || r === "menuitem" || r === "tab" || r === "option";
-          if (interactive) {
-            el = cur;
-            foundInteractive = true;
-            break;
-          }
-          if (["form", "main", "section", "article", "nav", "header", "footer"].includes(t)) break;
-          cur = cur.parentElement;
-        }
-        const tag = el.tagName.toLowerCase();
-        const type = (el.type || "").toLowerCase();
-        const nativeInteractive = ["button", "a", "input", "select", "textarea", "label"].includes(tag);
-        if (!foundInteractive && !nativeInteractive) return;
-        if (tag === "input" && (type === "checkbox" || type === "radio")) {
-          report({
-            kind: el.checked ? "check" : "uncheck",
-            locatorExpr: generateLocator(el),
-            selector: generateCSSSelector(el),
-            label: getLabel(el),
-            timestamp: Date.now(),
-            url: window.location.href
-          });
-          return;
-        }
-        report({
-          kind: "click",
-          locatorExpr: generateLocator(el),
-          selector: generateCSSSelector(el),
-          label: getLabel(el),
-          timestamp: Date.now(),
-          url: window.location.href
-        });
-      }, true);
-      document.addEventListener("focus", (e) => {
-        const el = e.target;
-        if (!el?.tagName || !isTextInput(el)) return;
-        focusValues.set(el, el.value ?? "");
-      }, true);
-      document.addEventListener("blur", (e) => {
-        const el = e.target;
-        if (!el?.tagName || !isTextInput(el)) return;
-        const initial = focusValues.get(el);
-        const current = el.value ?? "";
-        focusValues.delete(el);
-        if (initial === void 0 || current === initial) return;
-        report({
-          kind: "fill",
-          locatorExpr: generateLocator(el),
-          selector: generateCSSSelector(el),
-          label: getLabel(el),
-          value: current,
-          timestamp: Date.now(),
-          url: window.location.href
-        });
-      }, true);
-      document.addEventListener("change", (e) => {
-        const el = e.target;
-        if (el.tagName.toLowerCase() !== "select") return;
-        const opt = el.options[el.selectedIndex];
-        report({
-          kind: "selectOption",
-          locatorExpr: generateLocator(el),
-          selector: generateCSSSelector(el),
-          label: getLabel(el),
-          value: el.value,
-          selectedText: opt?.text?.trim(),
-          timestamp: Date.now(),
-          url: window.location.href
-        });
-      }, true);
-      document.addEventListener("keydown", (e) => {
-        if (!["Enter", "Escape"].includes(e.key)) return;
-        const el = e.target;
-        if (!el?.tagName) return;
-        if (e.key === "Enter" && el.tagName.toLowerCase() === "textarea" && !e.ctrlKey && !e.metaKey) return;
-        if (!isTextInput(el) && !["button", "a", "select"].includes(el.tagName.toLowerCase())) return;
-        report({
-          kind: "press",
-          locatorExpr: generateLocator(el),
-          selector: generateCSSSelector(el),
-          label: getLabel(el),
-          value: e.key,
-          timestamp: Date.now(),
-          url: window.location.href
-        });
-      }, true);
-    });
+    const initScript = getBrowserInitScript();
+    if (initScript) {
+      await page.addInitScript(initScript);
+    }
+    await page.addInitScript(getDOMCaptureScript());
     await page.exposeFunction("__flowtest_report", (raw) => {
       if (!this.active) return;
-      this.processEvent(raw);
+      const action = buildAction(raw);
+      if (action) {
+        this.lastInteraction = { time: Date.now(), type: action.type };
+        this.onAction(action);
+      }
     });
     page.on("framenavigated", (frame) => {
       if (!this.active || frame !== page.mainFrame()) return;
       const url = frame.url();
       if (!url || url === "about:blank" || url === this.lastGotoUrl) return;
       this.lastGotoUrl = url;
-      this.onAction({
-        id: uuid.v4(),
-        type: "goto",
-        selector: "",
-        value: url,
-        description: `導航到 ${url}`,
-        timestamp: Date.now(),
-        url,
-        isPageNavigation: true
-      });
+      const navigationTime = Date.now();
+      setTimeout(() => {
+        if (!this.active) return;
+        if (shouldSuppressNav(navigationTime, this.lastInteraction)) return;
+        this.onAction({
+          id: uuid.v4(),
+          type: "goto",
+          selector: "",
+          value: url,
+          description: `導航到 ${url}`,
+          timestamp: navigationTime,
+          url,
+          isPageNavigation: true
+        });
+      }, 50);
     });
   }
   async stop() {
     this.active = false;
-  }
-  processEvent(raw) {
-    let type;
-    let value;
-    switch (raw.kind) {
-      case "click":
-        type = "click";
-        break;
-      case "fill":
-        type = "fill";
-        value = raw.value;
-        break;
-      case "selectOption":
-        type = "selectOption";
-        value = raw.value;
-        break;
-      case "check":
-        type = "check";
-        break;
-      case "uncheck":
-        type = "uncheck";
-        break;
-      case "press":
-        type = "press";
-        value = raw.value;
-        break;
-      default:
-        return;
-    }
-    this.onAction({
-      id: uuid.v4(),
-      type,
-      selector: raw.selector,
-      locatorExpr: raw.locatorExpr,
-      value,
-      description: generateDescription(raw.kind, raw.label, raw.value, raw.selectedText),
-      timestamp: raw.timestamp || Date.now(),
-      url: raw.url,
-      isPageNavigation: false
-    });
   }
 }
 class Recorder {

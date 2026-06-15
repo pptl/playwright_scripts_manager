@@ -1,0 +1,136 @@
+{
+  "id": "34c05265-aae6-4650-93aa-e5a4eaec23f8",
+  "name": "flow4",
+  "createdAt": "2026-06-15T03:31:03.907Z",
+  "updatedAt": "2026-06-15T03:31:21.300Z",
+  "baseURL": "https://esd.genesys-tech.com/",
+  "nodes": [
+    {
+      "id": "43de207b-26fe-4f51-b3ff-8d093b3f9fe7",
+      "action": {
+        "id": "43de207b-26fe-4f51-b3ff-8d093b3f9fe7",
+        "type": "goto",
+        "selector": "",
+        "value": "https://esd.genesys-tech.com/",
+        "description": "導航到 https://esd.genesys-tech.com/",
+        "timestamp": 1781494266329,
+        "url": "https://esd.genesys-tech.com/",
+        "isPageNavigation": true
+      },
+      "position": {
+        "x": 300,
+        "y": 50
+      },
+      "parentId": null,
+      "childIds": [
+        "59f1defc-93f1-425e-b4b7-c1f28835bc3d"
+      ]
+    },
+    {
+      "id": "59f1defc-93f1-425e-b4b7-c1f28835bc3d",
+      "action": {
+        "id": "59f1defc-93f1-425e-b4b7-c1f28835bc3d",
+        "type": "goto",
+        "selector": "",
+        "value": "https://esd.genesys-tech.com/Login",
+        "description": "導航到 https://esd.genesys-tech.com/Login",
+        "timestamp": 1781494266638,
+        "url": "https://esd.genesys-tech.com/Login",
+        "isPageNavigation": true
+      },
+      "position": {
+        "x": 300,
+        "y": 130
+      },
+      "parentId": "43de207b-26fe-4f51-b3ff-8d093b3f9fe7",
+      "childIds": [
+        "41e9acab-4320-4d93-95fe-2eb76c4c72d1"
+      ]
+    },
+    {
+      "id": "41e9acab-4320-4d93-95fe-2eb76c4c72d1",
+      "action": {
+        "id": "41e9acab-4320-4d93-95fe-2eb76c4c72d1",
+        "type": "fill",
+        "selector": "[name=\"login--userName\"]",
+        "locatorExpr": "getByPlaceholder(\"請輸入帳號\")",
+        "value": "Alen.Chua",
+        "description": "填入「Alen.Chua」到「請輸入帳號」",
+        "timestamp": 1781494272345,
+        "url": "https://esd.genesys-tech.com/Login",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 210
+      },
+      "parentId": "59f1defc-93f1-425e-b4b7-c1f28835bc3d",
+      "childIds": [
+        "41d243f1-cded-4f8a-950b-2532ae3c158a"
+      ]
+    },
+    {
+      "id": "41d243f1-cded-4f8a-950b-2532ae3c158a",
+      "action": {
+        "id": "41d243f1-cded-4f8a-950b-2532ae3c158a",
+        "type": "fill",
+        "selector": "[name=\"login--password\"]",
+        "locatorExpr": "getByPlaceholder(\"請輸入密碼\")",
+        "value": "Alen.Chua",
+        "description": "填入「Alen.Chua」到「請輸入密碼」",
+        "timestamp": 1781494276632,
+        "url": "https://esd.genesys-tech.com/Login",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 290
+      },
+      "parentId": "41e9acab-4320-4d93-95fe-2eb76c4c72d1",
+      "childIds": [
+        "8409ce7a-af3d-43c9-910d-e371c7471f07"
+      ]
+    },
+    {
+      "id": "8409ce7a-af3d-43c9-910d-e371c7471f07",
+      "action": {
+        "id": "8409ce7a-af3d-43c9-910d-e371c7471f07",
+        "type": "click",
+        "selector": "button[type=\"button\"]",
+        "locatorExpr": "getByText(\"登入\")",
+        "description": "點擊「登入」",
+        "timestamp": 1781494276687,
+        "url": "https://esd.genesys-tech.com/Login",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 370
+      },
+      "parentId": "41d243f1-cded-4f8a-950b-2532ae3c158a",
+      "childIds": [
+        "ee62c026-b430-4083-b278-1054e4eb4926"
+      ]
+    },
+    {
+      "id": "ee62c026-b430-4083-b278-1054e4eb4926",
+      "action": {
+        "id": "ee62c026-b430-4083-b278-1054e4eb4926",
+        "type": "goto",
+        "selector": "",
+        "value": "https://esd.genesys-tech.com/Index/Home",
+        "description": "導航到 https://esd.genesys-tech.com/Index/Home",
+        "timestamp": 1781494276841,
+        "url": "https://esd.genesys-tech.com/Index/Home",
+        "isPageNavigation": true
+      },
+      "position": {
+        "x": 300,
+        "y": 450
+      },
+      "parentId": "8409ce7a-af3d-43c9-910d-e371c7471f07",
+      "childIds": []
+    }
+  ],
+  "rootNodeId": "43de207b-26fe-4f51-b3ff-8d093b3f9fe7"
+}

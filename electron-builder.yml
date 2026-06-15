@@ -1,0 +1,13 @@
+appId: com.flowtest.app
+productName: FlowTest
+directories:
+  output: release
+  buildResources: buildResources
+files:
+  - dist-electron
+mac:
+  category: public.app-category.developer-tools
+win:
+  target: nsis
+linux:
+  target: AppImage

@@ -1,0 +1,220 @@
+{
+  "id": "033e6230-8038-47f9-b65a-c9b75cb0e645",
+  "name": "flow6",
+  "createdAt": "2026-06-15T06:08:32.313Z",
+  "updatedAt": "2026-06-15T06:09:00.673Z",
+  "baseURL": "https://esd.genesys-tech.com/",
+  "nodes": [
+    {
+      "id": "90d0e060-68c5-4bbb-af74-61dec559e361",
+      "action": {
+        "id": "90d0e060-68c5-4bbb-af74-61dec559e361",
+        "type": "goto",
+        "selector": "",
+        "value": "https://esd.genesys-tech.com/",
+        "description": "導航到 https://esd.genesys-tech.com/",
+        "timestamp": 1781503717069,
+        "url": "https://esd.genesys-tech.com/",
+        "isPageNavigation": true
+      },
+      "position": {
+        "x": 300,
+        "y": 50
+      },
+      "parentId": null,
+      "childIds": [
+        "7a4c0e5d-292d-473a-8814-ab66fb9262ce"
+      ]
+    },
+    {
+      "id": "7a4c0e5d-292d-473a-8814-ab66fb9262ce",
+      "action": {
+        "id": "7a4c0e5d-292d-473a-8814-ab66fb9262ce",
+        "type": "goto",
+        "selector": "",
+        "value": "https://esd.genesys-tech.com/Login",
+        "description": "導航到 https://esd.genesys-tech.com/Login",
+        "timestamp": 1781503717394,
+        "url": "https://esd.genesys-tech.com/Login",
+        "isPageNavigation": true
+      },
+      "position": {
+        "x": 300,
+        "y": 130
+      },
+      "parentId": "90d0e060-68c5-4bbb-af74-61dec559e361",
+      "childIds": [
+        "e1c03179-8025-4878-8eb6-938d931067aa"
+      ]
+    },
+    {
+      "id": "e1c03179-8025-4878-8eb6-938d931067aa",
+      "action": {
+        "id": "e1c03179-8025-4878-8eb6-938d931067aa",
+        "type": "fill",
+        "selector": "[name=\"login--userName\"]",
+        "locatorExpr": "locator(\"[name=\\\"login--userName\\\"]\")",
+        "value": "Alen.Chua",
+        "description": "填入「Alen.Chua」到「請輸入帳號」",
+        "timestamp": 1781503724180,
+        "url": "https://esd.genesys-tech.com/Login",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 210
+      },
+      "parentId": "7a4c0e5d-292d-473a-8814-ab66fb9262ce",
+      "childIds": [
+        "5b979d0b-2e9e-42e1-8d25-a506528f597e"
+      ]
+    },
+    {
+      "id": "5b979d0b-2e9e-42e1-8d25-a506528f597e",
+      "action": {
+        "id": "5b979d0b-2e9e-42e1-8d25-a506528f597e",
+        "type": "fill",
+        "selector": "[name=\"login--password\"]",
+        "locatorExpr": "locator(\"[name=\\\"login--password\\\"]\")",
+        "value": "Alen.Chua",
+        "description": "填入「Alen.Chua」到「請輸入密碼」",
+        "timestamp": 1781503728785,
+        "url": "https://esd.genesys-tech.com/Login",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 290
+      },
+      "parentId": "e1c03179-8025-4878-8eb6-938d931067aa",
+      "childIds": [
+        "521b14ef-66d3-471d-b331-5452ef5cc347"
+      ]
+    },
+    {
+      "id": "521b14ef-66d3-471d-b331-5452ef5cc347",
+      "action": {
+        "id": "521b14ef-66d3-471d-b331-5452ef5cc347",
+        "type": "click",
+        "selector": "button[type=\"button\"]",
+        "locatorExpr": "getByText(\"登入\", { exact: true })",
+        "description": "點擊「登入」",
+        "timestamp": 1781503728867,
+        "url": "https://esd.genesys-tech.com/Login",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 370
+      },
+      "parentId": "5b979d0b-2e9e-42e1-8d25-a506528f597e",
+      "childIds": [
+        "e41cef8c-329f-4e1a-be20-71b0a8b37524"
+      ]
+    },
+    {
+      "id": "e41cef8c-329f-4e1a-be20-71b0a8b37524",
+      "action": {
+        "id": "e41cef8c-329f-4e1a-be20-71b0a8b37524",
+        "type": "goto",
+        "selector": "",
+        "value": "https://esd.genesys-tech.com/Index/Home",
+        "description": "導航到 https://esd.genesys-tech.com/Index/Home",
+        "timestamp": 1781503728957,
+        "url": "https://esd.genesys-tech.com/Index/Home",
+        "isPageNavigation": true
+      },
+      "position": {
+        "x": 300,
+        "y": 450
+      },
+      "parentId": "521b14ef-66d3-471d-b331-5452ef5cc347",
+      "childIds": [
+        "53edeb77-aa48-4094-bcfa-b1497195790b"
+      ]
+    },
+    {
+      "id": "53edeb77-aa48-4094-bcfa-b1497195790b",
+      "action": {
+        "id": "53edeb77-aa48-4094-bcfa-b1497195790b",
+        "type": "click",
+        "selector": "[aria-label=\"topMainNavBar\"]",
+        "locatorExpr": "getByText(\"人事\", { exact: true })",
+        "description": "點擊「topMainNavBar」",
+        "timestamp": 1781503731686,
+        "url": "https://esd.genesys-tech.com/Index/Home",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 530
+      },
+      "parentId": "e41cef8c-329f-4e1a-be20-71b0a8b37524",
+      "childIds": [
+        "c07f37b9-407c-42a7-9ed3-6b3c0dfae465"
+      ]
+    },
+    {
+      "id": "c07f37b9-407c-42a7-9ed3-6b3c0dfae465",
+      "action": {
+        "id": "c07f37b9-407c-42a7-9ed3-6b3c0dfae465",
+        "type": "click",
+        "selector": "div",
+        "locatorExpr": "getByRole(\"button\", { name: \"排班管理\", exact: true })",
+        "description": "點擊「排班管理」",
+        "timestamp": 1781503733959,
+        "url": "https://esd.genesys-tech.com/Index/Home",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 610
+      },
+      "parentId": "53edeb77-aa48-4094-bcfa-b1497195790b",
+      "childIds": [
+        "cdcda01b-06aa-4942-8001-e4c5e3254882"
+      ]
+    },
+    {
+      "id": "cdcda01b-06aa-4942-8001-e4c5e3254882",
+      "action": {
+        "id": "cdcda01b-06aa-4942-8001-e4c5e3254882",
+        "type": "click",
+        "selector": "div",
+        "locatorExpr": "getByRole(\"button\", { name: \"排班查詢❐\", exact: true })",
+        "description": "點擊「排班查詢❐」",
+        "timestamp": 1781503734933,
+        "url": "https://esd.genesys-tech.com/Index/Home",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 690
+      },
+      "parentId": "c07f37b9-407c-42a7-9ed3-6b3c0dfae465",
+      "childIds": [
+        "7fd2c952-b4f3-4eff-abea-e982d6cb4b6d"
+      ]
+    },
+    {
+      "id": "7fd2c952-b4f3-4eff-abea-e982d6cb4b6d",
+      "action": {
+        "id": "7fd2c952-b4f3-4eff-abea-e982d6cb4b6d",
+        "type": "goto",
+        "selector": "",
+        "value": "https://esd.genesys-tech.com/ScheduleClass/ScheduleClassFirst",
+        "description": "導航到 https://esd.genesys-tech.com/ScheduleClass/ScheduleClassFirst",
+        "timestamp": 1781503734937,
+        "url": "https://esd.genesys-tech.com/ScheduleClass/ScheduleClassFirst",
+        "isPageNavigation": true
+      },
+      "position": {
+        "x": 300,
+        "y": 770
+      },
+      "parentId": "cdcda01b-06aa-4942-8001-e4c5e3254882",
+      "childIds": []
+    }
+  ],
+  "rootNodeId": "90d0e060-68c5-4bbb-af74-61dec559e361"
+}

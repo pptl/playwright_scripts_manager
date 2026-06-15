@@ -17,12 +17,51 @@ import { ActionNode } from './ActionNode'
 import { BranchEdge } from './BranchEdge'
 import type { ActionNodeData } from './ActionNode'
 import { usePlaywright } from '../../hooks/usePlaywright'
+import type { FlowNode, NodePosition } from '@shared/types'
 
 const nodeTypes = { actionNode: ActionNode }
 const edgeTypes = { branchEdge: BranchEdge }
 
+const NODE_WIDTH = 200
+const NODE_HEIGHT = 70
+const H_MARGIN = 25
+const V_GAP = 30
+
+function computeTreeLayout(nodes: FlowNode[], rootNodeId: string): Map<string, NodePosition> {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+  const positions = new Map<string, NodePosition>()
+
+  function subtreeWidth(nodeId: string): number {
+    const node = nodeMap.get(nodeId)
+    if (!node || node.childIds.length === 0) return NODE_WIDTH
+    const childWidths = node.childIds.map(subtreeWidth)
+    const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN
+    return Math.max(NODE_WIDTH, total)
+  }
+
+  function place(nodeId: string, centerX: number, y: number) {
+    positions.set(nodeId, { x: centerX - NODE_WIDTH / 2, y })
+    const node = nodeMap.get(nodeId)
+    if (!node || node.childIds.length === 0) return
+    const childWidths = node.childIds.map(subtreeWidth)
+    const totalW = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN
+    let x = centerX - totalW / 2
+    for (let i = 0; i < node.childIds.length; i++) {
+      place(node.childIds[i], x + childWidths[i] / 2, y + NODE_HEIGHT + V_GAP)
+      x += childWidths[i] + H_MARGIN
+    }
+  }
+
+  if (rootNodeId && nodeMap.has(rootNodeId)) {
+    const totalW = subtreeWidth(rootNodeId)
+    place(rootNodeId, totalW / 2, 0)
+  }
+
+  return positions
+}
+
 function FlowCanvasInner() {
-  const { currentFlow, selectNode, selectedNodeId, isRecording, deleteNode, updateNode } =
+  const { currentFlow, selectNode, selectedNodeId, isRecording, deleteNode } =
     useFlowStore()
   const { replayToNode } = usePlaywright()
   const [replaySpeed] = useState(500)
@@ -30,10 +69,13 @@ function FlowCanvasInner() {
   // Convert FlowNodes to React Flow nodes and edges
   const rfNodes: Node<ActionNodeData>[] = useMemo(() => {
     if (!currentFlow) return []
+    const layout = currentFlow.rootNodeId
+      ? computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId)
+      : new Map<string, NodePosition>()
     return currentFlow.nodes.map((fn) => ({
       id: fn.id,
       type: 'actionNode',
-      position: fn.position,
+      position: layout.get(fn.id) ?? fn.position,
       data: { flowNode: fn },
       selected: fn.id === selectedNodeId,
     }))
@@ -80,14 +122,8 @@ function FlowCanvasInner() {
   const handleNodesChange = useCallback(
     (changes: NodeChange[]) => {
       onNodesChange(changes)
-      // Persist drag-end positions to the store
-      for (const change of changes) {
-        if (change.type === 'position' && !change.dragging && change.position) {
-          updateNode(change.id, { position: change.position })
-        }
-      }
     },
-    [onNodesChange, updateNode],
+    [onNodesChange],
   )
 
   const onPaneClick = useCallback(() => {

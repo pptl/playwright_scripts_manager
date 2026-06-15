@@ -14628,16 +14628,49 @@ function BranchEdge({
 }
 const nodeTypes = { actionNode: ActionNode };
 const edgeTypes = { branchEdge: BranchEdge };
+const NODE_WIDTH = 200;
+const NODE_HEIGHT = 70;
+const H_MARGIN = 25;
+const V_GAP = 30;
+function computeTreeLayout(nodes, rootNodeId) {
+  const nodeMap = new Map(nodes.map((n2) => [n2.id, n2]));
+  const positions = /* @__PURE__ */ new Map();
+  function subtreeWidth(nodeId) {
+    const node = nodeMap.get(nodeId);
+    if (!node || node.childIds.length === 0) return NODE_WIDTH;
+    const childWidths = node.childIds.map(subtreeWidth);
+    const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
+    return Math.max(NODE_WIDTH, total);
+  }
+  function place(nodeId, centerX, y2) {
+    positions.set(nodeId, { x: centerX - NODE_WIDTH / 2, y: y2 });
+    const node = nodeMap.get(nodeId);
+    if (!node || node.childIds.length === 0) return;
+    const childWidths = node.childIds.map(subtreeWidth);
+    const totalW = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
+    let x2 = centerX - totalW / 2;
+    for (let i = 0; i < node.childIds.length; i++) {
+      place(node.childIds[i], x2 + childWidths[i] / 2, y2 + NODE_HEIGHT + V_GAP);
+      x2 += childWidths[i] + H_MARGIN;
+    }
+  }
+  if (rootNodeId && nodeMap.has(rootNodeId)) {
+    const totalW = subtreeWidth(rootNodeId);
+    place(rootNodeId, totalW / 2, 0);
+  }
+  return positions;
+}
 function FlowCanvasInner() {
-  const { currentFlow, selectNode, selectedNodeId, isRecording, deleteNode, updateNode } = useFlowStore();
+  const { currentFlow, selectNode, selectedNodeId, isRecording, deleteNode } = useFlowStore();
   const { replayToNode } = usePlaywright();
   const [replaySpeed] = reactExports.useState(500);
   const rfNodes = reactExports.useMemo(() => {
     if (!currentFlow) return [];
+    const layout = currentFlow.rootNodeId ? computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId) : /* @__PURE__ */ new Map();
     return currentFlow.nodes.map((fn) => ({
       id: fn.id,
       type: "actionNode",
-      position: fn.position,
+      position: layout.get(fn.id) ?? fn.position,
       data: { flowNode: fn },
       selected: fn.id === selectedNodeId
     }));
@@ -14676,13 +14709,8 @@ function FlowCanvasInner() {
   const handleNodesChange = reactExports.useCallback(
     (changes) => {
       onNodesChange(changes);
-      for (const change of changes) {
-        if (change.type === "position" && !change.dragging && change.position) {
-          updateNode(change.id, { position: change.position });
-        }
-      }
     },
-    [onNodesChange, updateNode]
+    [onNodesChange]
   );
   const onPaneClick = reactExports.useCallback(() => {
     selectNode(null);

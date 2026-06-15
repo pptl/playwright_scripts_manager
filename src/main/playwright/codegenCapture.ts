@@ -36,10 +36,17 @@ export class CodegenCapture {
     const initScript = getBrowserInitScript()
     if (initScript) {
       await page.addInitScript(initScript)
+      // addInitScript only runs on future navigations; evaluate immediately so
+      // branch recording (page already loaded, no upcoming navigation) works too.
+      await page.evaluate(initScript).catch(() => {})
     }
 
     // Step 2 — DOM event capture handlers
-    await page.addInitScript(getDOMCaptureScript())
+    const captureScript = getDOMCaptureScript()
+    await page.addInitScript(captureScript)
+    // Same as above: evaluate immediately so DOM listeners are active right now
+    // even when the page is already loaded (branch recording scenario).
+    await page.evaluate(captureScript).catch(() => {})
 
     // Step 3 — Expose report channel to browser
     await page.exposeFunction('__flowtest_report', (raw: RawEvent) => {

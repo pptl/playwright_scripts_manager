@@ -333,8 +333,13 @@ class CodegenCapture {
     const initScript = getBrowserInitScript();
     if (initScript) {
       await page.addInitScript(initScript);
+      await page.evaluate(initScript).catch(() => {
+      });
     }
-    await page.addInitScript(getDOMCaptureScript());
+    const captureScript = getDOMCaptureScript();
+    await page.addInitScript(captureScript);
+    await page.evaluate(captureScript).catch(() => {
+    });
     await page.exposeFunction("__flowtest_report", (raw) => {
       if (!this.active) return;
       const action = buildAction(raw);

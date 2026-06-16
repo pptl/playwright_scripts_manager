@@ -62,7 +62,7 @@ function computeTreeLayout(nodes: FlowNode[], rootNodeId: string): Map<string, N
 }
 
 function FlowCanvasInner() {
-  const { currentFlow, selectNode, selectedNodeId, isRecording, isReplaying, replaySpeed, deleteNode } =
+  const { currentFlow, selectNode, selectedNodeId, isRecording, isReplaying, replaySpeed, deleteNode, updateNode } =
     useFlowStore()
   const { replayToNode, startBranchRecording } = usePlaywright()
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null)
@@ -160,23 +160,38 @@ function FlowCanvasInner() {
 
   return (
     <div style={{ flex: 1, position: 'relative' }}>
-      {contextMenu && (
-        <NodeContextMenu
-          nodeId={contextMenu.nodeId}
-          x={contextMenu.x}
-          y={contextMenu.y}
-          onClose={() => setContextMenu(null)}
-          onReplay={() => replayToNode(contextMenu.nodeId, replaySpeed)}
-          onBranchRecord={() => startBranchRecording(contextMenu.nodeId)}
-          onDelete={async () => {
-            deleteNode(contextMenu.nodeId)
-            const updated = useFlowStore.getState().currentFlow
-            if (updated) await window.electronAPI.saveFlow(updated)
-          }}
-          isRecording={isRecording}
-          isReplaying={isReplaying}
-        />
-      )}
+      {contextMenu && (() => {
+        const contextNode = currentFlow?.nodes.find((n) => n.id === contextMenu.nodeId)
+        const VALUE_TYPES = new Set(['fill', 'selectOption', 'goto', 'press', 'assertText', 'assertValue'])
+        const hasValue = !!(contextNode?.action.value && VALUE_TYPES.has(contextNode.action.type))
+        return (
+          <NodeContextMenu
+            nodeId={contextMenu.nodeId}
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onClose={() => setContextMenu(null)}
+            onReplay={() => replayToNode(contextMenu.nodeId, replaySpeed)}
+            onBranchRecord={() => startBranchRecording(contextMenu.nodeId)}
+            onDelete={async () => {
+              deleteNode(contextMenu.nodeId)
+              const updated = useFlowStore.getState().currentFlow
+              if (updated) await window.electronAPI.saveFlow(updated)
+            }}
+            isRecording={isRecording}
+            isReplaying={isReplaying}
+            hasValue={hasValue}
+            currentCaptureAs={contextNode?.action.captureAs}
+            onCaptureAsVar={async (varName) => {
+              if (!contextNode) return
+              updateNode(contextNode.id, {
+                action: { ...contextNode.action, captureAs: varName },
+              })
+              const updated = useFlowStore.getState().currentFlow
+              if (updated) await window.electronAPI.saveFlow(updated)
+            }}
+          />
+        )
+      })()}
       {isRecording && (
         <div
           style={{

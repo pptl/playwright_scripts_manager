@@ -61,6 +61,20 @@ export function resolveValue(value: string): string {
     .replace(/\{\{timestamp\}\}/g, () => generateTimestamp())
 }
 
+/**
+ * Like resolveValue but also checks session variables first.
+ * Session variable names take precedence over built-in names.
+ */
+export function resolveValueWithSession(value: string, sessionVars: Map<string, string>): string {
+  return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+    if (sessionVars.has(name)) return sessionVars.get(name)!
+    if (name === 'randomText') return generateRandomText()
+    if (name === 'randomNumber') return generateRandomNumber()
+    if (name === 'timestamp') return generateTimestamp()
+    return match
+  })
+}
+
 /** True if the value string contains any variable placeholder. */
 export function hasVariables(value: string): boolean {
   return /\{\{.+?\}\}/.test(value)
@@ -82,6 +96,35 @@ export function valueToCodeExpr(value: string): string {
     .replace(/\{\{randomText\}\}/g, '${_ftRandomText()}')
     .replace(/\{\{randomNumber\}\}/g, '${_ftRandomNumber()}')
     .replace(/\{\{timestamp\}\}/g, '${_ftTimestamp()}')
+  return '`' + inner + '`'
+}
+
+/**
+ * Like valueToCodeExpr but treats names in sessionVarNames as JS variable references.
+ * e.g. "{{sign_title}}" + sessionVarNames={"sign_title"} → `sign_title` (bare identifier)
+ * e.g. "prefix_{{sign_title}}" → "`prefix_${sign_title}`"
+ * Built-in placeholders still expand to _ft...() calls.
+ */
+export function sessionAwareValueToCodeExpr(value: string, sessionVarNames: Set<string>): string {
+  if (!hasVariables(value)) {
+    return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+  }
+  // If the entire value is a single session variable reference, emit a bare JS identifier
+  const singleVar = value.match(/^\{\{(\w+)\}\}$/)
+  if (singleVar && sessionVarNames.has(singleVar[1])) {
+    return singleVar[1]
+  }
+  const inner = value
+    .replace(/\\/g, '\\\\')
+    .replace(/`/g, '\\`')
+    .replace(/\$\{/g, '\\${')
+    .replace(/\{\{(\w+)\}\}/g, (_, name) => {
+      if (sessionVarNames.has(name)) return `\${${name}}`
+      if (name === 'randomText') return '${_ftRandomText()}'
+      if (name === 'randomNumber') return '${_ftRandomNumber()}'
+      if (name === 'timestamp') return '${_ftTimestamp()}'
+      return `{{${name}}}`
+    })
   return '`' + inner + '`'
 }
 

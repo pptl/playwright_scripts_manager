@@ -220,7 +220,12 @@ function getDOMCaptureScript() {
     document.addEventListener("click", (e) => {
       let el = e.target;
       if (!el?.tagName) return;
-      if (isTextInput(el)) return;
+      if (isTextInput(el)) {
+        const locatorExpr2 = getLocatorExpr(el);
+        const label2 = extractLabel(locatorExpr2, el);
+        report({ kind: "click", locatorExpr: locatorExpr2, selector: generateCSSSelector(el), label: label2, timestamp: Date.now(), url: window.location.href, isInputClick: true });
+        return;
+      }
       if (el.tagName.toLowerCase() === "select") return;
       let cur = el;
       let foundInteractive = false;
@@ -470,6 +475,7 @@ class CodegenCapture {
   assertFunctionsExposed = false;
   assertReportCb = null;
   assertCancelCb = null;
+  pendingInputClick = null;
   constructor(context, onAction) {
     this.context = context;
     this.onAction = onAction;
@@ -494,10 +500,20 @@ class CodegenCapture {
     await page.exposeFunction("__flowtest_report", (raw) => {
       if (!this.active) return;
       const action = buildAction(raw);
-      if (action) {
+      if (!action) return;
+      if (raw.isInputClick) {
+        this.flushPendingInputClick();
+        this.pendingInputClick = action;
         this.lastInteraction = { time: Date.now(), type: action.type };
-        this.onAction(action);
+        return;
       }
+      if (action.type === "fill" && this.pendingInputClick?.selector === action.selector) {
+        this.pendingInputClick = null;
+      } else {
+        this.flushPendingInputClick();
+      }
+      this.lastInteraction = { time: Date.now(), type: action.type };
+      this.onAction(action);
     });
     page.on("framenavigated", (frame) => {
       if (!this.active || frame !== page.mainFrame()) return;
@@ -521,7 +537,14 @@ class CodegenCapture {
       }, 50);
     });
   }
+  flushPendingInputClick() {
+    if (this.pendingInputClick) {
+      this.onAction(this.pendingInputClick);
+      this.pendingInputClick = null;
+    }
+  }
   async stop() {
+    this.pendingInputClick = null;
     this.active = false;
   }
   async startAssertionPick(assertionType, onCancel) {
@@ -601,8 +624,14 @@ function generateTimestamp() {
   const d = /* @__PURE__ */ new Date();
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}${pad(d.getMilliseconds(), 3)}`;
 }
-function resolveValue(value) {
-  return value.replace(/\{\{randomText\}\}/g, () => generateRandomText()).replace(/\{\{randomNumber\}\}/g, () => generateRandomNumber()).replace(/\{\{timestamp\}\}/g, () => generateTimestamp());
+function resolveValueWithSession(value, sessionVars) {
+  return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+    if (sessionVars.has(name)) return sessionVars.get(name);
+    if (name === "randomText") return generateRandomText();
+    if (name === "randomNumber") return generateRandomNumber();
+    if (name === "timestamp") return generateTimestamp();
+    return match;
+  });
 }
 function hasVariables(value) {
   return /\{\{.+?\}\}/.test(value);
@@ -612,6 +641,23 @@ function valueToCodeExpr(value) {
     return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
   }
   const inner = value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{randomText\}\}/g, "${_ftRandomText()}").replace(/\{\{randomNumber\}\}/g, "${_ftRandomNumber()}").replace(/\{\{timestamp\}\}/g, "${_ftTimestamp()}");
+  return "`" + inner + "`";
+}
+function sessionAwareValueToCodeExpr(value, sessionVarNames) {
+  if (!hasVariables(value)) {
+    return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  }
+  const singleVar = value.match(/^\{\{(\w+)\}\}$/);
+  if (singleVar && sessionVarNames.has(singleVar[1])) {
+    return singleVar[1];
+  }
+  const inner = value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{(\w+)\}\}/g, (_, name) => {
+    if (sessionVarNames.has(name)) return `\${${name}}`;
+    if (name === "randomText") return "${_ftRandomText()}";
+    if (name === "randomNumber") return "${_ftRandomNumber()}";
+    if (name === "timestamp") return "${_ftTimestamp()}";
+    return `{{${name}}}`;
+  });
   return "`" + inner + "`";
 }
 const VARIABLE_HELPERS_CODE = `
@@ -630,10 +676,12 @@ function _ftTimestamp() {
 `;
 class Replayer {
   page;
+  sessionVars = /* @__PURE__ */ new Map();
   constructor(page) {
     this.page = page;
   }
   async replayToNode(nodes, targetNodeId, onNodeStart, onNodeComplete, speed = 500) {
+    this.sessionVars.clear();
     const path2 = this.findPath(nodes, targetNodeId);
     for (const node of path2) {
       onNodeStart(node.id);
@@ -665,7 +713,7 @@ class Replayer {
     return this.page.locator(action.selector);
   }
   async executeAction(action) {
-    const val = action.value != null ? resolveValue(action.value) : void 0;
+    const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars) : void 0;
     switch (action.type) {
       case "goto":
         await this.page.goto(val);
@@ -695,6 +743,9 @@ class Replayer {
       case "wait":
         await this.getLocator(action).waitFor({ state: "visible" });
         break;
+    }
+    if (action.captureAs && val != null) {
+      this.sessionVars.set(action.captureAs, val);
     }
   }
   async executeAssertion(action) {
@@ -851,14 +902,17 @@ class ScriptExporter {
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
       const steps = path2.nodeIds.map((id) => nodeMap.get(id)).filter(Boolean);
+      const sessionVarsDefined = /* @__PURE__ */ new Set();
       const stepCode = steps.map((node) => {
-        const action = ScriptExporter.actionToCode(node);
+        const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined);
         const assertCode = node.action.assertion ? ScriptExporter.assertionToCode(node.action) : "";
         if (config.useTestStep) {
+          const action2 = rawAction.replace(/\n/g, "\n      ");
           return `    await test.step('${node.action.description}', async () => {
-      ${action}${assertCode ? "\n      " + assertCode : ""}
+      ${action2}${assertCode ? "\n      " + assertCode : ""}
     });`;
         }
+        const action = rawAction.replace(/\n/g, "\n    ");
         return `    // ${node.action.description}
     ${action}${assertCode ? "\n    " + assertCode : ""}`;
       }).join("\n\n");
@@ -878,7 +932,7 @@ ${stepCode}
       "});"
     ].filter((line) => line !== void 0).join("\n");
   }
-  static actionToCode(node) {
+  static actionToCode(node, sessionVarsDefined) {
     const { action } = node;
     let loc;
     const { locatorExpr, selector } = action;
@@ -904,29 +958,37 @@ ${stepCode}
     } else {
       loc = `page.locator('${selector}')`;
     }
+    const captureAs = action.captureAs;
+    let captureDecl = "";
+    if (captureAs) {
+      captureDecl = `const ${captureAs} = ${valueToCodeExpr(action.value ?? "")};
+`;
+      sessionVarsDefined.add(captureAs);
+    }
+    const va = (v) => captureAs ? captureAs : sessionAwareValueToCodeExpr(v, sessionVarsDefined);
     switch (action.type) {
       case "goto":
-        return `await page.goto(${valueToCodeExpr(action.value ?? "")});`;
+        return `${captureDecl}await page.goto(${va(action.value ?? "")});`;
       case "click":
         return `await ${loc}.click();`;
       case "fill":
-        return `await ${loc}.fill(${valueToCodeExpr(action.value ?? "")});`;
+        return `${captureDecl}await ${loc}.fill(${va(action.value ?? "")});`;
       case "selectOption":
-        return `await ${loc}.selectOption(${valueToCodeExpr(action.value ?? "")});`;
+        return `${captureDecl}await ${loc}.selectOption(${va(action.value ?? "")});`;
       case "check":
         return `await ${loc}.check();`;
       case "uncheck":
         return `await ${loc}.uncheck();`;
       case "press":
-        return action.locatorExpr ? `await ${loc}.press(${valueToCodeExpr(action.value ?? "")});` : `await page.keyboard.press(${valueToCodeExpr(action.value ?? "")});`;
+        return action.locatorExpr ? `${captureDecl}await ${loc}.press(${va(action.value ?? "")});` : `${captureDecl}await page.keyboard.press(${va(action.value ?? "")});`;
       case "wait":
         return `await ${loc}.waitFor({ state: 'visible' });`;
       case "assertVisible":
         return `await expect(${loc}).toBeVisible();`;
       case "assertText":
-        return `await expect(${loc}).toContainText(${valueToCodeExpr(action.value ?? "")});`;
+        return `${captureDecl}await expect(${loc}).toContainText(${va(action.value ?? "")});`;
       case "assertValue":
-        return `await expect(${loc}).toHaveValue(${valueToCodeExpr(action.value ?? "")});`;
+        return `${captureDecl}await expect(${loc}).toHaveValue(${va(action.value ?? "")});`;
       default:
         return `// TODO: ${action.type}`;
     }
@@ -961,8 +1023,10 @@ ${stepCode}
     if (prefixLen < 3) return { helperCode: "", helperImport: "" };
     const prefixNodes = pathArrays[0].slice(0, prefixLen).map((id) => nodeMap.get(id));
     const fnName = `setup_${flow.id.replace(/-/g, "_")}`;
+    const helperSessionVars = /* @__PURE__ */ new Set();
     const body = prefixNodes.map((node) => {
-      const action = ScriptExporter.actionToCode(node);
+      const rawAction = ScriptExporter.actionToCode(node, helperSessionVars);
+      const action = rawAction.replace(/\n/g, "\n  ");
       const assertCode = node.action.assertion ? ScriptExporter.assertionToCode(node.action) : "";
       return `  // ${node.action.description}
   ${action}${assertCode ? "\n  " + assertCode : ""}`;

@@ -27,6 +27,7 @@ export interface Action {
   /** Full Playwright locator expression from Codegen, e.g. getByRole('button', { name: 'Login' }) */
   locatorExpr?: string
   value?: string
+  captureAs?: string
   description: string
   timestamp: number
   screenshot?: string

@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 
 interface NodeContextMenuProps {
   nodeId: string
@@ -10,6 +10,9 @@ interface NodeContextMenuProps {
   onDelete: () => void
   isRecording: boolean
   isReplaying: boolean
+  hasValue: boolean
+  currentCaptureAs?: string
+  onCaptureAsVar: (varName: string | undefined) => void
 }
 
 export function NodeContextMenu({
@@ -21,8 +24,26 @@ export function NodeContextMenu({
   onDelete,
   isRecording,
   isReplaying,
+  hasValue,
+  currentCaptureAs,
+  onCaptureAsVar,
 }: NodeContextMenuProps) {
   const disabled = isRecording || isReplaying
+  const [captureInput, setCaptureInput] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (captureInput !== null) {
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    }
+  }, [captureInput])
+
+  const commitCapture = () => {
+    const trimmed = captureInput?.trim()
+    onCaptureAsVar(trimmed || undefined)
+    onClose()
+  }
 
   return (
     <div
@@ -42,7 +63,7 @@ export function NodeContextMenu({
           border: '1px solid #334155',
           borderRadius: 8,
           padding: '4px 0',
-          minWidth: 200,
+          minWidth: 220,
           boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
         }}
         onMouseDown={(e) => e.stopPropagation()}
@@ -65,6 +86,64 @@ export function NodeContextMenu({
             onBranchRecord()
           }}
         />
+
+        {hasValue && (
+          <>
+            <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+            {captureInput === null ? (
+              <MenuItem
+                icon="$"
+                label={
+                  currentCaptureAs
+                    ? `已儲存為 {{${currentCaptureAs}}}（點擊修改）`
+                    : '將值儲存為變數'
+                }
+                disabled={disabled}
+                onClick={() => setCaptureInput(currentCaptureAs ?? '')}
+              />
+            ) : (
+              <div style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 12, color: '#94a3b8', flexShrink: 0 }}>{'{{  }}'}</span>
+                <input
+                  ref={inputRef}
+                  value={captureInput}
+                  onChange={(e) => setCaptureInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitCapture()
+                    if (e.key === 'Escape') onClose()
+                  }}
+                  placeholder="變數名稱，如 sign_title"
+                  style={{
+                    flex: 1,
+                    padding: '4px 6px',
+                    background: '#0f172a',
+                    border: '1px solid #3b82f6',
+                    borderRadius: 4,
+                    color: '#e2e8f0',
+                    fontSize: 12,
+                    outline: 'none',
+                  }}
+                />
+                <button
+                  onClick={commitCapture}
+                  style={{
+                    padding: '3px 8px',
+                    borderRadius: 4,
+                    border: 'none',
+                    background: '#3b82f6',
+                    color: '#fff',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  }}
+                >
+                  確認
+                </button>
+              </div>
+            )}
+          </>
+        )}
+
         <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
         <MenuItem
           icon="🗑"

@@ -24,6 +24,7 @@ export class CodegenCapture {
   private assertFunctionsExposed = false
   private assertReportCb: ((data: AssertPickResult) => void) | null = null
   private assertCancelCb: (() => void) | null = null
+  private pendingInputClick: Action | null = null
 
   constructor(context: BrowserContext, onAction: ActionCallback) {
     this.context = context
@@ -59,10 +60,27 @@ export class CodegenCapture {
     await page.exposeFunction('__flowtest_report', (raw: RawEvent) => {
       if (!this.active) return
       const action = buildAction(raw)
-      if (action) {
+      if (!action) return
+
+      if (raw.isInputClick) {
+        // Buffer the click — keep it only if no fill on the same element follows.
+        // Flush any previously buffered click first (user clicked a different input).
+        this.flushPendingInputClick()
+        this.pendingInputClick = action
         this.lastInteraction = { time: Date.now(), type: action.type }
-        this.onAction(action)
+        return
       }
+
+      if (action.type === 'fill' && this.pendingInputClick?.selector === action.selector) {
+        // Fill on the same element → this was just a focus click before typing; discard it.
+        this.pendingInputClick = null
+      } else {
+        // Any other action → flush the buffered click first (e.g., user opened a dropdown).
+        this.flushPendingInputClick()
+      }
+
+      this.lastInteraction = { time: Date.now(), type: action.type }
+      this.onAction(action)
     })
 
     // Step 4 — Navigation
@@ -94,7 +112,15 @@ export class CodegenCapture {
     })
   }
 
+  private flushPendingInputClick(): void {
+    if (this.pendingInputClick) {
+      this.onAction(this.pendingInputClick)
+      this.pendingInputClick = null
+    }
+  }
+
   async stop(): Promise<void> {
+    this.pendingInputClick = null
     this.active = false
   }
 

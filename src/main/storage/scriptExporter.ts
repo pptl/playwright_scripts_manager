@@ -1,8 +1,8 @@
-import { promises as fs } from 'fs'
+﻿import { promises as fs } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import type { Flow, FlowNode, ExportConfig, TestPath } from '../../shared/types'
-import { hasVariables, valueToCodeExpr, VARIABLE_HELPERS_CODE } from '../../shared/variableResolver'
+import { hasVariables, valueToCodeExpr, sessionAwareValueToCodeExpr, VARIABLE_HELPERS_CODE } from '../../shared/variableResolver'
 
 function exportsDir(): string {
   return app.isPackaged
@@ -82,15 +82,18 @@ export class ScriptExporter {
       .map((path, idx) => {
         const testName = path.name || `測試路徑 ${idx + 1}`
         const steps = path.nodeIds.map((id) => nodeMap.get(id)!).filter(Boolean)
+        const sessionVarsDefined = new Set<string>()
         const stepCode = steps
           .map((node) => {
-            const action = ScriptExporter.actionToCode(node)
+            const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined)
             const assertCode = node.action.assertion
               ? ScriptExporter.assertionToCode(node.action)
               : ''
             if (config.useTestStep) {
+              const action = rawAction.replace(/\n/g, '\n      ')
               return `    await test.step('${node.action.description}', async () => {\n      ${action}${assertCode ? '\n      ' + assertCode : ''}\n    });`
             }
+            const action = rawAction.replace(/\n/g, '\n    ')
             return `    // ${node.action.description}\n    ${action}${assertCode ? '\n    ' + assertCode : ''}`
           })
           .join('\n\n')
@@ -114,7 +117,7 @@ export class ScriptExporter {
       .join('\n')
   }
 
-  private static actionToCode(node: FlowNode): string {
+  private static actionToCode(node: FlowNode, sessionVarsDefined: Set<string>): string {
     const { action } = node
 
     // Locator priority:
@@ -136,7 +139,7 @@ export class ScriptExporter {
       loc = `page.locator('${selector}')`
     } else if (selector && /^\[aria-label=/.test(selector) && locatorExpr && /^getByText\(/.test(locatorExpr)) {
       // Element has a unique aria-label: prefer it over getByText which can time out
-      // on buttons whose textContent doesn’t perfectly match (e.g. icon + text).
+      // on buttons whose textContent doesn't perfectly match (e.g. icon + text).
       loc = `page.locator('${selector}')`
     } else if (locatorExpr && /^getByText\(/.test(locatorExpr)) {
       // Attempt to upgrade getByText("X") → getByRole("tag", { name: "X", exact: true })
@@ -159,15 +162,28 @@ export class ScriptExporter {
       loc = `page.locator('${selector}')`
     }
 
+    // If this action defines a session variable, emit a const declaration before the action.
+    // The declaration uses valueToCodeExpr (built-in aware); the action argument uses the var name.
+    const captureAs = action.captureAs
+    let captureDecl = ''
+    if (captureAs) {
+      captureDecl = `const ${captureAs} = ${valueToCodeExpr(action.value ?? '')};\n`
+      sessionVarsDefined.add(captureAs)
+    }
+
+    // Value argument: use captureAs var name when this node defines it,
+    // otherwise use session-aware expression so {{varName}} resolves to a bare JS identifier.
+    const va = (v: string) => captureAs ? captureAs : sessionAwareValueToCodeExpr(v, sessionVarsDefined)
+
     switch (action.type) {
       case 'goto':
-        return `await page.goto(${valueToCodeExpr(action.value ?? '')});`
+        return `${captureDecl}await page.goto(${va(action.value ?? '')});`
       case 'click':
         return `await ${loc}.click();`
       case 'fill':
-        return `await ${loc}.fill(${valueToCodeExpr(action.value ?? '')});`
+        return `${captureDecl}await ${loc}.fill(${va(action.value ?? '')});`
       case 'selectOption':
-        return `await ${loc}.selectOption(${valueToCodeExpr(action.value ?? '')});`
+        return `${captureDecl}await ${loc}.selectOption(${va(action.value ?? '')});`
       case 'check':
         return `await ${loc}.check();`
       case 'uncheck':
@@ -175,16 +191,16 @@ export class ScriptExporter {
       case 'press':
         // keyboard.press has no locator
         return action.locatorExpr
-          ? `await ${loc}.press(${valueToCodeExpr(action.value ?? '')});`
-          : `await page.keyboard.press(${valueToCodeExpr(action.value ?? '')});`
+          ? `${captureDecl}await ${loc}.press(${va(action.value ?? '')});`
+          : `${captureDecl}await page.keyboard.press(${va(action.value ?? '')});`
       case 'wait':
         return `await ${loc}.waitFor({ state: 'visible' });`
       case 'assertVisible':
         return `await expect(${loc}).toBeVisible();`
       case 'assertText':
-        return `await expect(${loc}).toContainText(${valueToCodeExpr(action.value ?? '')});`
+        return `${captureDecl}await expect(${loc}).toContainText(${va(action.value ?? '')});`
       case 'assertValue':
-        return `await expect(${loc}).toHaveValue(${valueToCodeExpr(action.value ?? '')});`
+        return `${captureDecl}await expect(${loc}).toHaveValue(${va(action.value ?? '')});`
       default:
         return `// TODO: ${action.type}`
     }
@@ -229,9 +245,11 @@ export class ScriptExporter {
 
     const prefixNodes = pathArrays[0].slice(0, prefixLen).map((id) => nodeMap.get(id)!)
     const fnName = `setup_${flow.id.replace(/-/g, '_')}`
+    const helperSessionVars = new Set<string>()
     const body = prefixNodes
       .map((node) => {
-        const action = ScriptExporter.actionToCode(node)
+        const rawAction = ScriptExporter.actionToCode(node, helperSessionVars)
+        const action = rawAction.replace(/\n/g, '\n  ')
         const assertCode = node.action.assertion ? ScriptExporter.assertionToCode(node.action) : ''
         return `  // ${node.action.description}\n  ${action}${assertCode ? '\n  ' + assertCode : ''}`
       })

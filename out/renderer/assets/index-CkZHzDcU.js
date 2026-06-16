@@ -7204,6 +7204,8 @@ const useFlowStore = create$1((set2, get2) => ({
   isRecording: false,
   isReplaying: false,
   recordingHeadId: null,
+  replaySpeed: 500,
+  isPickingAssertion: false,
   setFlows: (flows) => set2({ flows }),
   createFlow: (name, baseURL, description) => {
     const flow = {
@@ -7290,7 +7292,9 @@ const useFlowStore = create$1((set2, get2) => ({
   setReplayStatus: (nodeId, status) => set2((state) => ({ replayStatus: { ...state.replayStatus, [nodeId]: status } })),
   clearReplayStatus: () => set2({ replayStatus: {}, replayingNodeId: null }),
   setIsRecording: (v2) => set2({ isRecording: v2 }),
-  setIsReplaying: (v2) => set2({ isReplaying: v2 })
+  setIsReplaying: (v2) => set2({ isReplaying: v2 }),
+  setReplaySpeed: (ms) => set2({ replaySpeed: ms }),
+  setIsPickingAssertion: (v2) => set2({ isPickingAssertion: v2 })
 }));
 function usePlaywright() {
   const { setIsRecording, setIsReplaying, clearReplayStatus } = useFlowStore();
@@ -7385,6 +7389,150 @@ function useFlowManager() {
   }, []);
   return { refreshFlowList, openFlow, newFlow, saveCurrentFlow };
 }
+function TestOutputModal({ lines, finished, onClose }) {
+  const bottomRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [lines]);
+  const statusColor = finished == null ? "#93c5fd" : finished.passed ? "#86efac" : "#f87171";
+  const statusText = finished == null ? "⟳ 測試執行中..." : finished.passed ? "✓ 所有測試通過" : `✗ 測試失敗 (exit ${finished.exitCode})`;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 2e3
+      },
+      onClick: (e) => e.target === e.currentTarget && finished && onClose(),
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            background: "#0f172a",
+            border: "1px solid #334155",
+            borderRadius: 12,
+            width: 760,
+            maxWidth: "90vw",
+            maxHeight: "80vh",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "12px 16px",
+                  borderBottom: "1px solid #1e293b",
+                  flexShrink: 0
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, fontSize: 14, color: "#e2e8f0" }, children: "執行所有測試" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, fontWeight: 600, color: statusColor }, children: statusText }),
+                    finished && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: () => window.electronAPI.showReport(),
+                        disabled: finished === null,
+                        style: {
+                          padding: "4px 12px",
+                          borderRadius: 6,
+                          border: "1px solid #1d4ed8",
+                          background: finished !== null ? "#1e40af" : "transparent",
+                          color: finished !== null ? "#bfdbfe" : "#475569",
+                          fontSize: 12,
+                          cursor: finished !== null ? "pointer" : "not-allowed",
+                          opacity: finished !== null ? 1 : 0.5
+                        },
+                        children: "顯示詳細報告"
+                      }
+                    ),
+                    finished && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: onClose,
+                        style: {
+                          padding: "4px 12px",
+                          borderRadius: 6,
+                          border: "1px solid #475569",
+                          background: "transparent",
+                          color: "#94a3b8",
+                          fontSize: 12,
+                          cursor: "pointer"
+                        },
+                        children: "關閉"
+                      }
+                    )
+                  ] })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  flex: 1,
+                  overflowY: "auto",
+                  padding: "12px 16px",
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  lineHeight: 1.6,
+                  color: "#cbd5e1",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-all"
+                },
+                children: [
+                  lines.join(""),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: bottomRef })
+                ]
+              }
+            ),
+            finished && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                style: {
+                  padding: "8px 16px",
+                  borderTop: "1px solid #1e293b",
+                  fontSize: 11,
+                  color: "#475569",
+                  flexShrink: 0
+                },
+                children: "點擊「顯示詳細報告」可開啟 Playwright HTML 報告。點擊背景或按「關閉」以關閉此視窗。"
+              }
+            )
+          ]
+        }
+      )
+    }
+  );
+}
+const assertBtn = (label, onClick) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+  "button",
+  {
+    onClick,
+    style: {
+      padding: "4px 10px",
+      borderRadius: 6,
+      border: "1px solid #22c55e",
+      cursor: "pointer",
+      background: "transparent",
+      color: "#22c55e",
+      fontSize: 12,
+      fontWeight: 500
+    },
+    children: label
+  }
+);
 const btn = (label, onClick, disabled = false, danger = false) => /* @__PURE__ */ jsxRuntimeExports.jsx(
   "button",
   {
@@ -7404,16 +7552,32 @@ const btn = (label, onClick, disabled = false, danger = false) => /* @__PURE__ *
   }
 );
 function Toolbar() {
-  const { currentFlow, isRecording, isReplaying, selectedNodeId } = useFlowStore();
-  const { startRecording, startBranchRecording, stopRecording, replayToNode } = usePlaywright();
+  const { currentFlow, isRecording, isReplaying, selectedNodeId, replaySpeed, setReplaySpeed, isPickingAssertion, setIsPickingAssertion } = useFlowStore();
+  const { startRecording, stopRecording } = usePlaywright();
   const { newFlow } = useFlowManager();
   const [showNewFlowDialog, setShowNewFlowDialog] = reactExports.useState(false);
   const [newName, setNewName] = reactExports.useState("");
   const [newURL, setNewURL] = reactExports.useState("");
-  const [replaySpeed, setReplaySpeed] = reactExports.useState(500);
-  const [replayError, setReplayError] = reactExports.useState(null);
-  const [isBranchReplaying, setIsBranchReplaying] = reactExports.useState(false);
+  const [isRunningTests, setIsRunningTests] = reactExports.useState(false);
+  const [showTestModal, setShowTestModal] = reactExports.useState(false);
+  const [testLines, setTestLines] = reactExports.useState([]);
+  const [testFinished, setTestFinished] = reactExports.useState(null);
+  const testLinesRef = reactExports.useRef([]);
   const hasNodes = (currentFlow?.nodes.length ?? 0) > 0;
+  reactExports.useEffect(() => {
+    const offOutput = window.electronAPI.onTestOutput((line) => {
+      testLinesRef.current = [...testLinesRef.current, line];
+      setTestLines([...testLinesRef.current]);
+    });
+    const offFinished = window.electronAPI.onTestFinished((payload) => {
+      setTestFinished(payload);
+      setIsRunningTests(false);
+    });
+    return () => {
+      offOutput();
+      offFinished();
+    };
+  }, []);
   const selectedNode = currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
   const selectedLabel = selectedNode?.action.description ?? null;
   const handleNewFlow = async () => {
@@ -7422,6 +7586,10 @@ function Toolbar() {
     setShowNewFlowDialog(false);
     setNewName("");
     setNewURL("");
+  };
+  const handleAssertionPick = async (type) => {
+    setIsPickingAssertion(true);
+    await window.electronAPI.startAssertionPick(type);
   };
   const handleExport = async () => {
     if (!currentFlow) return;
@@ -7438,26 +7606,15 @@ ${path}`);
       alert(`匯出失敗: ${String(err)}`);
     }
   };
-  const handleReplay = async () => {
-    if (!selectedNodeId) return;
-    setReplayError(null);
-    try {
-      await replayToNode(selectedNodeId, replaySpeed);
-    } catch (err) {
-      setReplayError(String(err));
-    }
-  };
-  const handleBranchRecord = async () => {
-    if (!selectedNodeId) return;
-    setReplayError(null);
-    setIsBranchReplaying(true);
-    try {
-      await startBranchRecording(selectedNodeId);
-    } catch (err) {
-      setReplayError(String(err));
-    } finally {
-      setIsBranchReplaying(false);
-    }
+  const handleRunTests = async () => {
+    if (!currentFlow || isRunningTests) return;
+    const config = { outputDir: "", helperFunctions: false, useTestStep: true };
+    testLinesRef.current = [];
+    setTestLines([]);
+    setTestFinished(null);
+    setIsRunningTests(true);
+    setShowTestModal(true);
+    await window.electronAPI.runTests(currentFlow, config);
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(
     "div",
@@ -7475,38 +7632,27 @@ ${path}`);
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 16, color: "#60a5fa", marginRight: 8 }, children: "FlowTest" }),
         btn("新增流程", () => setShowNewFlowDialog(true)),
         !isRecording ? btn("▶ 開始錄製", () => startRecording(), !currentFlow) : btn("⏹ 停止錄製", () => stopRecording(), false, true),
-        btn(
-          isReplaying ? "重播中..." : "▶ 重播到選取節點",
-          handleReplay,
-          !selectedNodeId || isRecording || isReplaying
-        ),
-        btn(
-          isBranchReplaying ? "⟳ 重播中..." : "⑂ 從此節點分支錄製",
-          handleBranchRecord,
-          !selectedNodeId || isRecording || isReplaying || isBranchReplaying
-        ),
+        isRecording && !isPickingAssertion && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 4, alignItems: "center" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", marginRight: 2 }, children: "驗證:" }),
+          assertBtn("👁 可見", () => handleAssertionPick("assertVisible")),
+          assertBtn("T 文字", () => handleAssertionPick("assertText")),
+          assertBtn("= 值", () => handleAssertionPick("assertValue"))
+        ] }),
+        isRecording && isPickingAssertion && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: pillStyle("#713f12", "#fde68a"), children: "⊕ 選取元素中… (Esc 取消)" }),
         btn("匯出腳本", handleExport, !hasNodes || isRecording),
+        btn(
+          isRunningTests ? "⟳ 測試執行中..." : "▶ 執行所有測試",
+          handleRunTests,
+          !hasNodes || isRecording || isReplaying || isRunningTests
+        ),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginLeft: 8, display: "flex", alignItems: "center", gap: 6 }, children: [
-          isBranchReplaying && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: pillStyle("#1e3a5f", "#93c5fd"), children: "⟳ 靜默重播中，請稍候..." }),
-          isReplaying && !isBranchReplaying && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: pillStyle("#1d4ed8", "#93c5fd"), children: "⟳ 重播中" }),
+          isReplaying && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: pillStyle("#1d4ed8", "#93c5fd"), children: "⟳ 重播中" }),
           isRecording && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: pillStyle("#7f1d1d", "#fca5a5"), children: "● 錄製中" }),
-          selectedLabel && !isRecording && !isReplaying && !isBranchReplaying && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: pillStyle("#14532d", "#86efac"), title: selectedLabel, children: [
+          selectedLabel && !isRecording && !isReplaying && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: pillStyle("#14532d", "#86efac"), title: selectedLabel, children: [
             "✓ ",
             selectedLabel.length > 24 ? selectedLabel.slice(0, 24) + "…" : selectedLabel
           ] }),
-          !selectedNodeId && !isRecording && !isReplaying && currentFlow && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#475569" }, children: "點擊節點以選取" }),
-          replayError && /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "span",
-            {
-              style: pillStyle("#7f1d1d", "#fca5a5"),
-              title: replayError,
-              onClick: () => setReplayError(null),
-              children: [
-                "✕ 錯誤: ",
-                replayError.slice(0, 40)
-              ]
-            }
-          )
+          !selectedNodeId && !isRecording && !isReplaying && currentFlow && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#475569" }, children: "右鍵點擊節點以操作" })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: "#94a3b8" }, children: "速度:" }),
@@ -7594,6 +7740,14 @@ ${path}`);
                 ]
               }
             )
+          }
+        ),
+        showTestModal && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          TestOutputModal,
+          {
+            lines: testLines,
+            finished: testFinished,
+            onClose: () => setShowTestModal(false)
           }
         )
       ]
@@ -14477,7 +14631,10 @@ const TYPE_COLORS = {
   uncheck: "#f59e0b",
   press: "#ec4899",
   wait: "#f97316",
-  upload: "#06b6d4"
+  upload: "#06b6d4",
+  assertVisible: "#22c55e",
+  assertText: "#22c55e",
+  assertValue: "#22c55e"
 };
 const TYPE_ICONS = {
   goto: "🌐",
@@ -14488,7 +14645,10 @@ const TYPE_ICONS = {
   uncheck: "☐",
   press: "⌨️",
   wait: "⏳",
-  upload: "📁"
+  upload: "📁",
+  assertVisible: "👁",
+  assertText: "📝",
+  assertValue: "🔢"
 };
 function ActionNodeComponent({ data, selected }) {
   const { flowNode } = data;
@@ -14626,6 +14786,196 @@ function BranchEdge({
     ) })
   ] });
 }
+function NodeContextMenu({
+  x: x2,
+  y: y2,
+  onClose,
+  onReplay,
+  onBranchRecord,
+  onDelete,
+  isRecording,
+  isReplaying,
+  hasValue,
+  currentCaptureAs,
+  onCaptureAsVar
+}) {
+  const disabled = isRecording || isReplaying;
+  const [captureInput, setCaptureInput] = reactExports.useState(null);
+  const inputRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    if (captureInput !== null) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [captureInput]);
+  const commitCapture = () => {
+    const trimmed = captureInput?.trim();
+    onCaptureAsVar(trimmed || void 0);
+    onClose();
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        zIndex: 1e3
+      },
+      onMouseDown: onClose,
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            position: "absolute",
+            left: x2,
+            top: y2,
+            background: "#1e293b",
+            border: "1px solid #334155",
+            borderRadius: 8,
+            padding: "4px 0",
+            minWidth: 220,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.5)"
+          },
+          onMouseDown: (e) => e.stopPropagation(),
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              MenuItem,
+              {
+                icon: "▶",
+                label: "重播到此節點",
+                disabled,
+                onClick: () => {
+                  onClose();
+                  onReplay();
+                }
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              MenuItem,
+              {
+                icon: "⑂",
+                label: "從此節點分支錄製",
+                disabled,
+                onClick: () => {
+                  onClose();
+                  onBranchRecord();
+                }
+              }
+            ),
+            hasValue && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
+              captureInput === null ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                MenuItem,
+                {
+                  icon: "$",
+                  label: currentCaptureAs ? `已儲存為 {{${currentCaptureAs}}}（點擊修改）` : "將值儲存為變數",
+                  disabled,
+                  onClick: () => setCaptureInput(currentCaptureAs ?? "")
+                }
+              ) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: "#94a3b8", flexShrink: 0 }, children: "{{  }}" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "input",
+                  {
+                    ref: inputRef,
+                    value: captureInput,
+                    onChange: (e) => setCaptureInput(e.target.value),
+                    onKeyDown: (e) => {
+                      if (e.key === "Enter") commitCapture();
+                      if (e.key === "Escape") onClose();
+                    },
+                    placeholder: "變數名稱，如 sign_title",
+                    style: {
+                      flex: 1,
+                      padding: "4px 6px",
+                      background: "#0f172a",
+                      border: "1px solid #3b82f6",
+                      borderRadius: 4,
+                      color: "#e2e8f0",
+                      fontSize: 12,
+                      outline: "none"
+                    }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    onClick: commitCapture,
+                    style: {
+                      padding: "3px 8px",
+                      borderRadius: 4,
+                      border: "none",
+                      background: "#3b82f6",
+                      color: "#fff",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      flexShrink: 0
+                    },
+                    children: "確認"
+                  }
+                )
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              MenuItem,
+              {
+                icon: "🗑",
+                label: "刪除此節點及其子節點",
+                disabled,
+                danger: true,
+                onClick: () => {
+                  onClose();
+                  onDelete();
+                }
+              }
+            )
+          ]
+        }
+      )
+    }
+  );
+}
+function MenuItem({
+  icon,
+  label,
+  disabled,
+  danger = false,
+  onClick
+}) {
+  const color2 = disabled ? "#4b5563" : danger ? "#f87171" : "#e2e8f0";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "button",
+    {
+      onClick,
+      disabled,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        width: "100%",
+        padding: "8px 14px",
+        background: "transparent",
+        border: "none",
+        color: color2,
+        fontSize: 13,
+        cursor: disabled ? "not-allowed" : "pointer",
+        textAlign: "left"
+      },
+      onMouseEnter: (e) => {
+        if (!disabled)
+          e.currentTarget.style.background = danger ? "#450a0a" : "#334155";
+      },
+      onMouseLeave: (e) => {
+        e.currentTarget.style.background = "transparent";
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, width: 16, textAlign: "center" }, children: icon }),
+        label
+      ]
+    }
+  );
+}
 const nodeTypes = { actionNode: ActionNode };
 const edgeTypes = { branchEdge: BranchEdge };
 const NODE_WIDTH = 200;
@@ -14661,9 +15011,9 @@ function computeTreeLayout(nodes, rootNodeId) {
   return positions;
 }
 function FlowCanvasInner() {
-  const { currentFlow, selectNode, selectedNodeId, isRecording, deleteNode } = useFlowStore();
-  const { replayToNode } = usePlaywright();
-  const [replaySpeed] = reactExports.useState(500);
+  const { currentFlow, selectNode, selectedNodeId, isRecording, isReplaying, replaySpeed, deleteNode, updateNode } = useFlowStore();
+  const { replayToNode, startBranchRecording } = usePlaywright();
+  const [contextMenu, setContextMenu] = reactExports.useState(null);
   const rfNodes = reactExports.useMemo(() => {
     if (!currentFlow) return [];
     const layout = currentFlow.rootNodeId ? computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId) : /* @__PURE__ */ new Map();
@@ -14714,32 +15064,15 @@ function FlowCanvasInner() {
   );
   const onPaneClick = reactExports.useCallback(() => {
     selectNode(null);
+    setContextMenu(null);
   }, [selectNode]);
   const onNodeContextMenu = reactExports.useCallback(
     (event, node) => {
       event.preventDefault();
-      const action = window.prompt(
-        `節點: ${node.data.flowNode.action.description}
-
-選擇動作:
-1 - 重播到此節點
-2 - 從此分支錄製
-3 - 刪除此節點
-
-輸入數字:`
-      );
-      if (action === "1") {
-        replayToNode(node.id, replaySpeed);
-      } else if (action === "2") {
-        window.prompt("輸入分支名稱:") ?? "";
-        selectNode(node.id);
-      } else if (action === "3") {
-        if (window.confirm("確定要刪除此節點及其所有下游節點嗎?")) {
-          deleteNode(node.id);
-        }
-      }
+      selectNode(node.id);
+      setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
     },
-    [replayToNode, replaySpeed, selectNode, deleteNode]
+    [selectNode]
   );
   if (!currentFlow) {
     return /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -14758,6 +15091,39 @@ function FlowCanvasInner() {
     );
   }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, position: "relative" }, children: [
+    contextMenu && (() => {
+      const contextNode = currentFlow?.nodes.find((n2) => n2.id === contextMenu.nodeId);
+      const VALUE_TYPES = /* @__PURE__ */ new Set(["fill", "selectOption", "goto", "press", "assertText", "assertValue"]);
+      const hasValue = !!(contextNode?.action.value && VALUE_TYPES.has(contextNode.action.type));
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(
+        NodeContextMenu,
+        {
+          nodeId: contextMenu.nodeId,
+          x: contextMenu.x,
+          y: contextMenu.y,
+          onClose: () => setContextMenu(null),
+          onReplay: () => replayToNode(contextMenu.nodeId, replaySpeed),
+          onBranchRecord: () => startBranchRecording(contextMenu.nodeId),
+          onDelete: async () => {
+            deleteNode(contextMenu.nodeId);
+            const updated = useFlowStore.getState().currentFlow;
+            if (updated) await window.electronAPI.saveFlow(updated);
+          },
+          isRecording,
+          isReplaying,
+          hasValue,
+          currentCaptureAs: contextNode?.action.captureAs,
+          onCaptureAsVar: async (varName) => {
+            if (!contextNode) return;
+            updateNode(contextNode.id, {
+              action: { ...contextNode.action, captureAs: varName }
+            });
+            const updated = useFlowStore.getState().currentFlow;
+            if (updated) await window.electronAPI.saveFlow(updated);
+          }
+        }
+      );
+    })(),
     isRecording && /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "div",
       {
@@ -14934,6 +15300,103 @@ function FlowList() {
     }
   );
 }
+const BUILT_IN_VARIABLES = [
+  {
+    name: "randomText",
+    placeholder: "{{randomText}}",
+    description: "隨機 8 個字元字串",
+    example: "wpmeorrt"
+  },
+  {
+    name: "randomNumber",
+    placeholder: "{{randomNumber}}",
+    description: "隨機 8 位數字",
+    example: "47291836"
+  },
+  {
+    name: "timestamp",
+    placeholder: "{{timestamp}}",
+    description: "目前時間戳記 (yyyyMMddHHmmssSSS)",
+    example: "20260616143022123"
+  }
+];
+function VariableList() {
+  const [copiedName, setCopiedName] = reactExports.useState(null);
+  const copyToClipboard = (placeholder, name) => {
+    navigator.clipboard.writeText(placeholder).then(() => {
+      setCopiedName(name);
+      setTimeout(() => setCopiedName(null), 1500);
+    });
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        background: "#1e293b",
+        borderTop: "1px solid #334155",
+        borderRight: "1px solid #334155",
+        display: "flex",
+        flexDirection: "column",
+        flexShrink: 0
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              padding: "12px 14px",
+              borderBottom: "1px solid #334155",
+              fontSize: 12,
+              color: "#64748b",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.06em"
+            },
+            children: "變數列表"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: BUILT_IN_VARIABLES.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            onClick: () => copyToClipboard(v2.placeholder, v2.name),
+            title: `點擊複製 ${v2.placeholder}`,
+            style: {
+              padding: "8px 14px",
+              cursor: "pointer",
+              borderBottom: "1px solid #0f172a",
+              userSelect: "none"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "code",
+                  {
+                    style: {
+                      fontSize: 11,
+                      background: "#0f172a",
+                      color: "#7dd3fc",
+                      padding: "1px 5px",
+                      borderRadius: 3,
+                      border: "1px solid #1e40af"
+                    },
+                    children: v2.placeholder
+                  }
+                ),
+                copiedName === v2.name && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#4ade80" }, children: "已複製" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#475569" }, children: v2.description }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#334155", marginTop: 1 }, children: [
+                "例：",
+                v2.example
+              ] })
+            ]
+          },
+          v2.name
+        )) })
+      ]
+    }
+  );
+}
 const ASSERTION_TYPES = ["text", "visible", "url", "count"];
 function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode, saveCurrentFlow } = useFlowStore();
@@ -14991,14 +15454,20 @@ function PropertyPanel() {
             style: inputStyle
           }
         ) }),
-        ["fill", "selectOption", "goto", "press"].includes(selectedNode.action.type) && /* @__PURE__ */ jsxRuntimeExports.jsx(Field, { label: "值", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "input",
-          {
-            value,
-            onChange: (e) => setValue(e.target.value),
-            style: inputStyle
-          }
-        ) }),
+        ["fill", "selectOption", "goto", "press"].includes(selectedNode.action.type) && /* @__PURE__ */ jsxRuntimeExports.jsxs(Field, { label: "值", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              value,
+              onChange: (e) => setValue(e.target.value),
+              style: inputStyle
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 }, children: [
+            "可插入變數，如 ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "{{randomText}}" })
+          ] })
+        ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(Field, { label: "驗證", children: assertion ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(
             "select",
@@ -15100,8 +15569,9 @@ function usePlaywrightEvents() {
   const { setReplayStatus, setReplayingNode, setIsReplaying } = useFlowStore();
   reactExports.useEffect(() => {
     const unsubCaptured = window.electronAPI.onActionCaptured((action) => {
-      const { currentFlow, addActionNode, recordingHeadId } = useFlowStore.getState();
+      const { currentFlow, addActionNode, recordingHeadId, setIsPickingAssertion } = useFlowStore.getState();
       if (!currentFlow) return;
+      setIsPickingAssertion(false);
       addActionNode(action, recordingHeadId);
       const updated = useFlowStore.getState().currentFlow;
       if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
@@ -15122,12 +15592,16 @@ function usePlaywrightEvents() {
       setIsReplaying(false);
       console.error("Replay error:", err);
     });
+    const unsubAssertCancelled = window.electronAPI.onAssertionPickCancelled(() => {
+      useFlowStore.getState().setIsPickingAssertion(false);
+    });
     return () => {
       unsubCaptured();
       unsubNodeStart();
       unsubNodeComplete();
       unsubFinished();
       unsubError();
+      unsubAssertCancelled();
     };
   }, []);
 }
@@ -15137,7 +15611,10 @@ function App() {
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", height: "100vh" }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx(Toolbar, {}),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flex: 1, overflow: "hidden" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(FlowList, {}),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", width: 200, flexShrink: 0 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(FlowList, {}),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(VariableList, {})
+      ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(FlowCanvas, {}),
         selectedNodeId && /* @__PURE__ */ jsxRuntimeExports.jsx(PropertyPanel, {})

@@ -40,6 +40,7 @@ export interface RawEvent {
   selectedText?: string
   timestamp: number
   url: string
+  isInputClick?: boolean
 }
 
 export function generateDescription(
@@ -205,7 +206,15 @@ export function getDOMCaptureScript(): () => void {
     document.addEventListener('click', (e: MouseEvent) => {
       let el = e.target as Element
       if (!el?.tagName) return
-      if (isTextInput(el)) return
+      if (isTextInput(el)) {
+        // Always report text input clicks with isInputClick flag.
+        // Node.js will discard it if a fill on the same element follows
+        // (regular typing), or keep it if nothing follows (e.g., opening a dropdown).
+        const locatorExpr = getLocatorExpr(el)
+        const label = extractLabel(locatorExpr, el)
+        report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, isInputClick: true })
+        return
+      }
       if (el.tagName.toLowerCase() === 'select') return
 
       // Bubble up to nearest interactive ancestor (mirrors Playwright codegen)

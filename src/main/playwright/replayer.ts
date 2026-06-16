@@ -1,12 +1,13 @@
 import { Page, Locator } from 'playwright-core'
 import type { Action, FlowNode } from '../../shared/types'
-import { resolveValue } from '../../shared/variableResolver'
+import { resolveValueWithSession } from '../../shared/variableResolver'
 
 type NodeStartCallback = (nodeId: string) => void
 type NodeCompleteCallback = (nodeId: string, success: boolean, error?: string) => void
 
 export class Replayer {
   private page: Page
+  private sessionVars = new Map<string, string>()
 
   constructor(page: Page) {
     this.page = page
@@ -19,6 +20,7 @@ export class Replayer {
     onNodeComplete: NodeCompleteCallback,
     speed = 500,
   ): Promise<void> {
+    this.sessionVars.clear()
     const path = this.findPath(nodes, targetNodeId)
 
     for (const node of path) {
@@ -57,7 +59,7 @@ export class Replayer {
   }
 
   private async executeAction(action: Action): Promise<void> {
-    const val = action.value != null ? resolveValue(action.value) : undefined
+    const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars) : undefined
     switch (action.type) {
       case 'goto':
         await this.page.goto(val!)
@@ -88,6 +90,9 @@ export class Replayer {
       case 'wait':
         await this.getLocator(action).waitFor({ state: 'visible' })
         break
+    }
+    if (action.captureAs && val != null) {
+      this.sessionVars.set(action.captureAs, val)
     }
   }
 

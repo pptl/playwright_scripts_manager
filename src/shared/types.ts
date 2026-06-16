@@ -94,6 +94,7 @@ export const IPC_CHANNELS = {
   FLOW_LIST: 'flow:list',
   EXPORT_SCRIPTS: 'export:scripts',
   RUN_TESTS: 'test:run',
+  SHOW_REPORT: 'test:showReport',
 
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: 'assertion:pickStart',

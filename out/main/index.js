@@ -39,6 +39,7 @@ const IPC_CHANNELS = {
   FLOW_LIST: "flow:list",
   EXPORT_SCRIPTS: "export:scripts",
   RUN_TESTS: "test:run",
+  SHOW_REPORT: "test:showReport",
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: "assertion:pickStart",
   // Main → Renderer
@@ -1101,7 +1102,65 @@ function registerIpcHandlers(win) {
       child.on("close", (code) => resolve(code ?? 1));
     });
     win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 });
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.SHOW_REPORT, async () => {
+    const cwd = electron.app.isPackaged ? path.join(electron.app.getPath("userData")) : process.cwd();
+    await killProcessOnPort(9323);
     child_process.spawn("npx", ["playwright", "show-report"], { cwd, shell: true, detached: true });
+  });
+}
+function killProcessOnPort(port) {
+  return new Promise((resolve) => {
+    if (process.platform === "win32") {
+      const finder = child_process.spawn("cmd", ["/c", `netstat -ano | findstr :${port}`], { shell: false });
+      let output = "";
+      finder.stdout.on("data", (d) => {
+        output += d.toString();
+      });
+      finder.on("close", () => {
+        const pids = /* @__PURE__ */ new Set();
+        for (const line of output.split("\n")) {
+          if (/LISTENING/i.test(line)) {
+            const localAddr = line.trim().split(/\s+/)[1] ?? "";
+            if (localAddr.endsWith(`:${port}`)) {
+              const pid = line.trim().split(/\s+/).at(-1) ?? "";
+              if (/^\d+$/.test(pid)) pids.add(pid);
+            }
+          }
+        }
+        if (pids.size === 0) return resolve();
+        let remaining = pids.size;
+        const done = () => {
+          if (--remaining === 0) setTimeout(resolve, 300);
+        };
+        for (const pid of pids) {
+          const killer = child_process.spawn("taskkill", ["/F", "/PID", pid], { shell: true });
+          killer.on("close", done);
+          killer.on("error", done);
+        }
+      });
+      finder.on("error", () => resolve());
+    } else {
+      const finder = child_process.spawn("sh", ["-c", `lsof -ti :${port}`], { shell: false });
+      let output = "";
+      finder.stdout.on("data", (d) => {
+        output += d.toString();
+      });
+      finder.on("close", () => {
+        const pids = output.trim().split("\n").filter((p) => /^\d+$/.test(p));
+        if (pids.length === 0) return resolve();
+        let remaining = pids.length;
+        const done = () => {
+          if (--remaining === 0) setTimeout(resolve, 300);
+        };
+        for (const pid of pids) {
+          const killer = child_process.spawn("kill", ["-9", pid], { shell: false });
+          killer.on("close", done);
+          killer.on("error", done);
+        }
+      });
+      finder.on("error", () => resolve());
+    }
   });
 }
 function createWindow() {

@@ -13,6 +13,7 @@ const IPC_CHANNELS = {
   FLOW_LIST: "flow:list",
   EXPORT_SCRIPTS: "export:scripts",
   RUN_TESTS: "test:run",
+  SHOW_REPORT: "test:showReport",
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: "assertion:pickStart",
   // Main → Renderer
@@ -43,6 +44,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   exportScripts: (flow, config) => electron.ipcRenderer.invoke(IPC_CHANNELS.EXPORT_SCRIPTS, { flow, config }),
   // Run tests
   runTests: (flow, config) => electron.ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, config }),
+  showReport: () => electron.ipcRenderer.invoke(IPC_CHANNELS.SHOW_REPORT),
   // Assertion pick
   startAssertionPick: (assertionType) => electron.ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
   // Event listeners (Main → Renderer)

@@ -60,8 +60,24 @@ export function TestOutputModal({ lines, finished, onClose }: TestOutputModalPro
           }}
         >
           <span style={{ fontWeight: 600, fontSize: 14, color: '#e2e8f0' }}>執行所有測試</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: statusColor }}>{statusText}</span>
+            {finished &&(<button
+              onClick={() => window.electronAPI.showReport()}
+              disabled={finished === null}
+              style={{
+                padding: '4px 12px',
+                borderRadius: 6,
+                border: '1px solid #1d4ed8',
+                background: finished !== null ? '#1e40af' : 'transparent',
+                color: finished !== null ? '#bfdbfe' : '#475569',
+                fontSize: 12,
+                cursor: finished !== null ? 'pointer' : 'not-allowed',
+                opacity: finished !== null ? 1 : 0.5,
+              }}
+            >
+              顯示詳細報告
+            </button>)}
             {finished && (
               <button
                 onClick={onClose}
@@ -110,7 +126,7 @@ export function TestOutputModal({ lines, finished, onClose }: TestOutputModalPro
               flexShrink: 0,
             }}
           >
-            測試報告已在瀏覽器中開啟。點擊背景或按「關閉」以關閉此視窗。
+            點擊「顯示詳細報告」可開啟 Playwright HTML 報告。點擊背景或按「關閉」以關閉此視窗。
           </div>
         )}
       </div>

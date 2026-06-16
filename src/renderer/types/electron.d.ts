@@ -12,6 +12,7 @@ export interface ElectronAPI {
   listFlows: () => Promise<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt'>[]>
   exportScripts: (flow: Flow, config: ExportConfig) => Promise<string>
   runTests: (flow: Flow, config: ExportConfig) => Promise<void>
+  showReport: () => Promise<void>
   startAssertionPick: (assertionType: ActionType) => Promise<void>
   onActionCaptured: (cb: (action: Action) => void) => () => void
   onReplayNodeStart: (cb: (nodeId: string) => void) => () => void

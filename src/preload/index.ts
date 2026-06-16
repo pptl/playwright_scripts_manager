@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Run tests
   runTests: (flow: Flow, config: ExportConfig) =>
     ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, config }),
+  showReport: () => ipcRenderer.invoke(IPC_CHANNELS.SHOW_REPORT),
 
   // Assertion pick
   startAssertionPick: (assertionType: ActionType) =>

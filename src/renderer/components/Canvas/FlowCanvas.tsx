@@ -15,6 +15,7 @@ import 'reactflow/dist/style.css'
 import { useFlowStore } from '../../stores/flowStore'
 import { ActionNode } from './ActionNode'
 import { BranchEdge } from './BranchEdge'
+import { NodeContextMenu } from './NodeContextMenu'
 import type { ActionNodeData } from './ActionNode'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import type { FlowNode, NodePosition } from '@shared/types'
@@ -61,10 +62,10 @@ function computeTreeLayout(nodes: FlowNode[], rootNodeId: string): Map<string, N
 }
 
 function FlowCanvasInner() {
-  const { currentFlow, selectNode, selectedNodeId, isRecording, deleteNode } =
+  const { currentFlow, selectNode, selectedNodeId, isRecording, isReplaying, replaySpeed, deleteNode } =
     useFlowStore()
-  const { replayToNode } = usePlaywright()
-  const [replaySpeed] = useState(500)
+  const { replayToNode, startBranchRecording } = usePlaywright()
+  const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null)
 
   // Convert FlowNodes to React Flow nodes and edges
   const rfNodes: Node<ActionNodeData>[] = useMemo(() => {
@@ -128,28 +129,16 @@ function FlowCanvasInner() {
 
   const onPaneClick = useCallback(() => {
     selectNode(null)
+    setContextMenu(null)
   }, [selectNode])
 
   const onNodeContextMenu = useCallback(
     (event: React.MouseEvent, node: Node) => {
       event.preventDefault()
-      const action = window.prompt(
-        `節點: ${(node.data as ActionNodeData).flowNode.action.description}\n\n選擇動作:\n1 - 重播到此節點\n2 - 從此分支錄製\n3 - 刪除此節點\n\n輸入數字:`,
-      )
-      if (action === '1') {
-        replayToNode(node.id, replaySpeed)
-      } else if (action === '2') {
-        const label = window.prompt('輸入分支名稱:') ?? ''
-        // Start branch recording — handled by parent via store
-        // For now, select node and user can use toolbar
-        selectNode(node.id)
-      } else if (action === '3') {
-        if (window.confirm('確定要刪除此節點及其所有下游節點嗎?')) {
-          deleteNode(node.id)
-        }
-      }
+      selectNode(node.id)
+      setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY })
     },
-    [replayToNode, replaySpeed, selectNode, deleteNode],
+    [selectNode],
   )
 
   if (!currentFlow) {
@@ -171,6 +160,19 @@ function FlowCanvasInner() {
 
   return (
     <div style={{ flex: 1, position: 'relative' }}>
+      {contextMenu && (
+        <NodeContextMenu
+          nodeId={contextMenu.nodeId}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          onReplay={() => replayToNode(contextMenu.nodeId, replaySpeed)}
+          onBranchRecord={() => startBranchRecording(contextMenu.nodeId)}
+          onDelete={() => deleteNode(contextMenu.nodeId)}
+          isRecording={isRecording}
+          isReplaying={isReplaying}
+        />
+      )}
       {isRecording && (
         <div
           style={{

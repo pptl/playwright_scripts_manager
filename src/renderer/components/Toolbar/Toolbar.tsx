@@ -24,16 +24,12 @@ const btn = (label: string, onClick: () => void, disabled = false, danger = fals
 )
 
 export function Toolbar() {
-  const { currentFlow, isRecording, isReplaying, selectedNodeId } = useFlowStore()
-  const { startRecording, startBranchRecording, stopRecording, replayToNode } = usePlaywright()
+  const { currentFlow, isRecording, isReplaying, selectedNodeId, replaySpeed, setReplaySpeed } = useFlowStore()
+  const { startRecording, stopRecording } = usePlaywright()
   const { newFlow } = useFlowManager()
   const [showNewFlowDialog, setShowNewFlowDialog] = useState(false)
   const [newName, setNewName] = useState('')
   const [newURL, setNewURL] = useState('')
-  const [replaySpeed, setReplaySpeed] = useState(500)
-  const [replayError, setReplayError] = useState<string | null>(null)
-  const [isBranchReplaying, setIsBranchReplaying] = useState(false)
-
   const hasNodes = (currentFlow?.nodes.length ?? 0) > 0
 
   // Get the selected node's description for display
@@ -63,29 +59,6 @@ export function Toolbar() {
     }
   }
 
-  const handleReplay = async () => {
-    if (!selectedNodeId) return
-    setReplayError(null)
-    try {
-      await replayToNode(selectedNodeId, replaySpeed)
-    } catch (err) {
-      setReplayError(String(err))
-    }
-  }
-
-  const handleBranchRecord = async () => {
-    if (!selectedNodeId) return
-    setReplayError(null)
-    setIsBranchReplaying(true)
-    try {
-      await startBranchRecording(selectedNodeId)
-    } catch (err) {
-      setReplayError(String(err))
-    } finally {
-      setIsBranchReplaying(false)
-    }
-  }
-
   return (
     <div
       style={{
@@ -108,47 +81,23 @@ export function Toolbar() {
         ? btn('▶ 開始錄製', () => startRecording(), !currentFlow)
         : btn('⏹ 停止錄製', () => stopRecording(), false, true)}
 
-      {btn(
-        isReplaying ? '重播中...' : '▶ 重播到選取節點',
-        handleReplay,
-        !selectedNodeId || isRecording || isReplaying,
-      )}
-
-      {btn(
-        isBranchReplaying ? '⟳ 重播中...' : '⑂ 從此節點分支錄製',
-        handleBranchRecord,
-        !selectedNodeId || isRecording || isReplaying || isBranchReplaying,
-      )}
-
       {btn('匯出腳本', handleExport, !hasNodes || isRecording)}
 
       {/* Status pill */}
       <div style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-        {isBranchReplaying && (
-          <span style={pillStyle('#1e3a5f', '#93c5fd')}>⟳ 靜默重播中，請稍候...</span>
-        )}
-        {isReplaying && !isBranchReplaying && (
+        {isReplaying && (
           <span style={pillStyle('#1d4ed8', '#93c5fd')}>⟳ 重播中</span>
         )}
         {isRecording && (
           <span style={pillStyle('#7f1d1d', '#fca5a5')}>● 錄製中</span>
         )}
-        {selectedLabel && !isRecording && !isReplaying && !isBranchReplaying && (
+        {selectedLabel && !isRecording && !isReplaying && (
           <span style={pillStyle('#14532d', '#86efac')} title={selectedLabel}>
             ✓ {selectedLabel.length > 24 ? selectedLabel.slice(0, 24) + '…' : selectedLabel}
           </span>
         )}
         {!selectedNodeId && !isRecording && !isReplaying && currentFlow && (
-          <span style={{ fontSize: 11, color: '#475569' }}>點擊節點以選取</span>
-        )}
-        {replayError && (
-          <span
-            style={pillStyle('#7f1d1d', '#fca5a5')}
-            title={replayError}
-            onClick={() => setReplayError(null)}
-          >
-            ✕ 錯誤: {replayError.slice(0, 40)}
-          </span>
+          <span style={{ fontSize: 11, color: '#475569' }}>右鍵點擊節點以操作</span>
         )}
       </div>
 

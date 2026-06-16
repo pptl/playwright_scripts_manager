@@ -17,6 +17,7 @@ interface FlowStore {
   isReplaying: boolean
   /** The node ID that new recorded actions should be appended to */
   recordingHeadId: string | null
+  replaySpeed: number
 
   // Flow management
   setFlows: (flows: FlowStore['flows']) => void
@@ -38,6 +39,7 @@ interface FlowStore {
   // Recording flag
   setIsRecording: (v: boolean) => void
   setIsReplaying: (v: boolean) => void
+  setReplaySpeed: (ms: number) => void
 }
 
 export const useFlowStore = create<FlowStore>((set, get) => ({
@@ -49,6 +51,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   isRecording: false,
   isReplaying: false,
   recordingHeadId: null,
+  replaySpeed: 500,
 
   setFlows: (flows) => set({ flows }),
 
@@ -166,4 +169,5 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
 
   setIsRecording: (v) => set({ isRecording: v }),
   setIsReplaying: (v) => set({ isReplaying: v }),
+  setReplaySpeed: (ms) => set({ replaySpeed: ms }),
 }))

@@ -1,5 +1,6 @@
 import { Page, Locator } from 'playwright-core'
 import type { Action, FlowNode } from '../../shared/types'
+import { resolveValue } from '../../shared/variableResolver'
 
 type NodeStartCallback = (nodeId: string) => void
 type NodeCompleteCallback = (nodeId: string, success: boolean, error?: string) => void
@@ -56,18 +57,19 @@ export class Replayer {
   }
 
   private async executeAction(action: Action): Promise<void> {
+    const val = action.value != null ? resolveValue(action.value) : undefined
     switch (action.type) {
       case 'goto':
-        await this.page.goto(action.value!)
+        await this.page.goto(val!)
         break
       case 'click':
         await this.getLocator(action).click()
         break
       case 'fill':
-        await this.getLocator(action).fill(action.value ?? '')
+        await this.getLocator(action).fill(val ?? '')
         break
       case 'selectOption':
-        await this.getLocator(action).selectOption(action.value ?? '')
+        await this.getLocator(action).selectOption(val ?? '')
         break
       case 'check':
         await this.getLocator(action).check()
@@ -78,9 +80,9 @@ export class Replayer {
       case 'press':
         // press can be a keyboard shortcut (no locator) or locator.press()
         if (action.locatorExpr) {
-          await this.getLocator(action).press(action.value ?? '')
+          await this.getLocator(action).press(val ?? '')
         } else {
-          await this.page.keyboard.press(action.value ?? '')
+          await this.page.keyboard.press(val ?? '')
         }
         break
       case 'wait':

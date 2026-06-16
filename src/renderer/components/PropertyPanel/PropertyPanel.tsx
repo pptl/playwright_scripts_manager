@@ -80,6 +80,9 @@ export function PropertyPanel() {
               onChange={(e) => setValue(e.target.value)}
               style={inputStyle}
             />
+            <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>
+              可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code>
+            </div>
           </Field>
         )}
 

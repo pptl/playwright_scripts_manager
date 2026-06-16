@@ -585,6 +585,48 @@ class Recorder {
     return this.recording;
   }
 }
+function pad(n, width = 2) {
+  return String(n).padStart(width, "0");
+}
+function generateRandomText(len = 8) {
+  return Math.random().toString(36).substring(2, 2 + len).padEnd(len, "0");
+}
+function generateRandomNumber(len = 8) {
+  const min = Math.pow(10, len - 1);
+  const max = Math.pow(10, len) - 1;
+  return String(Math.floor(Math.random() * (max - min + 1)) + min);
+}
+function generateTimestamp() {
+  const d = /* @__PURE__ */ new Date();
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}${pad(d.getMilliseconds(), 3)}`;
+}
+function resolveValue(value) {
+  return value.replace(/\{\{randomText\}\}/g, () => generateRandomText()).replace(/\{\{randomNumber\}\}/g, () => generateRandomNumber()).replace(/\{\{timestamp\}\}/g, () => generateTimestamp());
+}
+function hasVariables(value) {
+  return /\{\{.+?\}\}/.test(value);
+}
+function valueToCodeExpr(value) {
+  if (!hasVariables(value)) {
+    return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  }
+  const inner = value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{randomText\}\}/g, "${_ftRandomText()}").replace(/\{\{randomNumber\}\}/g, "${_ftRandomNumber()}").replace(/\{\{timestamp\}\}/g, "${_ftTimestamp()}");
+  return "`" + inner + "`";
+}
+const VARIABLE_HELPERS_CODE = `
+function _ftRandomText(len = 8) {
+  return Math.random().toString(36).substring(2, 2 + len).padEnd(len, '0');
+}
+function _ftRandomNumber(len = 8) {
+  const min = Math.pow(10, len - 1);
+  return String(Math.floor(Math.random() * (Math.pow(10, len) - min)) + min);
+}
+function _ftTimestamp() {
+  const d = new Date();
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  return \`\${d.getFullYear()}\${p(d.getMonth() + 1)}\${p(d.getDate())}\${p(d.getHours())}\${p(d.getMinutes())}\${p(d.getSeconds())}\${p(d.getMilliseconds(), 3)}\`;
+}
+`;
 class Replayer {
   page;
   constructor(page) {
@@ -622,18 +664,19 @@ class Replayer {
     return this.page.locator(action.selector);
   }
   async executeAction(action) {
+    const val = action.value != null ? resolveValue(action.value) : void 0;
     switch (action.type) {
       case "goto":
-        await this.page.goto(action.value);
+        await this.page.goto(val);
         break;
       case "click":
         await this.getLocator(action).click();
         break;
       case "fill":
-        await this.getLocator(action).fill(action.value ?? "");
+        await this.getLocator(action).fill(val ?? "");
         break;
       case "selectOption":
-        await this.getLocator(action).selectOption(action.value ?? "");
+        await this.getLocator(action).selectOption(val ?? "");
         break;
       case "check":
         await this.getLocator(action).check();
@@ -643,9 +686,9 @@ class Replayer {
         break;
       case "press":
         if (action.locatorExpr) {
-          await this.getLocator(action).press(action.value ?? "");
+          await this.getLocator(action).press(val ?? "");
         } else {
-          await this.page.keyboard.press(action.value ?? "");
+          await this.page.keyboard.press(val ?? "");
         }
         break;
       case "wait":
@@ -803,6 +846,7 @@ class ScriptExporter {
     return paths;
   }
   static generateSpec(flow, paths, nodeMap, config, helperImport) {
+    const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value));
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
       const steps = path2.nodeIds.map((id) => nodeMap.get(id)).filter(Boolean);
@@ -824,6 +868,7 @@ ${stepCode}
     return [
       `import { test, expect } from '@playwright/test';`,
       helperImport,
+      usesVariables ? VARIABLE_HELPERS_CODE : "",
       "",
       `test.describe('${flow.name}', () => {`,
       "",
@@ -860,27 +905,27 @@ ${stepCode}
     }
     switch (action.type) {
       case "goto":
-        return `await page.goto('${action.value}');`;
+        return `await page.goto(${valueToCodeExpr(action.value ?? "")});`;
       case "click":
         return `await ${loc}.click();`;
       case "fill":
-        return `await ${loc}.fill('${(action.value ?? "").replace(/'/g, "\\'")}');`;
+        return `await ${loc}.fill(${valueToCodeExpr(action.value ?? "")});`;
       case "selectOption":
-        return `await ${loc}.selectOption('${(action.value ?? "").replace(/'/g, "\\'")}');`;
+        return `await ${loc}.selectOption(${valueToCodeExpr(action.value ?? "")});`;
       case "check":
         return `await ${loc}.check();`;
       case "uncheck":
         return `await ${loc}.uncheck();`;
       case "press":
-        return action.locatorExpr ? `await ${loc}.press('${action.value ?? ""}');` : `await page.keyboard.press('${action.value ?? ""}');`;
+        return action.locatorExpr ? `await ${loc}.press(${valueToCodeExpr(action.value ?? "")});` : `await page.keyboard.press(${valueToCodeExpr(action.value ?? "")});`;
       case "wait":
         return `await ${loc}.waitFor({ state: 'visible' });`;
       case "assertVisible":
         return `await expect(${loc}).toBeVisible();`;
       case "assertText":
-        return `await expect(${loc}).toContainText('${(action.value ?? "").replace(/'/g, "\\'")}');`;
+        return `await expect(${loc}).toContainText(${valueToCodeExpr(action.value ?? "")});`;
       case "assertValue":
-        return `await expect(${loc}).toHaveValue('${(action.value ?? "").replace(/'/g, "\\'")}');`;
+        return `await expect(${loc}).toHaveValue(${valueToCodeExpr(action.value ?? "")});`;
       default:
         return `// TODO: ${action.type}`;
     }

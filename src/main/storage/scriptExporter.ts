@@ -2,6 +2,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import type { Flow, FlowNode, ExportConfig, TestPath } from '../../shared/types'
+import { hasVariables, valueToCodeExpr, VARIABLE_HELPERS_CODE } from '../../shared/variableResolver'
 
 function exportsDir(): string {
   return app.isPackaged
@@ -75,6 +76,8 @@ export class ScriptExporter {
     config: ExportConfig,
     helperImport: string,
   ): string {
+    const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value))
+
     const tests = paths
       .map((path, idx) => {
         const testName = path.name || `測試路徑 ${idx + 1}`
@@ -99,6 +102,7 @@ export class ScriptExporter {
     return [
       `import { test, expect } from '@playwright/test';`,
       helperImport,
+      usesVariables ? VARIABLE_HELPERS_CODE : '',
       '',
       `test.describe('${flow.name}', () => {`,
       '',
@@ -157,13 +161,13 @@ export class ScriptExporter {
 
     switch (action.type) {
       case 'goto':
-        return `await page.goto('${action.value}');`
+        return `await page.goto(${valueToCodeExpr(action.value ?? '')});`
       case 'click':
         return `await ${loc}.click();`
       case 'fill':
-        return `await ${loc}.fill('${(action.value ?? '').replace(/'/g, "\\'")}');`
+        return `await ${loc}.fill(${valueToCodeExpr(action.value ?? '')});`
       case 'selectOption':
-        return `await ${loc}.selectOption('${(action.value ?? '').replace(/'/g, "\\'")}');`
+        return `await ${loc}.selectOption(${valueToCodeExpr(action.value ?? '')});`
       case 'check':
         return `await ${loc}.check();`
       case 'uncheck':
@@ -171,16 +175,16 @@ export class ScriptExporter {
       case 'press':
         // keyboard.press has no locator
         return action.locatorExpr
-          ? `await ${loc}.press('${action.value ?? ''}');`
-          : `await page.keyboard.press('${action.value ?? ''}');`
+          ? `await ${loc}.press(${valueToCodeExpr(action.value ?? '')});`
+          : `await page.keyboard.press(${valueToCodeExpr(action.value ?? '')});`
       case 'wait':
         return `await ${loc}.waitFor({ state: 'visible' });`
       case 'assertVisible':
         return `await expect(${loc}).toBeVisible();`
       case 'assertText':
-        return `await expect(${loc}).toContainText('${(action.value ?? '').replace(/'/g, "\\'")}');`
+        return `await expect(${loc}).toContainText(${valueToCodeExpr(action.value ?? '')});`
       case 'assertValue':
-        return `await expect(${loc}).toHaveValue('${(action.value ?? '').replace(/'/g, "\\'")}');`
+        return `await expect(${loc}).toHaveValue(${valueToCodeExpr(action.value ?? '')});`
       default:
         return `// TODO: ${action.type}`
     }

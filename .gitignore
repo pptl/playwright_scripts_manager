@@ -5,3 +5,5 @@ release/
 *.local
 test-results/
 playwright-report/
+exports/*
+!exports/.gitkeep

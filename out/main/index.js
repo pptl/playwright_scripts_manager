@@ -1,6 +1,7 @@
 "use strict";
 const electron = require("electron");
 const path = require("path");
+const child_process = require("child_process");
 const playwrightCore = require("playwright-core");
 const uuid = require("uuid");
 const fs = require("fs");
@@ -37,8 +38,11 @@ const IPC_CHANNELS = {
   FLOW_LOAD: "flow:load",
   FLOW_LIST: "flow:list",
   EXPORT_SCRIPTS: "export:scripts",
+  RUN_TESTS: "test:run",
   // Main → Renderer
   ACTION_CAPTURED: "action:captured",
+  TEST_OUTPUT: "test:output",
+  TEST_FINISHED: "test:finished",
   REPLAY_NODE_START: "replay:nodeStart",
   REPLAY_NODE_COMPLETE: "replay:nodeComplete",
   REPLAY_FINISHED: "replay:finished",
@@ -825,6 +829,42 @@ function registerIpcHandlers(win) {
   });
   electron.ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload) => {
     return await ScriptExporter.export(payload.flow, payload.config);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.RUN_TESTS, async (_e, payload) => {
+    const cwd = electron.app.isPackaged ? path.join(electron.app.getPath("userData")) : process.cwd();
+    let specPath;
+    try {
+      specPath = await ScriptExporter.export(payload.flow, payload.config);
+      win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `✓ 腳本已匯出: ${specPath}
+
+`);
+    } catch (err) {
+      win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `✗ 匯出失敗: ${String(err)}
+`);
+      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode: 1, passed: false });
+      return;
+    }
+    const relSpecPath = path.relative(cwd, specPath).replace(/\\/g, "/");
+    win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${relSpecPath}
+
+`);
+    const exitCode = await new Promise((resolve) => {
+      const child = child_process.spawn("npx", ["playwright", "test", relSpecPath, "--reporter=list"], {
+        cwd,
+        shell: true
+      });
+      child.stdout.on(
+        "data",
+        (d) => win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, d.toString())
+      );
+      child.stderr.on(
+        "data",
+        (d) => win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, d.toString())
+      );
+      child.on("close", (code) => resolve(code ?? 1));
+    });
+    win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 });
+    child_process.spawn("npx", ["playwright", "show-report"], { cwd, shell: true, detached: true });
   });
 }
 function createWindow() {

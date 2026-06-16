@@ -7,6 +7,7 @@ import type {
   ExportConfig,
   ReplayNodeCompletePayload,
   RecordingStartPayload,
+  TestFinishedPayload,
 } from '../shared/types'
 
 // Expose a type-safe API to the renderer via window.electronAPI
@@ -34,6 +35,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportScripts: (flow: Flow, config: ExportConfig) =>
     ipcRenderer.invoke(IPC_CHANNELS.EXPORT_SCRIPTS, { flow, config }),
 
+  // Run tests
+  runTests: (flow: Flow, config: ExportConfig) =>
+    ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, config }),
+
   // Event listeners (Main → Renderer)
   onActionCaptured: (cb: (action: Action) => void) => {
     const handler = (_: Electron.IpcRendererEvent, action: Action) => cb(action)
@@ -60,5 +65,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_: Electron.IpcRendererEvent, error: string) => cb(error)
     ipcRenderer.on(IPC_CHANNELS.REPLAY_ERROR, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.REPLAY_ERROR, handler)
+  },
+  onTestOutput: (cb: (line: string) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, line: string) => cb(line)
+    ipcRenderer.on(IPC_CHANNELS.TEST_OUTPUT, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TEST_OUTPUT, handler)
+  },
+  onTestFinished: (cb: (payload: TestFinishedPayload) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: TestFinishedPayload) => cb(payload)
+    ipcRenderer.on(IPC_CHANNELS.TEST_FINISHED, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.TEST_FINISHED, handler)
   },
 })

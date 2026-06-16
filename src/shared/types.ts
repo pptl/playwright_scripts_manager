@@ -90,9 +90,12 @@ export const IPC_CHANNELS = {
   FLOW_LOAD: 'flow:load',
   FLOW_LIST: 'flow:list',
   EXPORT_SCRIPTS: 'export:scripts',
+  RUN_TESTS: 'test:run',
 
   // Main → Renderer
   ACTION_CAPTURED: 'action:captured',
+  TEST_OUTPUT: 'test:output',
+  TEST_FINISHED: 'test:finished',
   REPLAY_NODE_START: 'replay:nodeStart',
   REPLAY_NODE_COMPLETE: 'replay:nodeComplete',
   REPLAY_FINISHED: 'replay:finished',
@@ -125,6 +128,11 @@ export interface FlowSavePayload {
 
 export interface FlowLoadPayload {
   flowId: string
+}
+
+export interface TestFinishedPayload {
+  exitCode: number
+  passed: boolean
 }
 
 export interface RecordingStartPayload {

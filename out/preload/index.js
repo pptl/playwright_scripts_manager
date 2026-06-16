@@ -12,8 +12,11 @@ const IPC_CHANNELS = {
   FLOW_LOAD: "flow:load",
   FLOW_LIST: "flow:list",
   EXPORT_SCRIPTS: "export:scripts",
+  RUN_TESTS: "test:run",
   // Main → Renderer
   ACTION_CAPTURED: "action:captured",
+  TEST_OUTPUT: "test:output",
+  TEST_FINISHED: "test:finished",
   REPLAY_NODE_START: "replay:nodeStart",
   REPLAY_NODE_COMPLETE: "replay:nodeComplete",
   REPLAY_FINISHED: "replay:finished",
@@ -35,6 +38,8 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   listFlows: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_LIST),
   // Export
   exportScripts: (flow, config) => electron.ipcRenderer.invoke(IPC_CHANNELS.EXPORT_SCRIPTS, { flow, config }),
+  // Run tests
+  runTests: (flow, config) => electron.ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, config }),
   // Event listeners (Main → Renderer)
   onActionCaptured: (cb) => {
     const handler = (_, action) => cb(action);
@@ -60,5 +65,15 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_, error) => cb(error);
     electron.ipcRenderer.on(IPC_CHANNELS.REPLAY_ERROR, handler);
     return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.REPLAY_ERROR, handler);
+  },
+  onTestOutput: (cb) => {
+    const handler = (_, line) => cb(line);
+    electron.ipcRenderer.on(IPC_CHANNELS.TEST_OUTPUT, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.TEST_OUTPUT, handler);
+  },
+  onTestFinished: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    electron.ipcRenderer.on(IPC_CHANNELS.TEST_FINISHED, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.TEST_FINISHED, handler);
   }
 });

@@ -1,8 +1,9 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import { useFlowManager } from '../../hooks/useFlowStore'
-import type { ExportConfig } from '../../../../shared/types'
+import { TestOutputModal } from './TestOutputModal'
+import type { ExportConfig, TestFinishedPayload } from '../../../../shared/types'
 
 const btn = (label: string, onClick: () => void, disabled = false, danger = false) => (
   <button
@@ -30,7 +31,27 @@ export function Toolbar() {
   const [showNewFlowDialog, setShowNewFlowDialog] = useState(false)
   const [newName, setNewName] = useState('')
   const [newURL, setNewURL] = useState('')
+  const [isRunningTests, setIsRunningTests] = useState(false)
+  const [showTestModal, setShowTestModal] = useState(false)
+  const [testLines, setTestLines] = useState<string[]>([])
+  const [testFinished, setTestFinished] = useState<TestFinishedPayload | null>(null)
+  const testLinesRef = useRef<string[]>([])
   const hasNodes = (currentFlow?.nodes.length ?? 0) > 0
+
+  useEffect(() => {
+    const offOutput = window.electronAPI.onTestOutput((line) => {
+      testLinesRef.current = [...testLinesRef.current, line]
+      setTestLines([...testLinesRef.current])
+    })
+    const offFinished = window.electronAPI.onTestFinished((payload) => {
+      setTestFinished(payload)
+      setIsRunningTests(false)
+    })
+    return () => {
+      offOutput()
+      offFinished()
+    }
+  }, [])
 
   // Get the selected node's description for display
   const selectedNode = currentFlow?.nodes.find((n) => n.id === selectedNodeId)
@@ -59,6 +80,17 @@ export function Toolbar() {
     }
   }
 
+  const handleRunTests = async () => {
+    if (!currentFlow || isRunningTests) return
+    const config: ExportConfig = { outputDir: '', helperFunctions: false, useTestStep: true }
+    testLinesRef.current = []
+    setTestLines([])
+    setTestFinished(null)
+    setIsRunningTests(true)
+    setShowTestModal(true)
+    await window.electronAPI.runTests(currentFlow, config)
+  }
+
   return (
     <div
       style={{
@@ -82,6 +114,12 @@ export function Toolbar() {
         : btn('⏹ 停止錄製', () => stopRecording(), false, true)}
 
       {btn('匯出腳本', handleExport, !hasNodes || isRecording)}
+
+      {btn(
+        isRunningTests ? '⟳ 測試執行中...' : '▶ 執行所有測試',
+        handleRunTests,
+        !hasNodes || isRecording || isReplaying || isRunningTests,
+      )}
 
       {/* Status pill */}
       <div style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -183,6 +221,15 @@ export function Toolbar() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Test Output Modal */}
+      {showTestModal && (
+        <TestOutputModal
+          lines={testLines}
+          finished={testFinished}
+          onClose={() => setShowTestModal(false)}
+        />
       )}
     </div>
   )

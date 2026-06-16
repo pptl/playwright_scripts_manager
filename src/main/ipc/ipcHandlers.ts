@@ -1,4 +1,6 @@
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow, ipcMain, app } from 'electron'
+import { spawn } from 'child_process'
+import { join, relative } from 'path'
 import { IPC_CHANNELS } from '../../shared/types'
 import type {
   ReplayToNodePayload,
@@ -115,5 +117,44 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   // ── Export ───────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload: ExportScriptsPayload) => {
     return await ScriptExporter.export(payload.flow, payload.config)
+  })
+
+  // ── Run Tests ────────────────────────────────────────────
+  ipcMain.handle(IPC_CHANNELS.RUN_TESTS, async (_e, payload: ExportScriptsPayload) => {
+    const cwd = app.isPackaged ? join(app.getPath('userData')) : process.cwd()
+
+    // 1. Export script
+    let specPath: string
+    try {
+      specPath = await ScriptExporter.export(payload.flow, payload.config)
+      win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `✓ 腳本已匯出: ${specPath}\n\n`)
+    } catch (err) {
+      win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `✗ 匯出失敗: ${String(err)}\n`)
+      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode: 1, passed: false })
+      return
+    }
+
+    // 2. Run playwright test (use relative path with forward slashes — absolute Windows
+    //    paths with backslashes are treated as broken regex by Playwright's test filter)
+    const relSpecPath = relative(cwd, specPath).replace(/\\/g, '/')
+    win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${relSpecPath}\n\n`)
+    const exitCode = await new Promise<number>((resolve) => {
+      const child = spawn('npx', ['playwright', 'test', relSpecPath, '--reporter=list'], {
+        cwd,
+        shell: true,
+      })
+      child.stdout.on('data', (d: Buffer) =>
+        win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, d.toString()),
+      )
+      child.stderr.on('data', (d: Buffer) =>
+        win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, d.toString()),
+      )
+      child.on('close', (code) => resolve(code ?? 1))
+    })
+
+    win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 })
+
+    // 3. Show HTML report
+    spawn('npx', ['playwright', 'show-report'], { cwd, shell: true, detached: true })
   })
 }

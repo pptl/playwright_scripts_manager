@@ -2,7 +2,7 @@
   "id": "70e57176-4265-4f8b-a8c7-7690e8cfb0b4",
   "name": "flow3",
   "createdAt": "2026-06-15T09:41:29.832Z",
-  "updatedAt": "2026-06-15T09:43:20.977Z",
+  "updatedAt": "2026-06-16T03:56:23.868Z",
   "baseURL": "https://esd.genesys-tech.com/",
   "nodes": [
     {
@@ -110,7 +110,6 @@
       "parentId": "62a4b7f2-041a-4ed4-a7bb-6943d2d31d96",
       "childIds": [
         "1e49766f-1e1d-4715-a81c-ee3cc7c2bac5",
-        "ef545cdf-9aca-4159-a2e2-91829e525496",
         "31223f83-b1f8-4982-9015-7907f158ad69"
       ]
     },
@@ -194,67 +193,6 @@
         "y": 690
       },
       "parentId": "e0ab0998-bbec-4984-b5c7-729996a95dbc",
-      "childIds": []
-    },
-    {
-      "id": "ef545cdf-9aca-4159-a2e2-91829e525496",
-      "action": {
-        "id": "ef545cdf-9aca-4159-a2e2-91829e525496",
-        "type": "goto",
-        "selector": "",
-        "value": "https://esd.genesys-tech.com/Index/Home",
-        "description": "導航到 https://esd.genesys-tech.com/Index/Home",
-        "timestamp": 1781516545119,
-        "url": "https://esd.genesys-tech.com/Index/Home",
-        "isPageNavigation": true
-      },
-      "position": {
-        "x": 520,
-        "y": 450
-      },
-      "parentId": "5ac1837f-76b9-4630-9fe6-5121b6519bb6",
-      "childIds": [
-        "66e9b684-9431-42d5-ac7c-38a31da58c04"
-      ]
-    },
-    {
-      "id": "66e9b684-9431-42d5-ac7c-38a31da58c04",
-      "action": {
-        "id": "66e9b684-9431-42d5-ac7c-38a31da58c04",
-        "type": "click",
-        "selector": "div",
-        "locatorExpr": "getByRole('button', { name: '車型管理' })",
-        "description": "點擊「車型管理」",
-        "timestamp": 1781516547800,
-        "url": "https://esd.genesys-tech.com/Index/Home",
-        "isPageNavigation": false
-      },
-      "position": {
-        "x": 520,
-        "y": 530
-      },
-      "parentId": "ef545cdf-9aca-4159-a2e2-91829e525496",
-      "childIds": [
-        "43d2cc66-5b8a-4d01-8ec1-e8ae4350585c"
-      ]
-    },
-    {
-      "id": "43d2cc66-5b8a-4d01-8ec1-e8ae4350585c",
-      "action": {
-        "id": "43d2cc66-5b8a-4d01-8ec1-e8ae4350585c",
-        "type": "click",
-        "selector": "div",
-        "locatorExpr": "getByRole('button', { name: '價格設定總覽 ❐' })",
-        "description": "點擊「價格設定總覽 ❐」",
-        "timestamp": 1781516548287,
-        "url": "https://esd.genesys-tech.com/Index/Home",
-        "isPageNavigation": false
-      },
-      "position": {
-        "x": 520,
-        "y": 610
-      },
-      "parentId": "66e9b684-9431-42d5-ac7c-38a31da58c04",
       "childIds": []
     },
     {

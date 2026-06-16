@@ -168,7 +168,11 @@ function FlowCanvasInner() {
           onClose={() => setContextMenu(null)}
           onReplay={() => replayToNode(contextMenu.nodeId, replaySpeed)}
           onBranchRecord={() => startBranchRecording(contextMenu.nodeId)}
-          onDelete={() => deleteNode(contextMenu.nodeId)}
+          onDelete={async () => {
+            deleteNode(contextMenu.nodeId)
+            const updated = useFlowStore.getState().currentFlow
+            if (updated) await window.electronAPI.saveFlow(updated)
+          }}
           isRecording={isRecording}
           isReplaying={isReplaying}
         />

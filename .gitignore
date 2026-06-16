@@ -7,3 +7,5 @@ test-results/
 playwright-report/
 exports/*
 !exports/.gitkeep
+flows/*
+!flows/.gitkeep

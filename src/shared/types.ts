@@ -10,6 +10,9 @@ export type ActionType =
   | 'press'
   | 'upload'
   | 'wait'
+  | 'assertVisible'
+  | 'assertText'
+  | 'assertValue'
 
 export interface Assertion {
   type: 'text' | 'visible' | 'url' | 'count'
@@ -92,7 +95,11 @@ export const IPC_CHANNELS = {
   EXPORT_SCRIPTS: 'export:scripts',
   RUN_TESTS: 'test:run',
 
+  // Renderer → Main (assertion pick)
+  START_ASSERTION_PICK: 'assertion:pickStart',
+
   // Main → Renderer
+  ASSERTION_PICK_CANCELLED: 'assertion:pickCancelled',
   ACTION_CAPTURED: 'action:captured',
   TEST_OUTPUT: 'test:output',
   TEST_FINISHED: 'test:finished',

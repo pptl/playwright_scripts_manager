@@ -8,6 +8,7 @@ import type {
   FlowSavePayload,
   FlowLoadPayload,
   RecordingStartPayload,
+  ActionType,
 } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
 import { Recorder } from '../playwright/recorder'
@@ -71,6 +72,14 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.RECORDING_STOP, async () => {
     await recorder?.stop()
     recorder = null
+  })
+
+  ipcMain.handle(IPC_CHANNELS.START_ASSERTION_PICK, async (_e, assertionType: ActionType) => {
+    if (!recorder) return
+    await recorder.startAssertionPick(
+      assertionType as 'assertVisible' | 'assertText' | 'assertValue',
+      () => win.webContents.send(IPC_CHANNELS.ASSERTION_PICK_CANCELLED),
+    )
   })
 
   // ── Replay ───────────────────────────────────────────────
@@ -139,7 +148,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     const relSpecPath = relative(cwd, specPath).replace(/\\/g, '/')
     win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${relSpecPath}\n\n`)
     const exitCode = await new Promise<number>((resolve) => {
-      const child = spawn('npx', ['playwright', 'test', relSpecPath, '--reporter=list'], {
+      const child = spawn('npx', ['playwright', 'test', relSpecPath, '--reporter=list,html'], {
         cwd,
         shell: true,
       })

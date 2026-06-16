@@ -39,7 +39,10 @@ const IPC_CHANNELS = {
   FLOW_LIST: "flow:list",
   EXPORT_SCRIPTS: "export:scripts",
   RUN_TESTS: "test:run",
+  // Renderer → Main (assertion pick)
+  START_ASSERTION_PICK: "assertion:pickStart",
   // Main → Renderer
+  ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
   TEST_OUTPUT: "test:output",
   TEST_FINISHED: "test:finished",
@@ -277,6 +280,146 @@ function getDOMCaptureScript() {
     }, true);
   };
 }
+function generateAssertDescription(data) {
+  const q = `['"]([^'"]+)['"]`;
+  const patterns = [
+    new RegExp(`\\bname:\\s*${q}`),
+    new RegExp(`getByRole[^(]*\\([^,]+,\\s*\\{[^}]*name:\\s*${q}`),
+    new RegExp(`getByLabel\\(${q}`),
+    new RegExp(`getByPlaceholder\\(${q}`),
+    new RegExp(`getByTestId\\(${q}`),
+    new RegExp(`getByText\\(${q}`),
+    new RegExp(`getByRole\\(${q}`)
+  ];
+  let label = data.locatorExpr;
+  for (const re of patterns) {
+    const m = data.locatorExpr.match(re);
+    if (m) {
+      label = m[1];
+      break;
+    }
+  }
+  if (label === data.locatorExpr && data.selector) label = data.selector;
+  switch (data.type) {
+    case "assertVisible":
+      return `驗證「${label}」可見`;
+    case "assertText":
+      return `驗證「${label}」文字包含「${data.value ?? ""}」`;
+    case "assertValue":
+      return `驗證「${label}」值為「${data.value ?? ""}」`;
+  }
+}
+function getAssertionPickScript(assertionType) {
+  return `(function(){
+  var assertionType = ${JSON.stringify(assertionType)};
+  var existing = document.getElementById('__ft_pick_overlay');
+  if (existing) existing.remove();
+  var existingTip = document.getElementById('__ft_pick_tooltip');
+  if (existingTip) existingTip.remove();
+
+  var highlighted = null;
+  var prevOutline = '';
+  var prevOutlineOffset = '';
+
+  function generateCSSSelector(el) {
+    var testId = el.getAttribute('data-testid');
+    if (testId) return '[data-testid="' + testId + '"]';
+    if (el.id) return '#' + el.id;
+    var aria = el.getAttribute('aria-label');
+    if (aria) return '[aria-label="' + aria.replace(/"/g, '\\\\"') + '"]';
+    var name = el.getAttribute('name');
+    if (name) return '[name="' + name.replace(/"/g, '\\\\"') + '"]';
+    var tag = el.tagName.toLowerCase();
+    var type = (el.type || '').toLowerCase();
+    return (type && !['text', ''].includes(type)) ? tag + '[type="' + type + '"]' : tag;
+  }
+
+  function getLocatorExpr(el) {
+    try {
+      var loc = window.__ftGetLocator && window.__ftGetLocator(el);
+      if (loc) return loc;
+    } catch(e) {}
+    return 'locator(' + JSON.stringify(generateCSSSelector(el)) + ')';
+  }
+
+  function clearHighlight() {
+    if (highlighted) {
+      highlighted.style.outline = prevOutline;
+      highlighted.style.outlineOffset = prevOutlineOffset;
+      highlighted = null;
+    }
+  }
+
+  function setHighlight(el) {
+    if (el === highlighted) return;
+    clearHighlight();
+    highlighted = el;
+    prevOutline = el.style.outline || '';
+    prevOutlineOffset = el.style.outlineOffset || '';
+    el.style.outline = '2px solid #22c55e';
+    el.style.outlineOffset = '2px';
+  }
+
+  var overlay = document.createElement('div');
+  overlay.id = '__ft_pick_overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:transparent;';
+  document.documentElement.appendChild(overlay);
+
+  var tooltip = document.createElement('div');
+  tooltip.id = '__ft_pick_tooltip';
+  tooltip.style.cssText = 'position:fixed;z-index:2147483647;padding:4px 8px;background:#0f172a;color:#22c55e;border:1px solid #22c55e;border-radius:4px;font-size:11px;font-family:monospace;pointer-events:none;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none;';
+  document.documentElement.appendChild(tooltip);
+
+  overlay.addEventListener('mousemove', function(e) {
+    overlay.style.display = 'none';
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    overlay.style.display = '';
+    if (!el || el === overlay || el === tooltip) return;
+    setHighlight(el);
+    tooltip.textContent = getLocatorExpr(el);
+    var tx = Math.min(e.clientX + 14, window.innerWidth - 370);
+    var ty = e.clientY + 22;
+    if (ty + 30 > window.innerHeight) ty = e.clientY - 32;
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top = ty + 'px';
+    tooltip.style.display = 'block';
+  });
+
+  overlay.addEventListener('mouseleave', function() {
+    tooltip.style.display = 'none';
+  });
+
+  overlay.addEventListener('click', function(e) {
+    overlay.style.display = 'none';
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    overlay.remove();
+    tooltip.remove();
+    clearHighlight();
+    if (!el) return;
+    var selector = generateCSSSelector(el);
+    var locatorExpr = getLocatorExpr(el);
+    var value;
+    if (assertionType === 'assertText') {
+      value = (el.textContent || '').trim().slice(0, 500);
+    } else if (assertionType === 'assertValue') {
+      value = el.value !== undefined ? String(el.value) : '';
+    }
+    try {
+      window.__flowtest_assert_report({ type: assertionType, selector: selector, locatorExpr: locatorExpr, value: value, url: window.location.href });
+    } catch(e) {}
+  });
+
+  document.addEventListener('keydown', function escHandler(e) {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    overlay.remove();
+    tooltip.remove();
+    clearHighlight();
+    document.removeEventListener('keydown', escHandler, true);
+    try { window.__flowtest_assert_cancel(); } catch(e) {}
+  }, true);
+})();`;
+}
 function buildAction(raw) {
   let type;
   let value;
@@ -323,6 +466,9 @@ class CodegenCapture {
   active = false;
   lastGotoUrl = "";
   lastInteraction = null;
+  assertFunctionsExposed = false;
+  assertReportCb = null;
+  assertCancelCb = null;
   constructor(context, onAction) {
     this.context = context;
     this.onAction = onAction;
@@ -377,6 +523,36 @@ class CodegenCapture {
   async stop() {
     this.active = false;
   }
+  async startAssertionPick(assertionType, onCancel) {
+    const pages = this.context.pages();
+    const page = pages[0];
+    if (!page) return;
+    if (!this.assertFunctionsExposed) {
+      this.assertFunctionsExposed = true;
+      await page.exposeFunction("__flowtest_assert_report", (data) => {
+        this.assertReportCb?.(data);
+      });
+      await page.exposeFunction("__flowtest_assert_cancel", () => {
+        this.assertCancelCb?.();
+      });
+    }
+    this.assertReportCb = (data) => {
+      const action = {
+        id: uuid.v4(),
+        type: data.type,
+        selector: data.selector,
+        locatorExpr: data.locatorExpr,
+        value: data.value,
+        description: generateAssertDescription(data),
+        timestamp: Date.now(),
+        url: data.url,
+        isPageNavigation: false
+      };
+      this.onAction(action);
+    };
+    this.assertCancelCb = onCancel;
+    await page.evaluate(getAssertionPickScript(assertionType));
+  }
 }
 class Recorder {
   page;
@@ -401,6 +577,9 @@ class Recorder {
   async stop() {
     await this.capture.stop();
     this.recording = false;
+  }
+  async startAssertionPick(assertionType, onCancel) {
+    await this.capture.startAssertionPick(assertionType, onCancel);
   }
   isRecording() {
     return this.recording;
@@ -696,6 +875,12 @@ ${stepCode}
         return action.locatorExpr ? `await ${loc}.press('${action.value ?? ""}');` : `await page.keyboard.press('${action.value ?? ""}');`;
       case "wait":
         return `await ${loc}.waitFor({ state: 'visible' });`;
+      case "assertVisible":
+        return `await expect(${loc}).toBeVisible();`;
+      case "assertText":
+        return `await expect(${loc}).toContainText('${(action.value ?? "").replace(/'/g, "\\'")}');`;
+      case "assertValue":
+        return `await expect(${loc}).toHaveValue('${(action.value ?? "").replace(/'/g, "\\'")}');`;
       default:
         return `// TODO: ${action.type}`;
     }
@@ -795,6 +980,13 @@ function registerIpcHandlers(win) {
     await recorder?.stop();
     recorder = null;
   });
+  electron.ipcMain.handle(IPC_CHANNELS.START_ASSERTION_PICK, async (_e, assertionType) => {
+    if (!recorder) return;
+    await recorder.startAssertionPick(
+      assertionType,
+      () => win.webContents.send(IPC_CHANNELS.ASSERTION_PICK_CANCELLED)
+    );
+  });
   electron.ipcMain.handle(IPC_CHANNELS.REPLAY_TO_NODE, async (_e, payload) => {
     try {
       if (!browserController || !browserController.isRunning()) {
@@ -849,7 +1041,7 @@ function registerIpcHandlers(win) {
 
 `);
     const exitCode = await new Promise((resolve) => {
-      const child = child_process.spawn("npx", ["playwright", "test", relSpecPath, "--reporter=list"], {
+      const child = child_process.spawn("npx", ["playwright", "test", relSpecPath, "--reporter=list,html"], {
         cwd,
         shell: true
       });

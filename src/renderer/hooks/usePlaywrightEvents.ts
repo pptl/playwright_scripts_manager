@@ -11,8 +11,10 @@ export function usePlaywrightEvents() {
 
   useEffect(() => {
     const unsubCaptured = window.electronAPI.onActionCaptured((action: Action) => {
-      const { currentFlow, addActionNode, recordingHeadId } = useFlowStore.getState()
+      const { currentFlow, addActionNode, recordingHeadId, setIsPickingAssertion } = useFlowStore.getState()
       if (!currentFlow) return
+
+      setIsPickingAssertion(false)
 
       // Use the explicit recording head (tracks the last added node during recording)
       addActionNode(action, recordingHeadId)
@@ -42,12 +44,17 @@ export function usePlaywrightEvents() {
       console.error('Replay error:', err)
     })
 
+    const unsubAssertCancelled = window.electronAPI.onAssertionPickCancelled(() => {
+      useFlowStore.getState().setIsPickingAssertion(false)
+    })
+
     return () => {
       unsubCaptured()
       unsubNodeStart()
       unsubNodeComplete()
       unsubFinished()
       unsubError()
+      unsubAssertCancelled()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

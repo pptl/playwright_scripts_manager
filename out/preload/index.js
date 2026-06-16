@@ -13,7 +13,10 @@ const IPC_CHANNELS = {
   FLOW_LIST: "flow:list",
   EXPORT_SCRIPTS: "export:scripts",
   RUN_TESTS: "test:run",
+  // Renderer → Main (assertion pick)
+  START_ASSERTION_PICK: "assertion:pickStart",
   // Main → Renderer
+  ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
   TEST_OUTPUT: "test:output",
   TEST_FINISHED: "test:finished",
@@ -40,6 +43,8 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   exportScripts: (flow, config) => electron.ipcRenderer.invoke(IPC_CHANNELS.EXPORT_SCRIPTS, { flow, config }),
   // Run tests
   runTests: (flow, config) => electron.ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, config }),
+  // Assertion pick
+  startAssertionPick: (assertionType) => electron.ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
   // Event listeners (Main → Renderer)
   onActionCaptured: (cb) => {
     const handler = (_, action) => cb(action);
@@ -75,5 +80,10 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_, payload) => cb(payload);
     electron.ipcRenderer.on(IPC_CHANNELS.TEST_FINISHED, handler);
     return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.TEST_FINISHED, handler);
+  },
+  onAssertionPickCancelled: (cb) => {
+    const handler = () => cb();
+    electron.ipcRenderer.on(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler);
   }
 });

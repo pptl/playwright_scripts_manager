@@ -2,7 +2,7 @@
   "id": "70e57176-4265-4f8b-a8c7-7690e8cfb0b4",
   "name": "flow3",
   "createdAt": "2026-06-15T09:41:29.832Z",
-  "updatedAt": "2026-06-16T03:56:23.868Z",
+  "updatedAt": "2026-06-16T05:24:00.626Z",
   "baseURL": "https://esd.genesys-tech.com/",
   "nodes": [
     {
@@ -173,27 +173,8 @@
       },
       "parentId": "a9c71796-6a24-43f0-a76f-40be2316fa53",
       "childIds": [
-        "44b70506-684c-4ab9-9957-a4a68ce0a902"
+        "0c9df642-7854-48ba-a4a1-a1d1500f1bf9"
       ]
-    },
-    {
-      "id": "44b70506-684c-4ab9-9957-a4a68ce0a902",
-      "action": {
-        "id": "44b70506-684c-4ab9-9957-a4a68ce0a902",
-        "type": "click",
-        "selector": "#search--user_ids-option-0",
-        "locatorExpr": "getByRole('option', { name: 'test004 test004' })",
-        "description": "點擊「test004 test004」",
-        "timestamp": 1781516518171,
-        "url": "https://esd.genesys-tech.com/LeaveRemain/LeaveRemainStatistic",
-        "isPageNavigation": false
-      },
-      "position": {
-        "x": 300,
-        "y": 690
-      },
-      "parentId": "e0ab0998-bbec-4984-b5c7-729996a95dbc",
-      "childIds": []
     },
     {
       "id": "31223f83-b1f8-4982-9015-7907f158ad69",
@@ -233,6 +214,47 @@
         "y": 530
       },
       "parentId": "31223f83-b1f8-4982-9015-7907f158ad69",
+      "childIds": [
+        "5f7c1e6e-942c-47a4-8e0f-c746c10a4f90"
+      ]
+    },
+    {
+      "id": "5f7c1e6e-942c-47a4-8e0f-c746c10a4f90",
+      "action": {
+        "id": "5f7c1e6e-942c-47a4-8e0f-c746c10a4f90",
+        "type": "assertVisible",
+        "selector": "button[type=\"button\"]",
+        "locatorExpr": "getByRole('button', { name: '新增採購單' })",
+        "description": "驗證「新增採購單」可見",
+        "timestamp": 1781587253491,
+        "url": "https://esd.genesys-tech.com/Purchase/PurchaseFirst",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 740,
+        "y": 610
+      },
+      "parentId": "695c77c6-7748-4b9f-a0c3-60ee231d5ae5",
+      "childIds": []
+    },
+    {
+      "id": "0c9df642-7854-48ba-a4a1-a1d1500f1bf9",
+      "action": {
+        "id": "0c9df642-7854-48ba-a4a1-a1d1500f1bf9",
+        "type": "assertText",
+        "selector": "div",
+        "locatorExpr": "locator('div').filter({ hasText: '結算勾選項目' }).nth(4)",
+        "value": "結算勾選項目",
+        "description": "驗證「div」文字包含「結算勾選項目」",
+        "timestamp": 1781587437463,
+        "url": "https://esd.genesys-tech.com/LeaveRemain/LeaveRemainStatistic",
+        "isPageNavigation": false
+      },
+      "position": {
+        "x": 300,
+        "y": 690
+      },
+      "parentId": "e0ab0998-bbec-4984-b5c7-729996a95dbc",
       "childIds": []
     }
   ],

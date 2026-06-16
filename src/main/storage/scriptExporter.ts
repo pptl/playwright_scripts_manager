@@ -175,6 +175,12 @@ export class ScriptExporter {
           : `await page.keyboard.press('${action.value ?? ''}');`
       case 'wait':
         return `await ${loc}.waitFor({ state: 'visible' });`
+      case 'assertVisible':
+        return `await expect(${loc}).toBeVisible();`
+      case 'assertText':
+        return `await expect(${loc}).toContainText('${(action.value ?? '').replace(/'/g, "\\'")}');`
+      case 'assertValue':
+        return `await expect(${loc}).toHaveValue('${(action.value ?? '').replace(/'/g, "\\'")}');`
       default:
         return `// TODO: ${action.type}`
     }

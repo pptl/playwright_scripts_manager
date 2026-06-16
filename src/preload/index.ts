@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from '../shared/types'
 import type {
   Action,
+  ActionType,
   Flow,
   FlowNode,
   ExportConfig,
@@ -39,6 +40,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   runTests: (flow: Flow, config: ExportConfig) =>
     ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, config }),
 
+  // Assertion pick
+  startAssertionPick: (assertionType: ActionType) =>
+    ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
+
   // Event listeners (Main → Renderer)
   onActionCaptured: (cb: (action: Action) => void) => {
     const handler = (_: Electron.IpcRendererEvent, action: Action) => cb(action)
@@ -75,5 +80,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_: Electron.IpcRendererEvent, payload: TestFinishedPayload) => cb(payload)
     ipcRenderer.on(IPC_CHANNELS.TEST_FINISHED, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.TEST_FINISHED, handler)
+  },
+  onAssertionPickCancelled: (cb: () => void) => {
+    const handler = () => cb()
+    ipcRenderer.on(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler)
   },
 })

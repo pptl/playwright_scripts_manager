@@ -13,6 +13,9 @@ const TYPE_COLORS: Record<string, string> = {
   press: '#ec4899',
   wait: '#f97316',
   upload: '#06b6d4',
+  assertVisible: '#22c55e',
+  assertText: '#22c55e',
+  assertValue: '#22c55e',
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -25,6 +28,9 @@ const TYPE_ICONS: Record<string, string> = {
   press: '⌨️',
   wait: '⏳',
   upload: '📁',
+  assertVisible: '👁',
+  assertText: '📝',
+  assertValue: '🔢',
 }
 
 export interface ActionNodeData {

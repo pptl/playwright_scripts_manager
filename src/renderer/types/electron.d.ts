@@ -1,4 +1,4 @@
-import type { Action, Flow, FlowNode, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload } from '../../shared/types'
+import type { Action, ActionType, Flow, FlowNode, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload } from '../../shared/types'
 
 export interface ElectronAPI {
   launchBrowser: () => Promise<void>
@@ -12,6 +12,7 @@ export interface ElectronAPI {
   listFlows: () => Promise<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt'>[]>
   exportScripts: (flow: Flow, config: ExportConfig) => Promise<string>
   runTests: (flow: Flow, config: ExportConfig) => Promise<void>
+  startAssertionPick: (assertionType: ActionType) => Promise<void>
   onActionCaptured: (cb: (action: Action) => void) => () => void
   onReplayNodeStart: (cb: (nodeId: string) => void) => () => void
   onReplayNodeComplete: (cb: (payload: ReplayNodeCompletePayload) => void) => () => void
@@ -19,6 +20,7 @@ export interface ElectronAPI {
   onReplayError: (cb: (error: string) => void) => () => void
   onTestOutput: (cb: (line: string) => void) => () => void
   onTestFinished: (cb: (payload: TestFinishedPayload) => void) => () => void
+  onAssertionPickCancelled: (cb: () => void) => () => void
 }
 
 declare global {

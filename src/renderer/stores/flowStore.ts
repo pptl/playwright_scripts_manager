@@ -40,6 +40,8 @@ interface FlowStore {
   setIsRecording: (v: boolean) => void
   setIsReplaying: (v: boolean) => void
   setReplaySpeed: (ms: number) => void
+  isPickingAssertion: boolean
+  setIsPickingAssertion: (v: boolean) => void
 }
 
 export const useFlowStore = create<FlowStore>((set, get) => ({
@@ -52,6 +54,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   isReplaying: false,
   recordingHeadId: null,
   replaySpeed: 500,
+  isPickingAssertion: false,
 
   setFlows: (flows) => set({ flows }),
 
@@ -170,4 +173,5 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setIsRecording: (v) => set({ isRecording: v }),
   setIsReplaying: (v) => set({ isReplaying: v }),
   setReplaySpeed: (ms) => set({ replaySpeed: ms }),
+  setIsPickingAssertion: (v) => set({ isPickingAssertion: v }),
 }))

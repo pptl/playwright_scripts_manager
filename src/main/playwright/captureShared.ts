@@ -277,6 +277,162 @@ export function getDOMCaptureScript(): () => void {
   }
 }
 
+// ── Assertion pick overlay script ─────────────────────────────────────────────
+//
+// Injected via page.evaluate() when user clicks one of the assertion buttons.
+// Creates a transparent full-screen overlay that intercepts mouse events:
+//   - mousemove: highlights the element underneath via CSS outline + tooltip
+//   - click: captures selector/locator/value, removes overlay, calls __flowtest_assert_report
+//   - Escape: removes overlay, calls __flowtest_assert_cancel
+
+export type AssertPickType = 'assertVisible' | 'assertText' | 'assertValue'
+
+export interface AssertPickResult {
+  type: AssertPickType
+  selector: string
+  locatorExpr: string
+  value?: string
+  url: string
+}
+
+export function generateAssertDescription(data: AssertPickResult): string {
+  // Extract a human-readable label from the locatorExpr
+  const q = `['"]([^'"]+)['"]`
+  const patterns = [
+    new RegExp(`\\bname:\\s*${q}`),
+    new RegExp(`getByRole[^(]*\\([^,]+,\\s*\\{[^}]*name:\\s*${q}`),
+    new RegExp(`getByLabel\\(${q}`),
+    new RegExp(`getByPlaceholder\\(${q}`),
+    new RegExp(`getByTestId\\(${q}`),
+    new RegExp(`getByText\\(${q}`),
+    new RegExp(`getByRole\\(${q}`),
+  ]
+  let label = data.locatorExpr
+  for (const re of patterns) {
+    const m = data.locatorExpr.match(re)
+    if (m) { label = m[1]; break }
+  }
+  if (label === data.locatorExpr && data.selector) label = data.selector
+
+  switch (data.type) {
+    case 'assertVisible': return `驗證「${label}」可見`
+    case 'assertText':    return `驗證「${label}」文字包含「${data.value ?? ''}」`
+    case 'assertValue':   return `驗證「${label}」值為「${data.value ?? ''}」`
+  }
+}
+
+export function getAssertionPickScript(assertionType: AssertPickType): string {
+  return `(function(){
+  var assertionType = ${JSON.stringify(assertionType)};
+  var existing = document.getElementById('__ft_pick_overlay');
+  if (existing) existing.remove();
+  var existingTip = document.getElementById('__ft_pick_tooltip');
+  if (existingTip) existingTip.remove();
+
+  var highlighted = null;
+  var prevOutline = '';
+  var prevOutlineOffset = '';
+
+  function generateCSSSelector(el) {
+    var testId = el.getAttribute('data-testid');
+    if (testId) return '[data-testid="' + testId + '"]';
+    if (el.id) return '#' + el.id;
+    var aria = el.getAttribute('aria-label');
+    if (aria) return '[aria-label="' + aria.replace(/"/g, '\\\\"') + '"]';
+    var name = el.getAttribute('name');
+    if (name) return '[name="' + name.replace(/"/g, '\\\\"') + '"]';
+    var tag = el.tagName.toLowerCase();
+    var type = (el.type || '').toLowerCase();
+    return (type && !['text', ''].includes(type)) ? tag + '[type="' + type + '"]' : tag;
+  }
+
+  function getLocatorExpr(el) {
+    try {
+      var loc = window.__ftGetLocator && window.__ftGetLocator(el);
+      if (loc) return loc;
+    } catch(e) {}
+    return 'locator(' + JSON.stringify(generateCSSSelector(el)) + ')';
+  }
+
+  function clearHighlight() {
+    if (highlighted) {
+      highlighted.style.outline = prevOutline;
+      highlighted.style.outlineOffset = prevOutlineOffset;
+      highlighted = null;
+    }
+  }
+
+  function setHighlight(el) {
+    if (el === highlighted) return;
+    clearHighlight();
+    highlighted = el;
+    prevOutline = el.style.outline || '';
+    prevOutlineOffset = el.style.outlineOffset || '';
+    el.style.outline = '2px solid #22c55e';
+    el.style.outlineOffset = '2px';
+  }
+
+  var overlay = document.createElement('div');
+  overlay.id = '__ft_pick_overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:transparent;';
+  document.documentElement.appendChild(overlay);
+
+  var tooltip = document.createElement('div');
+  tooltip.id = '__ft_pick_tooltip';
+  tooltip.style.cssText = 'position:fixed;z-index:2147483647;padding:4px 8px;background:#0f172a;color:#22c55e;border:1px solid #22c55e;border-radius:4px;font-size:11px;font-family:monospace;pointer-events:none;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none;';
+  document.documentElement.appendChild(tooltip);
+
+  overlay.addEventListener('mousemove', function(e) {
+    overlay.style.display = 'none';
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    overlay.style.display = '';
+    if (!el || el === overlay || el === tooltip) return;
+    setHighlight(el);
+    tooltip.textContent = getLocatorExpr(el);
+    var tx = Math.min(e.clientX + 14, window.innerWidth - 370);
+    var ty = e.clientY + 22;
+    if (ty + 30 > window.innerHeight) ty = e.clientY - 32;
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top = ty + 'px';
+    tooltip.style.display = 'block';
+  });
+
+  overlay.addEventListener('mouseleave', function() {
+    tooltip.style.display = 'none';
+  });
+
+  overlay.addEventListener('click', function(e) {
+    overlay.style.display = 'none';
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    overlay.remove();
+    tooltip.remove();
+    clearHighlight();
+    if (!el) return;
+    var selector = generateCSSSelector(el);
+    var locatorExpr = getLocatorExpr(el);
+    var value;
+    if (assertionType === 'assertText') {
+      value = (el.textContent || '').trim().slice(0, 500);
+    } else if (assertionType === 'assertValue') {
+      value = el.value !== undefined ? String(el.value) : '';
+    }
+    try {
+      window.__flowtest_assert_report({ type: assertionType, selector: selector, locatorExpr: locatorExpr, value: value, url: window.location.href });
+    } catch(e) {}
+  });
+
+  document.addEventListener('keydown', function escHandler(e) {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    overlay.remove();
+    tooltip.remove();
+    clearHighlight();
+    document.removeEventListener('keydown', escHandler, true);
+    try { window.__flowtest_assert_cancel(); } catch(e) {}
+  }, true);
+})();`
+}
+
 // Converts a raw browser event into an Action. Returns null for unknown kinds.
 export function buildAction(raw: RawEvent): Action | null {
   let type: Action['type']

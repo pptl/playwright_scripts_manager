@@ -5,10 +5,14 @@ import {
   type ActionCallback,
   type RawEvent,
   type LastInteraction,
+  type AssertPickType,
+  type AssertPickResult,
   getBrowserInitScript,
   getDOMCaptureScript,
   buildAction,
   shouldSuppressNav,
+  getAssertionPickScript,
+  generateAssertDescription,
 } from './captureShared'
 
 export class CodegenCapture {
@@ -17,6 +21,9 @@ export class CodegenCapture {
   private active = false
   private lastGotoUrl = ''
   private lastInteraction: LastInteraction | null = null
+  private assertFunctionsExposed = false
+  private assertReportCb: ((data: AssertPickResult) => void) | null = null
+  private assertCancelCb: (() => void) | null = null
 
   constructor(context: BrowserContext, onAction: ActionCallback) {
     this.context = context
@@ -89,5 +96,39 @@ export class CodegenCapture {
 
   async stop(): Promise<void> {
     this.active = false
+  }
+
+  async startAssertionPick(assertionType: AssertPickType, onCancel: () => void): Promise<void> {
+    const pages = this.context.pages()
+    const page = pages[0]
+    if (!page) return
+
+    if (!this.assertFunctionsExposed) {
+      this.assertFunctionsExposed = true
+      await page.exposeFunction('__flowtest_assert_report', (data: AssertPickResult) => {
+        this.assertReportCb?.(data)
+      })
+      await page.exposeFunction('__flowtest_assert_cancel', () => {
+        this.assertCancelCb?.()
+      })
+    }
+
+    this.assertReportCb = (data) => {
+      const action: Action = {
+        id: uuidv4(),
+        type: data.type,
+        selector: data.selector,
+        locatorExpr: data.locatorExpr,
+        value: data.value,
+        description: generateAssertDescription(data),
+        timestamp: Date.now(),
+        url: data.url,
+        isPageNavigation: false,
+      }
+      this.onAction(action)
+    }
+    this.assertCancelCb = onCancel
+
+    await page.evaluate(getAssertionPickScript(assertionType))
   }
 }

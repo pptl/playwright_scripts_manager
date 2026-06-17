@@ -1,6 +1,7 @@
 import { Page, Locator } from 'playwright-core'
 import type { Action, FlowNode } from '../../shared/types'
 import { resolveValueWithSession } from '../../shared/variableResolver'
+import { getCursorHighlightScript } from './captureShared'
 
 type NodeStartCallback = (nodeId: string) => void
 type NodeCompleteCallback = (nodeId: string, success: boolean, error?: string) => void
@@ -21,6 +22,9 @@ export class Replayer {
     speed = 500,
   ): Promise<void> {
     this.sessionVars.clear()
+    const cursorScript = getCursorHighlightScript()
+    await this.page.addInitScript(cursorScript)
+    await this.page.evaluate(cursorScript).catch(() => {})
     const path = this.findPath(nodes, targetNodeId)
 
     for (const node of path) {

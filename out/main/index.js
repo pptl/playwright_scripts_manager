@@ -426,6 +426,31 @@ function getAssertionPickScript(assertionType) {
   }, true);
 })();`;
 }
+function getCursorHighlightScript() {
+  return `(function() {
+  function install() {
+    if (document.getElementById('__ft_cursor_highlight')) return;
+    var root = document.body || document.documentElement;
+    if (!root) return;
+    var dot = document.createElement('div');
+    dot.id = '__ft_cursor_highlight';
+    dot.style.cssText = 'position:fixed;top:0;left:0;width:32px;height:32px;border-radius:50%;' +
+      'background:rgba(234,179,8,0.25);border:2.5px solid rgba(234,179,8,0.85);' +
+      'box-shadow:0 0 0 4px rgba(234,179,8,0.12);pointer-events:none;' +
+      'z-index:2147483645;display:none';
+    root.appendChild(dot);
+    document.addEventListener('mousemove', function(e) {
+      dot.style.transform = 'translate(' + (e.clientX - 16) + 'px,' + (e.clientY - 16) + 'px)';
+      dot.style.display = 'block';
+    }, true);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install);
+  } else {
+    install();
+  }
+})()`;
+}
 function buildAction(raw) {
   let type;
   let value;
@@ -496,6 +521,10 @@ class CodegenCapture {
     const captureScript = getDOMCaptureScript();
     await page.addInitScript(captureScript);
     await page.evaluate(captureScript).catch(() => {
+    });
+    const cursorScript = getCursorHighlightScript();
+    await page.addInitScript(cursorScript);
+    await page.evaluate(cursorScript).catch(() => {
     });
     await page.exposeFunction("__flowtest_report", (raw) => {
       if (!this.active) return;
@@ -682,6 +711,10 @@ class Replayer {
   }
   async replayToNode(nodes, targetNodeId, onNodeStart, onNodeComplete, speed = 500) {
     this.sessionVars.clear();
+    const cursorScript = getCursorHighlightScript();
+    await this.page.addInitScript(cursorScript);
+    await this.page.evaluate(cursorScript).catch(() => {
+    });
     const path2 = this.findPath(nodes, targetNodeId);
     for (const node of path2) {
       onNodeStart(node.id);

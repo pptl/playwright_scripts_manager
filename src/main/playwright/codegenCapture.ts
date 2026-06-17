@@ -9,6 +9,7 @@ import {
   type AssertPickResult,
   getBrowserInitScript,
   getDOMCaptureScript,
+  getCursorHighlightScript,
   buildAction,
   shouldSuppressNav,
   getAssertionPickScript,
@@ -56,7 +57,12 @@ export class CodegenCapture {
     // even when the page is already loaded (branch recording scenario).
     await page.evaluate(captureScript).catch(() => {})
 
-    // Step 3 — Expose report channel to browser
+    // Step 3 — Cursor highlight overlay (follows mouse, pointer-events:none)
+    const cursorScript = getCursorHighlightScript()
+    await page.addInitScript(cursorScript)
+    await page.evaluate(cursorScript).catch(() => {})
+
+    // Step 4 — Expose report channel to browser
     await page.exposeFunction('__flowtest_report', (raw: RawEvent) => {
       if (!this.active) return
       const action = buildAction(raw)
@@ -83,7 +89,7 @@ export class CodegenCapture {
       this.onAction(action)
     })
 
-    // Step 4 — Navigation
+    // Step 5 — Navigation
     // Mirrors Playwright's RecorderSignalProcessor: navigation within NAV_SUPPRESSION_MS
     // after a click/press/fill is a redirect side-effect and must NOT generate a goto node.
     // The 50 ms delay lets pending IPC round-trips (from browser → Node.js) settle first,

@@ -442,6 +442,32 @@ export function getAssertionPickScript(assertionType: AssertPickType): string {
 })();`
 }
 
+export function getCursorHighlightScript(): string {
+  return `(function() {
+  function install() {
+    if (document.getElementById('__ft_cursor_highlight')) return;
+    var root = document.body || document.documentElement;
+    if (!root) return;
+    var dot = document.createElement('div');
+    dot.id = '__ft_cursor_highlight';
+    dot.style.cssText = 'position:fixed;top:0;left:0;width:32px;height:32px;border-radius:50%;' +
+      'background:rgba(234,179,8,0.25);border:2.5px solid rgba(234,179,8,0.85);' +
+      'box-shadow:0 0 0 4px rgba(234,179,8,0.12);pointer-events:none;' +
+      'z-index:2147483645;display:none';
+    root.appendChild(dot);
+    document.addEventListener('mousemove', function(e) {
+      dot.style.transform = 'translate(' + (e.clientX - 16) + 'px,' + (e.clientY - 16) + 'px)';
+      dot.style.display = 'block';
+    }, true);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install);
+  } else {
+    install();
+  }
+})()`
+}
+
 // Converts a raw browser event into an Action. Returns null for unknown kinds.
 export function buildAction(raw: RawEvent): Action | null {
   let type: Action['type']

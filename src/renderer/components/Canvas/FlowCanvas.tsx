@@ -149,7 +149,7 @@ function FlowCanvasInner() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          color: '#475569',
+          color: '#64748b',
           fontSize: 16,
         }}
       >

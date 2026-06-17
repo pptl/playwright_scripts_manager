@@ -14868,7 +14868,7 @@ function NodeContextMenu({
                 MenuItem,
                 {
                   icon: "$",
-                  label: currentCaptureAs ? `已儲存為 {{${currentCaptureAs}}}（點擊修改）` : "將值儲存為變數",
+                  label: currentCaptureAs ? `已儲存為 {{${currentCaptureAs}}}（點擊修改）` : "將值儲存為區域變數",
                   disabled,
                   onClick: () => setCaptureInput(currentCaptureAs ?? "")
                 }

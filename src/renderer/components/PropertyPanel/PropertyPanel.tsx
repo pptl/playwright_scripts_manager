@@ -1,11 +1,5 @@
 import React, { useState, useEffect } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
-import type { Assertion, ActionType } from '../../../../shared/types'
-
-const ASSERTION_TYPES = ['text', 'visible', 'url', 'count'] as const
-const ACTION_TYPES: ActionType[] = [
-  'goto', 'click', 'fill', 'selectOption', 'check', 'uncheck', 'press', 'wait', 'upload',
-]
 
 export function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode, saveCurrentFlow } = useFlowStore()
@@ -14,14 +8,12 @@ export function PropertyPanel() {
   const [desc, setDesc] = useState('')
   const [selector, setSelector] = useState('')
   const [value, setValue] = useState('')
-  const [assertion, setAssertion] = useState<Assertion | undefined>(undefined)
 
   useEffect(() => {
     if (selectedNode) {
       setDesc(selectedNode.action.description)
       setSelector(selectedNode.action.selector)
       setValue(selectedNode.action.value ?? '')
-      setAssertion(selectedNode.action.assertion)
     }
   }, [selectedNodeId, selectedNode])
 
@@ -34,7 +26,6 @@ export function PropertyPanel() {
         description: desc,
         selector,
         value: value || undefined,
-        assertion,
       },
     })
     window.electronAPI.saveFlow(useFlowStore.getState().currentFlow!).catch(console.error)
@@ -80,59 +71,11 @@ export function PropertyPanel() {
               onChange={(e) => setValue(e.target.value)}
               style={inputStyle}
             />
-            <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>
+            <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
               可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code>
             </div>
           </Field>
         )}
-
-        {/* Assertion */}
-        <Field label="驗證">
-          {assertion ? (
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-              <select
-                value={assertion.type}
-                onChange={(e) =>
-                  setAssertion({ ...assertion, type: e.target.value as Assertion['type'] })
-                }
-                style={selectStyle}
-              >
-                {ASSERTION_TYPES.map((t) => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-              {assertion.type !== 'url' && (
-                <input
-                  placeholder="selector"
-                  value={assertion.target ?? ''}
-                  onChange={(e) => setAssertion({ ...assertion, target: e.target.value })}
-                  style={{ ...inputStyle, width: 120 }}
-                />
-              )}
-              <input
-                placeholder="預期值"
-                value={assertion.expected}
-                onChange={(e) => setAssertion({ ...assertion, expected: e.target.value })}
-                style={{ ...inputStyle, width: 120 }}
-              />
-              <button
-                onClick={() => setAssertion(undefined)}
-                style={dangerBtnStyle}
-              >
-                移除
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() =>
-                setAssertion({ type: 'text', target: '', expected: '' })
-              }
-              style={addBtnStyle}
-            >
-              + 新增驗證
-            </button>
-          )}
-        </Field>
 
         <div style={{ display: 'flex', alignItems: 'flex-end' }}>
           <button onClick={save} style={saveBtnStyle}>
@@ -166,11 +109,6 @@ const inputStyle: React.CSSProperties = {
   width: 200,
 }
 
-const selectStyle: React.CSSProperties = {
-  ...inputStyle,
-  width: 'auto',
-}
-
 const saveBtnStyle: React.CSSProperties = {
   padding: '5px 16px',
   borderRadius: 5,
@@ -182,22 +120,3 @@ const saveBtnStyle: React.CSSProperties = {
   fontWeight: 600,
 }
 
-const addBtnStyle: React.CSSProperties = {
-  padding: '5px 10px',
-  borderRadius: 5,
-  border: '1px dashed #475569',
-  background: 'transparent',
-  color: '#94a3b8',
-  cursor: 'pointer',
-  fontSize: 12,
-}
-
-const dangerBtnStyle: React.CSSProperties = {
-  padding: '4px 8px',
-  borderRadius: 5,
-  border: 'none',
-  background: '#7f1d1d',
-  color: '#fca5a5',
-  cursor: 'pointer',
-  fontSize: 11,
-}

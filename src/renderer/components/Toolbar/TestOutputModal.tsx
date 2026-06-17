@@ -70,7 +70,7 @@ export function TestOutputModal({ lines, finished, onClose }: TestOutputModalPro
                 borderRadius: 6,
                 border: '1px solid #1d4ed8',
                 background: finished !== null ? '#1e40af' : 'transparent',
-                color: finished !== null ? '#bfdbfe' : '#475569',
+                color: finished !== null ? '#bfdbfe' : '#64748b',
                 fontSize: 12,
                 cursor: finished !== null ? 'pointer' : 'not-allowed',
                 opacity: finished !== null ? 1 : 0.5,
@@ -122,7 +122,7 @@ export function TestOutputModal({ lines, finished, onClose }: TestOutputModalPro
               padding: '8px 16px',
               borderTop: '1px solid #1e293b',
               fontSize: 11,
-              color: '#475569',
+              color: '#64748b',
               flexShrink: 0,
             }}
           >

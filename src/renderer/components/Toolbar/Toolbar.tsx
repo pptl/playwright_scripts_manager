@@ -171,7 +171,7 @@ export function Toolbar() {
           </span>
         )}
         {!selectedNodeId && !isRecording && !isReplaying && currentFlow && (
-          <span style={{ fontSize: 11, color: '#475569' }}>右鍵點擊節點以操作</span>
+          <span style={{ fontSize: 11, color: '#64748b' }}>右鍵點擊節點以操作</span>
         )}
       </div>
 

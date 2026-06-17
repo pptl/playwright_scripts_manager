@@ -53,7 +53,7 @@ export function FlowList() {
 
       <div style={{ overflowY: 'auto', flex: 1 }}>
         {flows.length === 0 && (
-          <div style={{ padding: '16px 14px', color: '#475569', fontSize: 12 }}>
+          <div style={{ padding: '16px 14px', color: '#64748b', fontSize: 12 }}>
             尚無流程
           </div>
         )}
@@ -82,7 +82,7 @@ export function FlowList() {
             >
               {flow.name}
             </div>
-            <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>
+            <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
               {new Date(flow.updatedAt).toLocaleDateString('zh-TW', {
                 month: 'short',
                 day: 'numeric',

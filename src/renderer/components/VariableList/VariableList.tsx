@@ -15,8 +15,6 @@ export function VariableList() {
     <div
       style={{
         background: '#1e293b',
-        borderTop: '1px solid #334155',
-        borderRight: '1px solid #334155',
         display: 'flex',
         flexDirection: 'column',
         flexShrink: 0,
@@ -33,7 +31,7 @@ export function VariableList() {
           letterSpacing: '0.06em',
         }}
       >
-        變數列表
+        全域變數
       </div>
 
       <div>
@@ -67,8 +65,8 @@ export function VariableList() {
                 <span style={{ fontSize: 10, color: '#4ade80' }}>已複製</span>
               )}
             </div>
-            <div style={{ fontSize: 10, color: '#475569' }}>{v.description}</div>
-            <div style={{ fontSize: 10, color: '#334155', marginTop: 1 }}>
+            <div style={{ fontSize: 10, color: '#64748b' }}>{v.description}</div>
+            <div style={{ fontSize: 10, color: '#475569', marginTop: 1 }}>
               例：{v.example}
             </div>
           </div>

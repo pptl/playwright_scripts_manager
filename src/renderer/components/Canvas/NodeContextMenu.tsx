@@ -31,13 +31,14 @@ export function NodeContextMenu({
   const disabled = isRecording || isReplaying
   const [captureInput, setCaptureInput] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const inputOpen = captureInput !== null
 
   useEffect(() => {
-    if (captureInput !== null) {
+    if (inputOpen) {
       inputRef.current?.focus()
       inputRef.current?.select()
     }
-  }, [captureInput])
+  }, [inputOpen])
 
   const commitCapture = () => {
     const trimmed = captureInput?.trim()
@@ -96,7 +97,7 @@ export function NodeContextMenu({
                 label={
                   currentCaptureAs
                     ? `已儲存為 {{${currentCaptureAs}}}（點擊修改）`
-                    : '將值儲存為變數'
+                    : '將值儲存為區域變數'
                 }
                 disabled={disabled}
                 onClick={() => setCaptureInput(currentCaptureAs ?? '')}

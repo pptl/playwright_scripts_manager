@@ -111,6 +111,7 @@ export const IPC_CHANNELS = {
   FLOW_SAVE: 'flow:save',
   FLOW_LOAD: 'flow:load',
   FLOW_LIST: 'flow:list',
+  FLOW_DELETE: 'flow:delete',
   EXPORT_SCRIPTS: 'export:scripts',
   RUN_TESTS: 'test:run',
   SHOW_REPORT: 'test:showReport',

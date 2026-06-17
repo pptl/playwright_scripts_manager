@@ -24,6 +24,7 @@ interface FlowStore {
   createFlow: (name: string, baseURL: string, description?: string) => Flow
   setCurrentFlow: (flow: Flow | null) => void
   setRecordingHead: (id: string | null) => void
+  renameCurrentFlow: (name: string) => Promise<void>
 
   // Node management
   addActionNode: (action: Action, parentId?: string | null, branchLabel?: string) => FlowNode
@@ -126,6 +127,14 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   },
 
   setRecordingHead: (id) => set({ recordingHeadId: id }),
+
+  renameCurrentFlow: async (name) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const updatedFlow: Flow = { ...flow, name, updatedAt: new Date().toISOString() }
+    set({ currentFlow: updatedFlow })
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
 
   addActionNode: (action, parentId = null, branchLabel) => {
     const flow = get().currentFlow

@@ -13,7 +13,7 @@ export default function App() {
   // Register IPC event listeners exactly once here
   usePlaywrightEvents()
 
-  const { selectedNodeId } = useFlowStore()
+  const { selectedNodeId, currentFlow } = useFlowStore()
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -24,7 +24,7 @@ export default function App() {
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
           <FlowCanvas />
-          {selectedNodeId && <PropertyPanel />}
+          {currentFlow && <PropertyPanel />}
         </div>
         {selectedNodeId && (
           <div style={{ display: 'flex', flexDirection: 'column', width: 200, flexShrink: 0, borderLeft: '1px solid #334155', overflow: 'hidden' }}>

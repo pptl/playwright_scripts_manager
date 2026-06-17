@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveFlow: (flow: Flow) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_SAVE, { flow }),
   loadFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_LOAD, { flowId }),
   listFlows: () => ipcRenderer.invoke(IPC_CHANNELS.FLOW_LIST),
+  deleteFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_DELETE, flowId),
 
   // Export
   exportScripts: (flow: Flow, config: ExportConfig) =>

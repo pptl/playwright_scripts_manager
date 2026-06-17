@@ -11,6 +11,7 @@ const IPC_CHANNELS = {
   FLOW_SAVE: "flow:save",
   FLOW_LOAD: "flow:load",
   FLOW_LIST: "flow:list",
+  FLOW_DELETE: "flow:delete",
   EXPORT_SCRIPTS: "export:scripts",
   RUN_TESTS: "test:run",
   SHOW_REPORT: "test:showReport",
@@ -40,6 +41,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   saveFlow: (flow) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_SAVE, { flow }),
   loadFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_LOAD, { flowId }),
   listFlows: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_LIST),
+  deleteFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_DELETE, flowId),
   // Export
   exportScripts: (flow, config) => electron.ipcRenderer.invoke(IPC_CHANNELS.EXPORT_SCRIPTS, { flow, config }),
   // Run tests

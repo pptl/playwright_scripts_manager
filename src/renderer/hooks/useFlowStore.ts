@@ -34,5 +34,13 @@ export function useFlowManager() {
     await window.electronAPI.saveFlow(flow)
   }, [])
 
-  return { refreshFlowList, openFlow, newFlow, saveCurrentFlow }
+  const deleteCurrentFlow = useCallback(async () => {
+    const flow = useFlowStore.getState().currentFlow
+    if (!flow) return
+    await window.electronAPI.deleteFlow(flow.id)
+    setCurrentFlow(null)
+    await refreshFlowList()
+  }, [setCurrentFlow, refreshFlowList])
+
+  return { refreshFlowList, openFlow, newFlow, saveCurrentFlow, deleteCurrentFlow }
 }

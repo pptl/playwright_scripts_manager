@@ -123,6 +123,10 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     return await FlowStorage.list()
   })
 
+  ipcMain.handle(IPC_CHANNELS.FLOW_DELETE, async (_e, flowId: string) => {
+    await FlowStorage.delete(flowId)
+  })
+
   // ── Export ───────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload: ExportScriptsPayload) => {
     return await ScriptExporter.export(payload.flow, payload.config)

@@ -19,6 +19,18 @@ export const BUILT_IN_VARIABLES: VariableDefinition[] = [
     example: '47291836',
   },
   {
+    name: 'randomOneText',
+    placeholder: '{{randomOneText}}',
+    description: '一個 A~Z 的隨機字母',
+    example: 'G',
+  },
+  {
+    name: 'randomOneNumber',
+    placeholder: '{{randomOneNumber}}',
+    description: '一個 0~9 的隨機數字',
+    example: '4',
+  },
+  {
     name: 'timestamp',
     placeholder: '{{timestamp}}',
     description: '目前時間戳記 (yyyyMMddHHmmssSSS)',
@@ -40,6 +52,14 @@ function generateRandomNumber(len = 8): string {
   return String(Math.floor(Math.random() * (max - min + 1)) + min)
 }
 
+function generateRandomOneLetter(): string {
+  return String.fromCharCode(65 + Math.floor(Math.random() * 26))
+}
+
+function generateRandomOneDigit(): string {
+  return String(Math.floor(Math.random() * 10))
+}
+
 function generateTimestamp(): string {
   const d = new Date()
   return (
@@ -59,6 +79,8 @@ export function resolveValue(value: string, profileVars?: Record<string, string>
     if (profileVars && name in profileVars) return profileVars[name]
     if (name === 'randomText') return generateRandomText()
     if (name === 'randomNumber') return generateRandomNumber()
+    if (name === 'randomOneText') return generateRandomOneLetter()
+    if (name === 'randomOneNumber') return generateRandomOneDigit()
     if (name === 'timestamp') return generateTimestamp()
     return match
   })
@@ -78,6 +100,8 @@ export function resolveValueWithSession(
     if (profileVars && name in profileVars) return profileVars[name]
     if (name === 'randomText') return generateRandomText()
     if (name === 'randomNumber') return generateRandomNumber()
+    if (name === 'randomOneText') return generateRandomOneLetter()
+    if (name === 'randomOneNumber') return generateRandomOneDigit()
     if (name === 'timestamp') return generateTimestamp()
     return match
   })
@@ -107,6 +131,8 @@ export function valueToCodeExpr(value: string, profileVarKeys?: Set<string>): st
       if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`
       if (name === 'randomText') return '${_ftRandomText()}'
       if (name === 'randomNumber') return '${_ftRandomNumber()}'
+      if (name === 'randomOneText') return '${_ftRandomOneLetter()}'
+      if (name === 'randomOneNumber') return '${_ftRandomOneDigit()}'
       if (name === 'timestamp') return '${_ftTimestamp()}'
       return `{{${name}}}`
     })
@@ -140,6 +166,8 @@ export function sessionAwareValueToCodeExpr(
       if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`
       if (name === 'randomText') return '${_ftRandomText()}'
       if (name === 'randomNumber') return '${_ftRandomNumber()}'
+      if (name === 'randomOneText') return '${_ftRandomOneLetter()}'
+      if (name === 'randomOneNumber') return '${_ftRandomOneDigit()}'
       if (name === 'timestamp') return '${_ftTimestamp()}'
       return `{{${name}}}`
     })
@@ -165,6 +193,12 @@ function _ftRandomText(len = 8) {
 function _ftRandomNumber(len = 8) {
   const min = Math.pow(10, len - 1);
   return String(Math.floor(Math.random() * (Math.pow(10, len) - min)) + min);
+}
+function _ftRandomOneLetter() {
+  return String.fromCharCode(65 + Math.floor(Math.random() * 26));
+}
+function _ftRandomOneDigit() {
+  return String(Math.floor(Math.random() * 10));
 }
 function _ftTimestamp() {
   const d = new Date();

@@ -37,6 +37,7 @@ const IPC_CHANNELS = {
   FLOW_SAVE: "flow:save",
   FLOW_LOAD: "flow:load",
   FLOW_LIST: "flow:list",
+  FLOW_DELETE: "flow:delete",
   EXPORT_SCRIPTS: "export:scripts",
   RUN_TESTS: "test:run",
   SHOW_REPORT: "test:showReport",
@@ -665,6 +666,12 @@ function generateRandomNumber(len = 8) {
   const max = Math.pow(10, len) - 1;
   return String(Math.floor(Math.random() * (max - min + 1)) + min);
 }
+function generateRandomOneLetter() {
+  return String.fromCharCode(65 + Math.floor(Math.random() * 26));
+}
+function generateRandomOneDigit() {
+  return String(Math.floor(Math.random() * 10));
+}
 function generateTimestamp() {
   const d = /* @__PURE__ */ new Date();
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}${pad(d.getMilliseconds(), 3)}`;
@@ -675,6 +682,8 @@ function resolveValueWithSession(value, sessionVars, profileVars) {
     if (profileVars && name in profileVars) return profileVars[name];
     if (name === "randomText") return generateRandomText();
     if (name === "randomNumber") return generateRandomNumber();
+    if (name === "randomOneText") return generateRandomOneLetter();
+    if (name === "randomOneNumber") return generateRandomOneDigit();
     if (name === "timestamp") return generateTimestamp();
     return match;
   });
@@ -690,6 +699,8 @@ function valueToCodeExpr(value, profileVarKeys) {
     if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`;
     if (name === "randomText") return "${_ftRandomText()}";
     if (name === "randomNumber") return "${_ftRandomNumber()}";
+    if (name === "randomOneText") return "${_ftRandomOneLetter()}";
+    if (name === "randomOneNumber") return "${_ftRandomOneDigit()}";
     if (name === "timestamp") return "${_ftTimestamp()}";
     return `{{${name}}}`;
   });
@@ -708,6 +719,8 @@ function sessionAwareValueToCodeExpr(value, sessionVarNames, profileVarKeys) {
     if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`;
     if (name === "randomText") return "${_ftRandomText()}";
     if (name === "randomNumber") return "${_ftRandomNumber()}";
+    if (name === "randomOneText") return "${_ftRandomOneLetter()}";
+    if (name === "randomOneNumber") return "${_ftRandomOneDigit()}";
     if (name === "timestamp") return "${_ftTimestamp()}";
     return `{{${name}}}`;
   });
@@ -723,6 +736,12 @@ function _ftRandomText(len = 8) {
 function _ftRandomNumber(len = 8) {
   const min = Math.pow(10, len - 1);
   return String(Math.floor(Math.random() * (Math.pow(10, len) - min)) + min);
+}
+function _ftRandomOneLetter() {
+  return String.fromCharCode(65 + Math.floor(Math.random() * 26));
+}
+function _ftRandomOneDigit() {
+  return String(Math.floor(Math.random() * 10));
 }
 function _ftTimestamp() {
   const d = new Date();
@@ -1236,6 +1255,9 @@ function registerIpcHandlers(win) {
   });
   electron.ipcMain.handle(IPC_CHANNELS.FLOW_LIST, async () => {
     return await FlowStorage.list();
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.FLOW_DELETE, async (_e, flowId) => {
+    await FlowStorage.delete(flowId);
   });
   electron.ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload) => {
     return await ScriptExporter.export(payload.flow, payload.config);

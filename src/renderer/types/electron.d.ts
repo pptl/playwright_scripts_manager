@@ -10,6 +10,7 @@ export interface ElectronAPI {
   saveFlow: (flow: Flow) => Promise<void>
   loadFlow: (flowId: string) => Promise<Flow | null>
   listFlows: () => Promise<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt'>[]>
+  deleteFlow: (flowId: string) => Promise<void>
   exportScripts: (flow: Flow, config: ExportConfig) => Promise<string>
   runTests: (flow: Flow, config: ExportConfig) => Promise<void>
   showReport: () => Promise<void>

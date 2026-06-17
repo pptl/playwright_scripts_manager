@@ -3,7 +3,7 @@ import { useFlowStore } from '../../stores/flowStore'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import { useFlowManager } from '../../hooks/useFlowStore'
 import { TestOutputModal } from './TestOutputModal'
-import type { ActionType, ExportConfig, TestFinishedPayload } from '../../../../shared/types'
+import type { ActionType, ExportConfig, TestFinishedPayload } from '../../../shared/types'
 
 const assertBtn = (label: string, onClick: () => void) => (
   <button
@@ -176,7 +176,7 @@ export function Toolbar() {
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
-        <span style={{ fontSize: 12, color: '#94a3b8' }}>速度:</span>
+        <span style={{ fontSize: 12, color: '#94a3b8' }}>重播速度:</span>
         {([['快', 100], ['正常', 500], ['慢', 1000]] as [string, number][]).map(([label, ms]) => (
           <button
             key={label}

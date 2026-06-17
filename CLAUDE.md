@@ -43,7 +43,7 @@ Main → Renderer: `mainWindow.webContents.send(channel, payload)` → `usePlayw
 ### Key data types (`src/shared/types.ts`)
 
 - **`ActionType`** — 13 variants: `goto | click | fill | selectOption | check | uncheck | press | upload | wait | assertVisible | assertText | assertValue`
-- **`Action`** — one browser interaction: `type`, `locatorExpr` (high-quality Playwright locator), `selector` (CSS fallback), `value`, `description`, `url`, `isPageNavigation`, optional `assertion`
+- **`Action`** — one browser interaction: `type`, `locatorExpr` (high-quality Playwright locator), `selector` (CSS fallback), `value`, `captureAs` (optional session variable name), `description`, `url`, `isPageNavigation`, optional `assertion`
 - **`Assertion`** — `type` (`text|visible|url|count`), optional `target` selector, `expected` value
 - **`FlowNode`** — `Action` + canvas `position` + `parentId` + `childIds[]` + optional `branchLabel`
 - **`Flow`** — `nodes: FlowNode[]`, `rootNodeId`, `baseURL`, metadata
@@ -64,6 +64,13 @@ Main → Renderer: `mainWindow.webContents.send(channel, payload)` → `usePlayw
 3. `captureShared.ts` builds Actions with high-quality locators: `getByRole` → `getByLabel` → `getByPlaceholder` → `getByTestId` → `getByText` → `#id` → tag fallback
 4. Navigation suppression: events within `NAV_SUPPRESSION_MS = 5000` after a click are not re-recorded as `goto` (redirect side-effects)
 5. Each captured action fires `ACTION_CAPTURED` → `usePlaywrightEvents` → `flowStore.addActionNode()` → auto-saves JSON
+
+#### DOM event filtering in `getDOMCaptureScript()` (matches Playwright's `RecordActionTool`)
+
+- **Click** — **blacklist** approach (not whitelist): records any click except `SELECT`, `OPTION`, `INPUT[date/range]`, `html`, `body`. Bubbles up to nearest `<button>`/`<a>` only for better locator quality, not as a filter. Uses `event.composedPath()[0]` (not `e.target`) to pierce Shadow DOM.
+- **Fill** — `focus`/`blur` pair captures final value on text inputs **and `contentEditable`** elements. An `isInputClick` flag on text-input clicks lets CodegenCapture suppress the click if a fill follows.
+- **SelectOption** — native `<select>` `change` event; captures `value` and display text.
+- **Press** — mirrors Playwright's `_shouldGenerateKeyPressFor`: records `Tab`, `Enter` (outside textarea/contentEditable), `Escape`, arrow/function keys, modifier+char combos. Skips `Backspace`, `Delete`, paste shortcuts (`Ctrl/Meta+V`), bare modifier keys, and single printable chars without modifiers (those become fill values).
 
 ### Assertion-picking pipeline
 
@@ -92,6 +99,15 @@ When the user clicks "Branch Record" from node N:
 3. stdout/stderr are streamed line-by-line via `TEST_OUTPUT` events → `TestOutputModal` displays live output
 4. On process exit, `TEST_FINISHED` fires; Main spawns the Playwright HTML report viewer
 
+### Variable system
+
+Two kinds of `{{...}}` placeholders can appear in action `value` fields:
+
+- **Built-in variables** (`src/shared/variableResolver.ts`): `{{randomText}}`, `{{randomNumber}}`, `{{timestamp}}` — resolved at runtime by `resolveValue()` / `resolveValueWithSession()`.
+- **Session variables** — any action node can set `action.captureAs = "varName"`. During replay, `Replayer` captures the resolved value into `this.sessionVars` and subsequent actions can reference it as `{{varName}}`. During export, `ScriptExporter` emits a `const varName = ...` declaration and substitutes downstream references.
+
+`valueToCodeExpr()` converts a value string to a TypeScript literal; `sessionAwareValueToCodeExpr()` additionally substitutes session variable names as bare JS identifiers. Helper functions (`_ftRandomText`, `_ftRandomNumber`, `_ftTimestamp`) are injected into generated spec files when needed (`VARIABLE_HELPERS_CODE`).
+
 ### Storage
 
 Flows are stored as `flows/{flowId}.json` in dev mode or `app.getPath('userData')/flows` in production (plain JSON, no database). `ScriptExporter` computes all root-to-leaf paths in the tree and emits one `test()` block per path into `exports/{flowId}.spec.ts`. Optionally extracts a shared prefix into `helpers/{flowId}-helpers.ts`.
@@ -113,7 +129,7 @@ Flows are stored as `flows/{flowId}.json` in dev mode or `app.getPath('userData'
 | `src/main/playwright/recorder.ts` | Thin wrapper around CodegenCapture; tracks recording state and assertion-picking mode |
 | `src/main/playwright/codegenCapture.ts` | Multi-page recorder: injects scripts, exposes `__flowtest_report`, filters navigation events |
 | `src/main/playwright/actionCapture.ts` | Single-page variant of CodegenCapture (supports stop/restart without re-injection; not yet active in main flow) |
-| `src/main/playwright/captureShared.ts` | Shared utilities: extracts InjectedScript from coreBundle.js, DOM event capture logic, locator builder, assertion-pick logic |
+| `src/main/playwright/captureShared.ts` | Shared utilities: extracts InjectedScript from coreBundle.js, DOM event capture (blacklist-based, Shadow DOM-aware), locator builder, assertion-pick logic, variable helper codegen |
 | `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events |
 | `src/main/storage/flowStorage.ts` | Flow CRUD: save/load/list/delete JSON files; sorts by updatedAt |
 | `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` code generation |
@@ -133,6 +149,9 @@ Flows are stored as `flows/{flowId}.json` in dev mode or `app.getPath('userData'
 | `src/renderer/hooks/useFlowStore.ts` | Flow management helpers: refreshFlowList, openFlow, newFlow, saveCurrentFlow |
 | `src/renderer/types/electron.d.ts` | TypeScript declaration for `window.electronAPI` |
 | `src/shared/types.ts` | All shared types + `IPC_CHANNELS` constants (20 channels) |
+| `src/shared/variableResolver.ts` | Variable system: `BUILT_IN_VARIABLES`, `resolveValue`, `resolveValueWithSession`, `valueToCodeExpr`, `sessionAwareValueToCodeExpr`, `VARIABLE_HELPERS_CODE` |
+| `src/renderer/components/VariableList/VariableList.tsx` | Sidebar panel showing built-in global variables (`{{randomText}}` etc.); click to copy placeholder |
+| `src/renderer/components/SessionVarList/SessionVarList.tsx` | Sidebar panel showing session variables derived from `action.captureAs` nodes in the current flow; click to copy, trash to delete |
 | `src/preload/index.ts` | contextBridge — exposes `window.electronAPI` with typed ipcRenderer wrappers |
 | `electron.vite.config.ts` | Build config for all three bundles + path aliases |
 | `electron-builder.yml` | Installer config (NSIS/AppImage/DMG) |

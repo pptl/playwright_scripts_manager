@@ -144,6 +144,13 @@ try{
 
 // Returns the DOM-side event capture script to pass to page.addInitScript().
 // Identical logic is used by both CodegenCapture and ActionCapture.
+//
+// Event filtering mirrors Playwright's RecordActionTool / JsonRecordActionTool:
+//   Click  — blacklist (only skip SELECT/OPTION/date/range/html/body), not whitelist
+//   Fill   — blur-based value capture for text inputs AND contentEditable
+//   Select — native <select> change event
+//   Press  — matches Playwright's _shouldGenerateKeyPressFor (Tab, Arrow, F-keys,
+//             modifier+char, Enter outside textarea; excludes Backspace/Delete/paste)
 export function getDOMCaptureScript(): () => void {
   return () => {
     function generateCSSSelector(el: Element): string {
@@ -196,6 +203,16 @@ export function getDOMCaptureScript(): () => void {
       return !['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'range', 'color', 'hidden'].includes(t)
     }
 
+    function isContentEditable(el: Element): boolean {
+      return (el as HTMLElement).isContentEditable === true
+    }
+
+    // Use composedPath to pierce Shadow DOM, matching Playwright's deepEventTarget().
+    function getTarget(e: Event): Element | null {
+      const path = e.composedPath()
+      return (path.length > 0 ? path[0] : e.target) as Element | null
+    }
+
     function report(data: object): void {
       try { ;(window as any).__flowtest_report(data) } catch (_) { /* ignore */ }
     }
@@ -203,61 +220,71 @@ export function getDOMCaptureScript(): () => void {
     const focusValues = new WeakMap<Element, string>()
 
     // ── Click ─────────────────────────────────────────────────────────────
+    // Blacklist approach matching Playwright's _shouldIgnoreMouseEvent:
+    // Record ANY element click EXCEPT SELECT/OPTION/html/body/date/range inputs.
     document.addEventListener('click', (e: MouseEvent) => {
-      let el = e.target as Element
+      let el = getTarget(e) as Element
       if (!el?.tagName) return
+
+      const tag = el.tagName.toLowerCase()
+      const type = ((el as HTMLInputElement).type || '').toLowerCase()
+
+      // Playwright blacklist
+      if (tag === 'select' || tag === 'option') return
+      if (tag === 'input' && (type === 'date' || type === 'range')) return
+      if (tag === 'html' || tag === 'body') return
+
+      // Text inputs: report with isInputClick so a subsequent fill can suppress it
       if (isTextInput(el)) {
-        // Always report text input clicks with isInputClick flag.
-        // Node.js will discard it if a fill on the same element follows
-        // (regular typing), or keep it if nothing follows (e.g., opening a dropdown).
         const locatorExpr = getLocatorExpr(el)
         const label = extractLabel(locatorExpr, el)
         report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, isInputClick: true })
         return
       }
-      if (el.tagName.toLowerCase() === 'select') return
 
-      // Bubble up to nearest interactive ancestor (mirrors Playwright codegen)
-      let cur: Element | null = el
-      let foundInteractive = false
-      while (cur) {
-        const t = cur.tagName.toLowerCase()
-        const r = cur.getAttribute('role')
-        const interactive =
-          t === 'button' || t === 'a' ||
-          r === 'button' || r === 'link' || r === 'menuitem' || r === 'tab' || r === 'option'
-        if (interactive) { el = cur; foundInteractive = true; break }
-        if (['form', 'main', 'section', 'article', 'nav', 'header', 'footer'].includes(t)) break
-        cur = cur.parentElement
-      }
-
-      const tag = el.tagName.toLowerCase()
-      const type = ((el as HTMLInputElement).type || '').toLowerCase()
-      const nativeInteractive = ['button', 'a', 'input', 'select', 'textarea', 'label'].includes(tag)
-      if (!foundInteractive && !nativeInteractive) return
-
-      const locatorExpr = getLocatorExpr(el)
-      const label = extractLabel(locatorExpr, el)
-
+      // Checkbox / radio → check / uncheck
       if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
+        const locatorExpr = getLocatorExpr(el)
+        const label = extractLabel(locatorExpr, el)
         report({ kind: (el as HTMLInputElement).checked ? 'check' : 'uncheck', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href })
         return
       }
+
+      // Bubble up to nearest <button> or <a> only for better locator quality —
+      // not as a filter. Any other element still gets recorded.
+      let cur: Element | null = el
+      while (cur) {
+        const t = cur.tagName.toLowerCase()
+        if (t === 'button' || t === 'a') { el = cur; break }
+        if (t === 'html' || t === 'body') break
+        cur = cur.parentElement
+      }
+
+      const locatorExpr = getLocatorExpr(el)
+      const label = extractLabel(locatorExpr, el)
       report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href })
     }, true)
 
     // ── Fill: emit on blur when value changed ──────────────────────────────
+    // Covers text inputs and contentEditable elements (matches Playwright onInput/onFocus).
     document.addEventListener('focus', (e: FocusEvent) => {
-      const el = e.target as HTMLInputElement
-      if (!el?.tagName || !isTextInput(el)) return
-      focusValues.set(el, el.value ?? '')
+      const el = getTarget(e) as Element
+      if (!el?.tagName) return
+      if (!isTextInput(el) && !isContentEditable(el)) return
+      const value = isContentEditable(el)
+        ? (el as HTMLElement).innerText
+        : (el as HTMLInputElement).value ?? ''
+      focusValues.set(el, value)
     }, true)
 
     document.addEventListener('blur', (e: FocusEvent) => {
-      const el = e.target as HTMLInputElement
-      if (!el?.tagName || !isTextInput(el)) return
+      const el = getTarget(e) as Element
+      if (!el?.tagName) return
+      if (!isTextInput(el) && !isContentEditable(el)) return
       const initial = focusValues.get(el)
-      const current = el.value ?? ''
+      const current = isContentEditable(el)
+        ? (el as HTMLElement).innerText
+        : (el as HTMLInputElement).value ?? ''
       focusValues.delete(el)
       if (initial === undefined || current === initial) return
       const locatorExpr = getLocatorExpr(el)
@@ -266,20 +293,41 @@ export function getDOMCaptureScript(): () => void {
 
     // ── SelectOption ───────────────────────────────────────────────────────
     document.addEventListener('change', (e: Event) => {
-      const el = e.target as HTMLSelectElement
-      if (el.tagName.toLowerCase() !== 'select') return
+      const el = getTarget(e) as HTMLSelectElement
+      if (!el?.tagName || el.tagName.toLowerCase() !== 'select') return
       const opt = el.options[el.selectedIndex]
       const locatorExpr = getLocatorExpr(el)
       report({ kind: 'selectOption', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: el.value, selectedText: opt?.text?.trim(), timestamp: Date.now(), url: window.location.href })
     }, true)
 
-    // ── Press: Enter / Escape ──────────────────────────────────────────────
+    // ── Press: matches Playwright's _shouldGenerateKeyPressFor ────────────
+    // Records Tab, Enter (outside textarea/contentEditable), Escape, Arrow keys,
+    // F-keys, and modifier+char combos. Skips Backspace/Delete/paste shortcuts
+    // and bare single-char keys (those become fill values).
     document.addEventListener('keydown', (e: KeyboardEvent) => {
-      if (!['Enter', 'Escape'].includes(e.key)) return
-      const el = e.target as Element
+      if (typeof e.key !== 'string') return
+      const el = getTarget(e) as Element
       if (!el?.tagName) return
-      if (e.key === 'Enter' && el.tagName.toLowerCase() === 'textarea' && !e.ctrlKey && !e.metaKey) return
-      if (!isTextInput(el) && !['button', 'a', 'select'].includes(el.tagName.toLowerCase())) return
+
+      // Skip Enter inside textarea or contentEditable (it's a newline → fill)
+      if (e.key === 'Enter' && (el.tagName.toLowerCase() === 'textarea' || isContentEditable(el))) return
+
+      // Keys Playwright never records
+      if (['Backspace', 'Delete', 'AltGraph'].includes(e.key)) return
+      // @ on certain keyboard layouts triggers Alt+key; skip
+      if (e.key === '@' && (e as any).code === 'KeyL') return
+      // Paste shortcuts
+      const isMac = navigator.platform.includes('Mac')
+      if (isMac  && e.key === 'v' && e.metaKey) return
+      if (!isMac && e.key === 'v' && e.ctrlKey) return
+      if (!isMac && e.key === 'Insert' && e.shiftKey) return
+      // Bare modifier keys
+      if (['Shift', 'Control', 'Meta', 'Alt', 'Process'].includes(e.key)) return
+
+      const hasModifier = e.ctrlKey || e.altKey || e.metaKey
+      // Single printable char without modifier → becomes fill value, not a press
+      if (e.key.length === 1 && !hasModifier) return
+
       const locatorExpr = getLocatorExpr(el)
       report({ kind: 'press', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: e.key, timestamp: Date.now(), url: window.location.href })
     }, true)

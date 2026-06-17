@@ -57,7 +57,7 @@ class BrowserController {
   page = null;
   async launch() {
     this.browser = await playwrightCore.chromium.launch({ headless: false });
-    const context = await this.browser.newContext();
+    const context = await this.browser.newContext({ viewport: null });
     this.page = await context.newPage();
     this.browser.on("disconnected", () => {
       this.browser = null;
@@ -209,6 +209,13 @@ function getDOMCaptureScript() {
       const t = (el.type || "").toLowerCase();
       return !["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "color", "hidden"].includes(t);
     }
+    function isContentEditable(el) {
+      return el.isContentEditable === true;
+    }
+    function getTarget(e) {
+      const path2 = e.composedPath();
+      return path2.length > 0 ? path2[0] : e.target;
+    }
     function report(data) {
       try {
         ;
@@ -218,69 +225,78 @@ function getDOMCaptureScript() {
     }
     const focusValues = /* @__PURE__ */ new WeakMap();
     document.addEventListener("click", (e) => {
-      let el = e.target;
+      let el = getTarget(e);
       if (!el?.tagName) return;
+      const tag = el.tagName.toLowerCase();
+      const type = (el.type || "").toLowerCase();
+      if (tag === "select" || tag === "option") return;
+      if (tag === "input" && (type === "date" || type === "range")) return;
+      if (tag === "html" || tag === "body") return;
       if (isTextInput(el)) {
         const locatorExpr2 = getLocatorExpr(el);
         const label2 = extractLabel(locatorExpr2, el);
         report({ kind: "click", locatorExpr: locatorExpr2, selector: generateCSSSelector(el), label: label2, timestamp: Date.now(), url: window.location.href, isInputClick: true });
         return;
       }
-      if (el.tagName.toLowerCase() === "select") return;
-      let cur = el;
-      let foundInteractive = false;
-      while (cur) {
-        const t = cur.tagName.toLowerCase();
-        const r = cur.getAttribute("role");
-        const interactive = t === "button" || t === "a" || r === "button" || r === "link" || r === "menuitem" || r === "tab" || r === "option";
-        if (interactive) {
-          el = cur;
-          foundInteractive = true;
-          break;
-        }
-        if (["form", "main", "section", "article", "nav", "header", "footer"].includes(t)) break;
-        cur = cur.parentElement;
-      }
-      const tag = el.tagName.toLowerCase();
-      const type = (el.type || "").toLowerCase();
-      const nativeInteractive = ["button", "a", "input", "select", "textarea", "label"].includes(tag);
-      if (!foundInteractive && !nativeInteractive) return;
-      const locatorExpr = getLocatorExpr(el);
-      const label = extractLabel(locatorExpr, el);
       if (tag === "input" && (type === "checkbox" || type === "radio")) {
-        report({ kind: el.checked ? "check" : "uncheck", locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href });
+        const locatorExpr2 = getLocatorExpr(el);
+        const label2 = extractLabel(locatorExpr2, el);
+        report({ kind: el.checked ? "check" : "uncheck", locatorExpr: locatorExpr2, selector: generateCSSSelector(el), label: label2, timestamp: Date.now(), url: window.location.href });
         return;
       }
+      let cur = el;
+      while (cur) {
+        const t = cur.tagName.toLowerCase();
+        if (t === "button" || t === "a") {
+          el = cur;
+          break;
+        }
+        if (t === "html" || t === "body") break;
+        cur = cur.parentElement;
+      }
+      const locatorExpr = getLocatorExpr(el);
+      const label = extractLabel(locatorExpr, el);
       report({ kind: "click", locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href });
     }, true);
     document.addEventListener("focus", (e) => {
-      const el = e.target;
-      if (!el?.tagName || !isTextInput(el)) return;
-      focusValues.set(el, el.value ?? "");
+      const el = getTarget(e);
+      if (!el?.tagName) return;
+      if (!isTextInput(el) && !isContentEditable(el)) return;
+      const value = isContentEditable(el) ? el.innerText : el.value ?? "";
+      focusValues.set(el, value);
     }, true);
     document.addEventListener("blur", (e) => {
-      const el = e.target;
-      if (!el?.tagName || !isTextInput(el)) return;
+      const el = getTarget(e);
+      if (!el?.tagName) return;
+      if (!isTextInput(el) && !isContentEditable(el)) return;
       const initial = focusValues.get(el);
-      const current = el.value ?? "";
+      const current = isContentEditable(el) ? el.innerText : el.value ?? "";
       focusValues.delete(el);
       if (initial === void 0 || current === initial) return;
       const locatorExpr = getLocatorExpr(el);
       report({ kind: "fill", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href });
     }, true);
     document.addEventListener("change", (e) => {
-      const el = e.target;
-      if (el.tagName.toLowerCase() !== "select") return;
+      const el = getTarget(e);
+      if (!el?.tagName || el.tagName.toLowerCase() !== "select") return;
       const opt = el.options[el.selectedIndex];
       const locatorExpr = getLocatorExpr(el);
       report({ kind: "selectOption", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: el.value, selectedText: opt?.text?.trim(), timestamp: Date.now(), url: window.location.href });
     }, true);
     document.addEventListener("keydown", (e) => {
-      if (!["Enter", "Escape"].includes(e.key)) return;
-      const el = e.target;
+      if (typeof e.key !== "string") return;
+      const el = getTarget(e);
       if (!el?.tagName) return;
-      if (e.key === "Enter" && el.tagName.toLowerCase() === "textarea" && !e.ctrlKey && !e.metaKey) return;
-      if (!isTextInput(el) && !["button", "a", "select"].includes(el.tagName.toLowerCase())) return;
+      if (e.key === "Enter" && (el.tagName.toLowerCase() === "textarea" || isContentEditable(el))) return;
+      if (["Backspace", "Delete", "AltGraph"].includes(e.key)) return;
+      if (e.key === "@" && e.code === "KeyL") return;
+      const isMac = navigator.platform.includes("Mac");
+      if (isMac && e.key === "v" && e.metaKey) return;
+      if (!isMac && e.key === "v" && e.ctrlKey) return;
+      if (!isMac && e.key === "Insert" && e.shiftKey) return;
+      if (["Shift", "Control", "Meta", "Alt", "Process"].includes(e.key)) return;
+      const hasModifier = e.ctrlKey || e.altKey || e.metaKey;
+      if (e.key.length === 1 && !hasModifier) return;
       const locatorExpr = getLocatorExpr(el);
       report({ kind: "press", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: e.key, timestamp: Date.now(), url: window.location.href });
     }, true);

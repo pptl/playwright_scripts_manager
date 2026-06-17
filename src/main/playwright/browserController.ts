@@ -6,7 +6,7 @@ export class BrowserController {
 
   async launch(): Promise<void> {
     this.browser = await chromium.launch({ headless: false })
-    const context = await this.browser.newContext()
+    const context = await this.browser.newContext({ viewport: null })
     this.page = await context.newPage()
 
     // Auto-clean when the user closes the browser window manually

@@ -669,9 +669,10 @@ function generateTimestamp() {
   const d = /* @__PURE__ */ new Date();
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}${pad(d.getMilliseconds(), 3)}`;
 }
-function resolveValueWithSession(value, sessionVars) {
+function resolveValueWithSession(value, sessionVars, profileVars) {
   return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
     if (sessionVars.has(name)) return sessionVars.get(name);
+    if (profileVars && name in profileVars) return profileVars[name];
     if (name === "randomText") return generateRandomText();
     if (name === "randomNumber") return generateRandomNumber();
     if (name === "timestamp") return generateTimestamp();
@@ -681,14 +682,20 @@ function resolveValueWithSession(value, sessionVars) {
 function hasVariables(value) {
   return /\{\{.+?\}\}/.test(value);
 }
-function valueToCodeExpr(value) {
+function valueToCodeExpr(value, profileVarKeys) {
   if (!hasVariables(value)) {
     return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
   }
-  const inner = value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{randomText\}\}/g, "${_ftRandomText()}").replace(/\{\{randomNumber\}\}/g, "${_ftRandomNumber()}").replace(/\{\{timestamp\}\}/g, "${_ftTimestamp()}");
+  const inner = value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{(\w+)\}\}/g, (_, name) => {
+    if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`;
+    if (name === "randomText") return "${_ftRandomText()}";
+    if (name === "randomNumber") return "${_ftRandomNumber()}";
+    if (name === "timestamp") return "${_ftTimestamp()}";
+    return `{{${name}}}`;
+  });
   return "`" + inner + "`";
 }
-function sessionAwareValueToCodeExpr(value, sessionVarNames) {
+function sessionAwareValueToCodeExpr(value, sessionVarNames, profileVarKeys) {
   if (!hasVariables(value)) {
     return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
   }
@@ -698,12 +705,16 @@ function sessionAwareValueToCodeExpr(value, sessionVarNames) {
   }
   const inner = value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{(\w+)\}\}/g, (_, name) => {
     if (sessionVarNames.has(name)) return `\${${name}}`;
+    if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`;
     if (name === "randomText") return "${_ftRandomText()}";
     if (name === "randomNumber") return "${_ftRandomNumber()}";
     if (name === "timestamp") return "${_ftTimestamp()}";
     return `{{${name}}}`;
   });
   return "`" + inner + "`";
+}
+function emitProfileVarDecls(profileVars) {
+  return Object.entries(profileVars).map(([key, value]) => `const _ftProf_${key} = ${JSON.stringify(value)};`).join("\n");
 }
 const VARIABLE_HELPERS_CODE = `
 function _ftRandomText(len = 8) {
@@ -722,8 +733,18 @@ function _ftTimestamp() {
 class Replayer {
   page;
   sessionVars = /* @__PURE__ */ new Map();
-  constructor(page) {
+  baseOrigin;
+  profileVars;
+  constructor(page, baseURL = "", profileVars) {
     this.page = page;
+    this.profileVars = profileVars ?? {};
+    this.baseOrigin = (() => {
+      try {
+        return new URL(baseURL).origin;
+      } catch {
+        return "";
+      }
+    })();
   }
   async replayToNode(nodes, targetNodeId, onNodeStart, onNodeComplete, speed = 500) {
     this.sessionVars.clear();
@@ -761,11 +782,23 @@ class Replayer {
     }
     return this.page.locator(action.selector);
   }
+  substituteOrigin(url) {
+    const domainOverride = this.profileVars["domain"];
+    if (!domainOverride || !this.baseOrigin) return url;
+    try {
+      const parsed = new URL(url);
+      if (parsed.origin === this.baseOrigin) {
+        return domainOverride + parsed.pathname + parsed.search + parsed.hash;
+      }
+    } catch {
+    }
+    return url;
+  }
   async executeAction(action) {
-    const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars) : void 0;
+    const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars) : void 0;
     switch (action.type) {
       case "goto":
-        await this.page.goto(val);
+        await this.page.goto(this.substituteOrigin(val));
         break;
       case "click":
         await this.getLocator(action).click();
@@ -947,13 +980,23 @@ class ScriptExporter {
     return paths;
   }
   static generateSpec(flow, paths, nodeMap, config, helperImport) {
+    const profileVars = config.profileVars ?? {};
+    const profileVarKeys = new Set(Object.keys(profileVars));
+    const hasProfileVars = profileVarKeys.size > 0;
+    const baseOrigin = (() => {
+      try {
+        return new URL(flow.baseURL).origin;
+      } catch {
+        return "";
+      }
+    })();
     const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value));
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
       const steps = path2.nodeIds.map((id) => nodeMap.get(id)).filter(Boolean);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const stepCode = steps.map((node) => {
-        const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined);
+        const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, baseOrigin, profileVars);
         const assertCode = node.action.assertion ? ScriptExporter.assertionToCode(node.action) : "";
         if (config.useTestStep) {
           const action2 = rawAction.replace(/\n/g, "\n      ");
@@ -973,6 +1016,8 @@ ${stepCode}
       `import { test, expect } from '@playwright/test';`,
       helperImport,
       usesVariables ? VARIABLE_HELPERS_CODE : "",
+      hasProfileVars ? `
+${emitProfileVarDecls(profileVars)}` : "",
       "",
       `test.describe('${flow.name}', () => {`,
       "",
@@ -981,8 +1026,9 @@ ${stepCode}
       "});"
     ].filter((line) => line !== void 0).join("\n");
   }
-  static actionToCode(node, sessionVarsDefined) {
+  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}) {
     const { action } = node;
+    const profileVarKeys = new Set(Object.keys(profileVars));
     let loc;
     const { locatorExpr, selector } = action;
     if (selector && /^\[name=/.test(selector)) {
@@ -1010,14 +1056,27 @@ ${stepCode}
     const captureAs = action.captureAs;
     let captureDecl = "";
     if (captureAs) {
-      captureDecl = `const ${captureAs} = ${valueToCodeExpr(action.value ?? "")};
+      captureDecl = `const ${captureAs} = ${valueToCodeExpr(action.value ?? "", profileVarKeys)};
 `;
       sessionVarsDefined.add(captureAs);
     }
-    const va = (v) => captureAs ? captureAs : sessionAwareValueToCodeExpr(v, sessionVarsDefined);
+    const va = (v) => captureAs ? captureAs : sessionAwareValueToCodeExpr(v, sessionVarsDefined, profileVarKeys);
     switch (action.type) {
-      case "goto":
-        return `${captureDecl}await page.goto(${va(action.value ?? "")});`;
+      case "goto": {
+        let gotoVal = action.value ?? "";
+        const domainOverride = profileVars["domain"];
+        if (domainOverride && baseOrigin) {
+          try {
+            const parsed = new URL(gotoVal);
+            if (parsed.origin === baseOrigin) {
+              const rest = parsed.pathname + parsed.search + parsed.hash;
+              return `${captureDecl}await page.goto(\`\${_ftProf_domain}${rest}\`);`;
+            }
+          } catch {
+          }
+        }
+        return `${captureDecl}await page.goto(${va(gotoVal)});`;
+      }
       case "click":
         return `await ${loc}.click();`;
       case "fill":
@@ -1113,7 +1172,7 @@ function registerIpcHandlers(win) {
     await browserController.launch();
     const page = browserController.getPage();
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page);
+      const silentReplayer = new Replayer(page, payload.baseURL);
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -1153,7 +1212,7 @@ function registerIpcHandlers(win) {
         await browserController.launch();
       }
       const page = browserController.getPage();
-      replayer = new Replayer(page);
+      replayer = new Replayer(page, payload.baseURL, payload.profileVars);
       await replayer.replayToNode(
         payload.nodes,
         payload.targetNodeId,

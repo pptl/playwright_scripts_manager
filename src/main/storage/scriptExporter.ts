@@ -1,8 +1,14 @@
-﻿import { promises as fs } from 'fs'
+import { promises as fs } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import type { Flow, FlowNode, ExportConfig, TestPath } from '../../shared/types'
-import { hasVariables, valueToCodeExpr, sessionAwareValueToCodeExpr, VARIABLE_HELPERS_CODE } from '../../shared/variableResolver'
+import {
+  hasVariables,
+  valueToCodeExpr,
+  sessionAwareValueToCodeExpr,
+  emitProfileVarDecls,
+  VARIABLE_HELPERS_CODE,
+} from '../../shared/variableResolver'
 
 function exportsDir(): string {
   return app.isPackaged
@@ -76,6 +82,14 @@ export class ScriptExporter {
     config: ExportConfig,
     helperImport: string,
   ): string {
+    const profileVars = config.profileVars ?? {}
+    const profileVarKeys = new Set(Object.keys(profileVars))
+    const hasProfileVars = profileVarKeys.size > 0
+
+    const baseOrigin = (() => {
+      try { return new URL(flow.baseURL).origin } catch { return '' }
+    })()
+
     const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value))
 
     const tests = paths
@@ -85,7 +99,7 @@ export class ScriptExporter {
         const sessionVarsDefined = new Set<string>()
         const stepCode = steps
           .map((node) => {
-            const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined)
+            const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, baseOrigin, profileVars)
             const assertCode = node.action.assertion
               ? ScriptExporter.assertionToCode(node.action)
               : ''
@@ -106,6 +120,7 @@ export class ScriptExporter {
       `import { test, expect } from '@playwright/test';`,
       helperImport,
       usesVariables ? VARIABLE_HELPERS_CODE : '',
+      hasProfileVars ? `\n${emitProfileVarDecls(profileVars)}` : '',
       '',
       `test.describe('${flow.name}', () => {`,
       '',
@@ -117,8 +132,14 @@ export class ScriptExporter {
       .join('\n')
   }
 
-  private static actionToCode(node: FlowNode, sessionVarsDefined: Set<string>): string {
+  private static actionToCode(
+    node: FlowNode,
+    sessionVarsDefined: Set<string>,
+    baseOrigin = '',
+    profileVars: Record<string, string> = {},
+  ): string {
     const { action } = node
+    const profileVarKeys = new Set(Object.keys(profileVars))
 
     // Locator priority:
     // 1. If selector has [name="..."] (form inputs), always use it — it's already
@@ -163,21 +184,33 @@ export class ScriptExporter {
     }
 
     // If this action defines a session variable, emit a const declaration before the action.
-    // The declaration uses valueToCodeExpr (built-in aware); the action argument uses the var name.
     const captureAs = action.captureAs
     let captureDecl = ''
     if (captureAs) {
-      captureDecl = `const ${captureAs} = ${valueToCodeExpr(action.value ?? '')};\n`
+      captureDecl = `const ${captureAs} = ${valueToCodeExpr(action.value ?? '', profileVarKeys)};\n`
       sessionVarsDefined.add(captureAs)
     }
 
     // Value argument: use captureAs var name when this node defines it,
-    // otherwise use session-aware expression so {{varName}} resolves to a bare JS identifier.
-    const va = (v: string) => captureAs ? captureAs : sessionAwareValueToCodeExpr(v, sessionVarsDefined)
+    // otherwise use session-aware expression so {{varName}} resolves to the right reference.
+    const va = (v: string) => captureAs ? captureAs : sessionAwareValueToCodeExpr(v, sessionVarsDefined, profileVarKeys)
 
     switch (action.type) {
-      case 'goto':
-        return `${captureDecl}await page.goto(${va(action.value ?? '')});`
+      case 'goto': {
+        let gotoVal = action.value ?? ''
+        const domainOverride = profileVars['domain']
+        // When the profile has a domain var and the URL matches base origin, emit parameterized goto
+        if (domainOverride && baseOrigin) {
+          try {
+            const parsed = new URL(gotoVal)
+            if (parsed.origin === baseOrigin) {
+              const rest = parsed.pathname + parsed.search + parsed.hash
+              return `${captureDecl}await page.goto(\`\${_ftProf_domain}${rest}\`);`
+            }
+          } catch { /* not a URL, fall through */ }
+        }
+        return `${captureDecl}await page.goto(${va(gotoVal)});`
+      }
       case 'click':
         return `await ${loc}.click();`
       case 'fill':

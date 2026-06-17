@@ -5,6 +5,7 @@ import { FlowList } from './components/FlowList/FlowList'
 import { VariableList } from './components/VariableList/VariableList'
 import { PropertyPanel } from './components/PropertyPanel/PropertyPanel'
 import { SessionVarList } from './components/SessionVarList/SessionVarList'
+import { ProfileVarList } from './components/ProfileVarList/ProfileVarList'
 import { usePlaywrightEvents } from './hooks/usePlaywrightEvents'
 import { useFlowStore } from './stores/flowStore'
 
@@ -28,6 +29,7 @@ export default function App() {
         {selectedNodeId && (
           <div style={{ display: 'flex', flexDirection: 'column', width: 200, flexShrink: 0, borderLeft: '1px solid #334155', overflow: 'hidden' }}>
             <VariableList />
+            <ProfileVarList />
             <SessionVarList />
           </div>
         )}

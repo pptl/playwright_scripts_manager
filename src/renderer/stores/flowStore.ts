@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import type { Flow, FlowNode, Action, NodePosition } from '../../shared/types'
+import type { Flow, FlowNode, Action, NodePosition, FlowProfile } from '../../shared/types'
 
 const NODE_VERTICAL_GAP = 80
 const NODE_START_Y = 50
@@ -42,6 +42,33 @@ interface FlowStore {
   setReplaySpeed: (ms: number) => void
   isPickingAssertion: boolean
   setIsPickingAssertion: (v: boolean) => void
+
+  // Environment profiles
+  /** ID of the currently active profile; null = no active profile (no substitution) */
+  activeProfileId: string | null
+  setActiveProfile: (id: string | null) => void
+  addProfile: (name: string) => Promise<void>
+  updateProfile: (id: string, updates: Partial<Pick<FlowProfile, 'name' | 'vars'>>) => Promise<void>
+  deleteProfile: (id: string) => Promise<void>
+  /** Append a new empty variable row to EVERY profile (keys must stay in sync) */
+  addVarToAllProfiles: () => Promise<void>
+  /** Rename the variable at the given index across ALL profiles */
+  updateVarKeyInAllProfiles: (index: number, newKey: string) => Promise<void>
+  /** Delete the variable at the given index from ALL profiles */
+  deleteVarFromAllProfiles: (index: number) => Promise<void>
+}
+
+/** Migrate legacy domains[] field to profiles[] in memory (no auto-save). */
+function migrateDomainsToProfiles(flow: Flow): FlowProfile[] {
+  if (flow.profiles && flow.profiles.length > 0) return flow.profiles
+  if (flow.domains && flow.domains.length > 0) {
+    return flow.domains.map((origin, i) => ({
+      id: uuidv4(),
+      name: i === 0 ? '錄製' : origin,
+      vars: [{ key: 'domain', value: origin }],
+    }))
+  }
+  return []
 }
 
 export const useFlowStore = create<FlowStore>((set, get) => ({
@@ -55,10 +82,17 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   recordingHeadId: null,
   replaySpeed: 500,
   isPickingAssertion: false,
+  activeProfileId: null,
 
   setFlows: (flows) => set({ flows }),
 
   createFlow: (name, baseURL, description) => {
+    const origin = (() => { try { return new URL(baseURL).origin } catch { return baseURL } })()
+    const firstProfile: FlowProfile = {
+      id: uuidv4(),
+      name: '錄製',
+      vars: [{ key: 'domain', value: origin }],
+    }
     const flow: Flow = {
       id: uuidv4(),
       name,
@@ -66,14 +100,30 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       baseURL,
+      profiles: [firstProfile],
       nodes: [],
       rootNodeId: '',
     }
-    set({ currentFlow: flow })
+    set({ currentFlow: flow, activeProfileId: firstProfile.id })
     return flow
   },
 
-  setCurrentFlow: (flow) => set({ currentFlow: flow, selectedNodeId: null, replayStatus: {}, recordingHeadId: null }),
+  setCurrentFlow: (flow) => {
+    if (!flow) {
+      set({ currentFlow: null, selectedNodeId: null, replayStatus: {}, recordingHeadId: null, activeProfileId: null })
+      return
+    }
+    // Migrate old flows that have domains[] but no profiles[]
+    const profiles = migrateDomainsToProfiles(flow)
+    const migratedFlow = profiles !== flow.profiles ? { ...flow, profiles } : flow
+    set({
+      currentFlow: migratedFlow,
+      selectedNodeId: null,
+      replayStatus: {},
+      recordingHeadId: null,
+      activeProfileId: profiles[0]?.id ?? null,
+    })
+  },
 
   setRecordingHead: (id) => set({ recordingHeadId: id }),
 
@@ -174,4 +224,95 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setIsReplaying: (v) => set({ isReplaying: v }),
   setReplaySpeed: (ms) => set({ replaySpeed: ms }),
   setIsPickingAssertion: (v) => set({ isPickingAssertion: v }),
+
+  setActiveProfile: (id) => set({ activeProfileId: id }),
+
+  addProfile: async (name) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const newProfile: FlowProfile = { id: uuidv4(), name, vars: [] }
+    const updatedFlow: Flow = {
+      ...flow,
+      profiles: [...(flow.profiles ?? []), newProfile],
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow })
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
+
+  updateProfile: async (id, updates) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const updatedFlow: Flow = {
+      ...flow,
+      profiles: (flow.profiles ?? []).map((p) =>
+        p.id === id ? { ...p, ...updates } : p,
+      ),
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow })
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
+
+  deleteProfile: async (id) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const updatedProfiles = (flow.profiles ?? []).filter((p) => p.id !== id)
+    const { activeProfileId } = get()
+    const updatedFlow: Flow = {
+      ...flow,
+      profiles: updatedProfiles,
+      updatedAt: new Date().toISOString(),
+    }
+    set({
+      currentFlow: updatedFlow,
+      activeProfileId: activeProfileId === id ? (updatedProfiles[0]?.id ?? null) : activeProfileId,
+    })
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
+
+  addVarToAllProfiles: async () => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const updatedFlow: Flow = {
+      ...flow,
+      profiles: (flow.profiles ?? []).map((p) => ({
+        ...p,
+        vars: [...p.vars, { key: '', value: '', description: '' }],
+      })),
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow })
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
+
+  updateVarKeyInAllProfiles: async (index, newKey) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const updatedFlow: Flow = {
+      ...flow,
+      profiles: (flow.profiles ?? []).map((p) => ({
+        ...p,
+        vars: p.vars.map((v, i) => (i === index ? { ...v, key: newKey } : v)),
+      })),
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow })
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
+
+  deleteVarFromAllProfiles: async (index) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const updatedFlow: Flow = {
+      ...flow,
+      profiles: (flow.profiles ?? []).map((p) => ({
+        ...p,
+        vars: p.vars.filter((_, i) => i !== index),
+      })),
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow })
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
 }))

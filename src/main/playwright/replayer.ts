@@ -9,9 +9,13 @@ type NodeCompleteCallback = (nodeId: string, success: boolean, error?: string) =
 export class Replayer {
   private page: Page
   private sessionVars = new Map<string, string>()
+  private baseOrigin: string
+  private profileVars: Record<string, string>
 
-  constructor(page: Page) {
+  constructor(page: Page, baseURL = '', profileVars?: Record<string, string>) {
     this.page = page
+    this.profileVars = profileVars ?? {}
+    this.baseOrigin = (() => { try { return new URL(baseURL).origin } catch { return '' } })()
   }
 
   async replayToNode(
@@ -62,11 +66,27 @@ export class Replayer {
     return this.page.locator(action.selector)
   }
 
+  private substituteOrigin(url: string): string {
+    const domainOverride = this.profileVars['domain']
+    if (!domainOverride || !this.baseOrigin) return url
+    try {
+      const parsed = new URL(url)
+      if (parsed.origin === this.baseOrigin) {
+        return domainOverride + parsed.pathname + parsed.search + parsed.hash
+      }
+    } catch {
+      // not a valid URL — return as-is
+    }
+    return url
+  }
+
   private async executeAction(action: Action): Promise<void> {
-    const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars) : undefined
+    const val = action.value != null
+      ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars)
+      : undefined
     switch (action.type) {
       case 'goto':
-        await this.page.goto(val!)
+        await this.page.goto(this.substituteOrigin(val!))
         break
       case 'click':
         await this.getLocator(action).click()

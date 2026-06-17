@@ -50,6 +50,18 @@ export interface FlowNode {
   branchLabel?: string
 }
 
+export interface ProfileVariable {
+  key: string
+  value: string
+  description?: string
+}
+
+export interface FlowProfile {
+  id: string
+  name: string
+  vars: ProfileVariable[]
+}
+
 export interface Flow {
   id: string
   name: string
@@ -57,6 +69,10 @@ export interface Flow {
   createdAt: string
   updatedAt: string
   baseURL: string
+  /** Environment profiles — each holds a named set of key-value variables (e.g. domain, admin_name) */
+  profiles?: FlowProfile[]
+  /** @deprecated migrated to profiles */
+  domains?: string[]
   nodes: FlowNode[]
   rootNodeId: string
 }
@@ -65,6 +81,8 @@ export interface ExportConfig {
   outputDir: string
   helperFunctions: boolean
   useTestStep: boolean
+  /** Active profile's variables as a flat map — used for replay substitution and code generation */
+  profileVars?: Record<string, string>
 }
 
 export interface TestPath {
@@ -118,6 +136,10 @@ export interface ReplayToNodePayload {
   nodes: FlowNode[]
   targetNodeId: string
   speed: number
+  /** Flow's baseURL — used to derive base origin for goto URL substitution */
+  baseURL?: string
+  /** Active profile's variables — used for variable resolution and goto origin substitution */
+  profileVars?: Record<string, string>
 }
 
 export interface ReplayNodeCompletePayload {

@@ -5,7 +5,7 @@ export interface ElectronAPI {
   closeBrowser: () => Promise<void>
   startRecording: (payload: RecordingStartPayload) => Promise<void>
   stopRecording: () => Promise<void>
-  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number) => Promise<void>
+  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>) => Promise<void>
   stopReplay: () => Promise<void>
   saveFlow: (flow: Flow) => Promise<void>
   loadFlow: (flowId: string) => Promise<Flow | null>

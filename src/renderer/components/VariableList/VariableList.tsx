@@ -35,7 +35,6 @@ export function VariableList() {
       </div>
 
       <div>
-        {/* TODO: phase 2 — add/edit/delete variables */}
         {BUILT_IN_VARIABLES.map((v) => (
           <div
             key={v.name}

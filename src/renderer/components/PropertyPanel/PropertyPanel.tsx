@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 
 export function PropertyPanel() {
-  const { currentFlow, selectedNodeId, updateNode, saveCurrentFlow } = useFlowStore()
+  const { currentFlow, selectedNodeId, updateNode } = useFlowStore()
   const selectedNode = currentFlow?.nodes.find((n) => n.id === selectedNodeId)
 
   const [desc, setDesc] = useState('')

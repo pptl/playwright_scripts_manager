@@ -34,7 +34,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   startRecording: (payload) => electron.ipcRenderer.invoke(IPC_CHANNELS.RECORDING_START, payload),
   stopRecording: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RECORDING_STOP),
   // Replay
-  replayToNode: (nodes, targetNodeId, speed) => electron.ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed }),
+  replayToNode: (nodes, targetNodeId, speed, baseURL, profileVars) => electron.ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars }),
   stopReplay: () => electron.ipcRenderer.invoke(IPC_CHANNELS.REPLAY_STOP),
   // Storage
   saveFlow: (flow) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_SAVE, { flow }),

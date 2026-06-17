@@ -58,12 +58,25 @@ export function usePlaywright() {
 
   const replayToNode = useCallback(
     async (targetNodeId: string, speed: number) => {
-      const flow = useFlowStore.getState().currentFlow
-      if (!flow) return
+      const { currentFlow, activeProfileId } = useFlowStore.getState()
+      if (!currentFlow) return
       clearReplayStatus()
       setIsReplaying(true)
+
+      // Build profileVars from active profile
+      const activeProfile = currentFlow.profiles?.find((p) => p.id === activeProfileId)
+      const profileVars = activeProfile
+        ? Object.fromEntries(activeProfile.vars.map((v) => [v.key, v.value]))
+        : undefined
+
       try {
-        await window.electronAPI.replayToNode(flow.nodes, targetNodeId, speed)
+        await window.electronAPI.replayToNode(
+          currentFlow.nodes,
+          targetNodeId,
+          speed,
+          currentFlow.baseURL,
+          profileVars,
+        )
       } catch (err) {
         console.error('Replay IPC error:', err)
       } finally {
@@ -75,4 +88,3 @@ export function usePlaywright() {
 
   return { startRecording, startBranchRecording, stopRecording, replayToNode }
 }
-

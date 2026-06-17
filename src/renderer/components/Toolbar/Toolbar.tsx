@@ -3,6 +3,7 @@ import { useFlowStore } from '../../stores/flowStore'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import { useFlowManager } from '../../hooks/useFlowStore'
 import { TestOutputModal } from './TestOutputModal'
+import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
 import type { ActionType, ExportConfig, TestFinishedPayload } from '../../../shared/types'
 
 const assertBtn = (label: string, onClick: () => void) => (
@@ -43,7 +44,18 @@ const btn = (label: string, onClick: () => void, disabled = false, danger = fals
 )
 
 export function Toolbar() {
-  const { currentFlow, isRecording, isReplaying, selectedNodeId, replaySpeed, setReplaySpeed, isPickingAssertion, setIsPickingAssertion } = useFlowStore()
+  const {
+    currentFlow,
+    isRecording,
+    isReplaying,
+    selectedNodeId,
+    replaySpeed,
+    setReplaySpeed,
+    isPickingAssertion,
+    setIsPickingAssertion,
+    activeProfileId,
+    setActiveProfile,
+  } = useFlowStore()
   const { startRecording, stopRecording } = usePlaywright()
   const { newFlow } = useFlowManager()
   const [showNewFlowDialog, setShowNewFlowDialog] = useState(false)
@@ -55,6 +67,35 @@ export function Toolbar() {
   const [testFinished, setTestFinished] = useState<TestFinishedPayload | null>(null)
   const testLinesRef = useRef<string[]>([])
   const hasNodes = (currentFlow?.nodes.length ?? 0) > 0
+
+  // Profile selector state
+  const [showProfileMenu, setShowProfileMenu] = useState(false)
+  const [showProfileEditor, setShowProfileEditor] = useState(false)
+  const profileMenuRef = useRef<HTMLDivElement>(null)
+
+  // Close profile menu on outside click
+  useEffect(() => {
+    if (!showProfileMenu) return
+    const handler = (e: MouseEvent) => {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(e.target as Node)) {
+        setShowProfileMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showProfileMenu])
+
+  // Derive current profile info
+  const profiles = currentFlow?.profiles ?? []
+  const activeProfile = profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null
+  const activeProfileName = activeProfile?.name ?? '— 無配置 —'
+  const isOverriding = activeProfile !== null && activeProfile !== profiles[0]
+
+  /** Build profileVars Record from the active profile */
+  function getProfileVars(): Record<string, string> | undefined {
+    if (!activeProfile) return undefined
+    return Object.fromEntries(activeProfile.vars.map((v) => [v.key, v.value]))
+  }
 
   useEffect(() => {
     const offOutput = window.electronAPI.onTestOutput((line) => {
@@ -94,6 +135,7 @@ export function Toolbar() {
       outputDir: '',
       helperFunctions: false,
       useTestStep: true,
+      profileVars: getProfileVars(),
     }
     try {
       const path = await window.electronAPI.exportScripts(currentFlow, config)
@@ -105,7 +147,12 @@ export function Toolbar() {
 
   const handleRunTests = async () => {
     if (!currentFlow || isRunningTests) return
-    const config: ExportConfig = { outputDir: '', helperFunctions: false, useTestStep: true }
+    const config: ExportConfig = {
+      outputDir: '',
+      helperFunctions: false,
+      useTestStep: true,
+      profileVars: getProfileVars(),
+    }
     testLinesRef.current = []
     setTestLines([])
     setTestFinished(null)
@@ -196,6 +243,108 @@ export function Toolbar() {
         ))}
       </div>
 
+      {/* Profile selector — only visible when a flow is loaded */}
+      {currentFlow && (
+        <div ref={profileMenuRef} style={{ position: 'relative', marginLeft: 8 }}>
+          <button
+            onClick={() => setShowProfileMenu((v) => !v)}
+            title="切換環境配置"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              padding: '3px 10px',
+              borderRadius: 4,
+              border: `1px solid ${isOverriding ? '#f59e0b' : '#475569'}`,
+              cursor: 'pointer',
+              background: isOverriding ? '#78350f' : '#1e293b',
+              color: isOverriding ? '#fcd34d' : '#94a3b8',
+              fontSize: 12,
+              fontWeight: isOverriding ? 600 : 400,
+              whiteSpace: 'nowrap',
+              maxWidth: 160,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            ⚙ {activeProfileName} ▾
+          </button>
+
+          {showProfileMenu && (
+            <div
+              style={{
+                position: 'absolute',
+                top: 'calc(100% + 6px)',
+                right: 0,
+                background: '#1e293b',
+                border: '1px solid #334155',
+                borderRadius: 8,
+                minWidth: 220,
+                zIndex: 2000,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                padding: '6px 0',
+              }}
+            >
+              <div style={{ padding: '4px 12px 8px', fontSize: 11, color: '#64748b', borderBottom: '1px solid #334155' }}>
+                環境配置
+              </div>
+
+              {profiles.map((p) => {
+                const isSelected = p.id === (activeProfile?.id ?? profiles[0]?.id)
+                return (
+                  <div
+                    key={p.id}
+                    onClick={() => {
+                      setActiveProfile(p.id)
+                      setShowProfileMenu(false)
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '7px 12px',
+                      cursor: 'pointer',
+                      background: isSelected ? '#1e3a5f' : 'transparent',
+                      color: isSelected ? '#93c5fd' : '#cbd5e1',
+                      fontSize: 13,
+                    }}
+                    onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                    onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+                  >
+                    <span style={{ fontSize: 10, width: 10, flexShrink: 0 }}>{isSelected ? '●' : '○'}</span>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {p.name}
+                    </span>
+                    <span style={{ fontSize: 10, color: '#475569', flexShrink: 0 }}>
+                      {p.vars.length} 個變數
+                    </span>
+                  </div>
+                )
+              })}
+
+              <div
+                onClick={() => { setShowProfileMenu(false); setShowProfileEditor(true) }}
+                style={{
+                  padding: '7px 12px',
+                  color: '#3b82f6',
+                  fontSize: 13,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  borderTop: '1px solid #334155',
+                  marginTop: 4,
+                }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+              >
+                ✎ 管理配置...
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {currentFlow && (
         <span style={{ fontSize: 12, color: '#64748b', marginLeft: 12 }}>{currentFlow.name}</span>
       )}
@@ -266,6 +415,11 @@ export function Toolbar() {
           finished={testFinished}
           onClose={() => setShowTestModal(false)}
         />
+      )}
+
+      {/* Profile Editor Modal */}
+      {showProfileEditor && (
+        <ProfileEditorModal onClose={() => setShowProfileEditor(false)} />
       )}
     </div>
   )

@@ -1,9 +1,12 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
+import { isCallFlowAction } from '@shared/types'
+import type { Flow } from '@shared/types'
 
 export function SessionVarList() {
-  const { currentFlow, updateNode } = useFlowStore()
+  const { currentFlow, selectedNodeId, updateNode } = useFlowStore()
   const [copiedName, setCopiedName] = useState<string | null>(null)
+  const [subFlowVars, setSubFlowVars] = useState<{ flowName: string; varName: string; placeholder: string }[]>([])
 
   const sessionVars = (currentFlow?.nodes ?? [])
     .filter((n) => !!n.action.captureAs)
@@ -14,6 +17,44 @@ export function SessionVarList() {
       description: n.action.description,
       value: n.action.value ?? '',
     }))
+
+  // Collect ancestor callFlow nodes of the currently selected node
+  const ancestorCallFlowNodes = useMemo(() => {
+    if (!currentFlow || !selectedNodeId) return []
+    const nodeMap = new Map(currentFlow.nodes.map((n) => [n.id, n]))
+    const ancestors = []
+    let cur = nodeMap.get(selectedNodeId)
+    while (cur?.parentId) {
+      cur = nodeMap.get(cur.parentId)
+      if (cur && isCallFlowAction(cur.action)) ancestors.push(cur)
+    }
+    return ancestors
+  }, [currentFlow, selectedNodeId])
+
+  // Load sub-flow captureAs vars for each ancestor callFlow node
+  useEffect(() => {
+    if (ancestorCallFlowNodes.length === 0) {
+      setSubFlowVars([])
+      return
+    }
+    let cancelled = false
+    Promise.all(
+      ancestorCallFlowNodes.map(async (node) => {
+        const sub: Flow | null = await window.electronAPI.getFlow(node.action.subFlowId!)
+        if (!sub) return []
+        return sub.nodes
+          .filter((sn) => !!sn.action.captureAs)
+          .map((sn) => ({
+            flowName: sub.name,
+            varName: sn.action.captureAs!,
+            placeholder: `{{${sn.action.captureAs}}}`,
+          }))
+      }),
+    ).then((results) => {
+      if (!cancelled) setSubFlowVars(results.flat())
+    })
+    return () => { cancelled = true }
+  }, [ancestorCallFlowNodes])
 
   const deleteVar = (nodeId: string) => {
     const node = currentFlow?.nodes.find((n) => n.id === nodeId)
@@ -57,7 +98,56 @@ export function SessionVarList() {
       </div>
 
       <div style={{ overflowY: 'auto', flex: 1 }}>
-        {sessionVars.length === 0 ? (
+        {/* Sub-flow session vars from ancestor callFlow nodes */}
+        {subFlowVars.length > 0 && (
+          <>
+            <div style={{
+              padding: '8px 14px 4px',
+              fontSize: 10,
+              color: '#f59e0b',
+              fontWeight: 600,
+              textTransform: 'uppercase',
+              letterSpacing: '0.06em',
+              borderBottom: '1px solid #334155',
+            }}>
+              ⛓ 子流程變數
+            </div>
+            {subFlowVars.map((v) => (
+              <div
+                key={`subflow-${v.varName}`}
+                onClick={() => copyToClipboard(v.placeholder, `subflow-${v.varName}`)}
+                title={`點擊複製 ${v.placeholder}（來自 ${v.flowName}）`}
+                style={{
+                  padding: '6px 14px',
+                  cursor: 'pointer',
+                  borderBottom: '1px solid #0f172a',
+                  userSelect: 'none',
+                }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#1c1a12' }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <code style={{
+                    fontSize: 11,
+                    background: '#0f172a',
+                    color: '#f59e0b',
+                    padding: '1px 5px',
+                    borderRadius: 3,
+                    border: '1px solid #78350f',
+                  }}>
+                    {v.placeholder}
+                  </code>
+                  {copiedName === `subflow-${v.varName}` && (
+                    <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>已複製</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: '#78350f', marginTop: 2 }}>{v.flowName}</div>
+              </div>
+            ))}
+          </>
+        )}
+
+        {sessionVars.length === 0 && subFlowVars.length === 0 ? (
           <div style={{ padding: '16px 14px', color: '#64748b', fontSize: 12 }}>
             尚無區域變數。
             <br />
@@ -65,7 +155,7 @@ export function SessionVarList() {
               右鍵節點 →「將值儲存為區域變數」
             </span>
           </div>
-        ) : (
+        ) : sessionVars.length > 0 ? (
           sessionVars.map((v) => (
             <div
               key={v.varName}
@@ -163,7 +253,7 @@ export function SessionVarList() {
               )}
             </div>
           ))
-        )}
+        ) : null}
       </div>
     </div>
   )

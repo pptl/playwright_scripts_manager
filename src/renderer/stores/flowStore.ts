@@ -31,6 +31,10 @@ interface FlowStore {
   updateNode: (nodeId: string, updates: Partial<FlowNode>) => void
   deleteNode: (nodeId: string) => void
   selectNode: (nodeId: string | null) => void
+  /** Insert a callFlow node between nodeId's parent and nodeId. Throws if nodeId is root. */
+  insertCallFlowBefore: (nodeId: string, callFlowAction: Action) => FlowNode
+  /** Append a callFlow node as the sole child of nodeId. Throws if nodeId already has children. */
+  appendCallFlowAfter: (nodeId: string, callFlowAction: Action) => FlowNode
 
   // Replay status
   setReplayingNode: (nodeId: string | null) => void
@@ -210,10 +214,12 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
         childIds: n.childIds.filter((cid) => !toDelete.has(cid)),
       }))
 
+    const newRoot = updatedNodes.find((n) => n.parentId === null)
     set({
       currentFlow: {
         ...flow,
         nodes: updatedNodes,
+        rootNodeId: newRoot?.id ?? '',
         updatedAt: new Date().toISOString(),
       },
       selectedNodeId: null,
@@ -221,6 +227,67 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   },
 
   selectNode: (nodeId) => set({ selectedNodeId: nodeId }),
+
+  insertCallFlowBefore: (nodeId, callFlowAction) => {
+    const flow = get().currentFlow
+    if (!flow) throw new Error('No active flow')
+    const node = flow.nodes.find((n) => n.id === nodeId)
+    if (!node) throw new Error(`Node "${nodeId}" not found`)
+    if (node.parentId === null) throw new Error('Cannot insert before root node')
+
+    const parent = flow.nodes.find((n) => n.id === node.parentId)!
+    const callFlowNode: FlowNode = {
+      id: callFlowAction.id,
+      action: callFlowAction,
+      position: { x: node.position.x, y: node.position.y },
+      parentId: node.parentId,
+      childIds: [nodeId],
+      branchLabel: node.branchLabel,
+    }
+
+    const updatedNodes = flow.nodes.map((n) => {
+      if (n.id === node.parentId) {
+        return {
+          ...parent,
+          childIds: parent.childIds.map((cid) => (cid === nodeId ? callFlowNode.id : cid)),
+        }
+      }
+      if (n.id === nodeId) {
+        return { ...n, parentId: callFlowNode.id, branchLabel: undefined }
+      }
+      return n
+    })
+    updatedNodes.push(callFlowNode)
+
+    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
+    set({ currentFlow: updatedFlow })
+    return callFlowNode
+  },
+
+  appendCallFlowAfter: (nodeId, callFlowAction) => {
+    const flow = get().currentFlow
+    if (!flow) throw new Error('No active flow')
+    const node = flow.nodes.find((n) => n.id === nodeId)
+    if (!node) throw new Error(`Node "${nodeId}" not found`)
+    if (node.childIds.length > 0) throw new Error('Cannot append after a node that already has children')
+
+    const callFlowNode: FlowNode = {
+      id: callFlowAction.id,
+      action: callFlowAction,
+      position: { x: node.position.x, y: node.position.y + NODE_VERTICAL_GAP },
+      parentId: nodeId,
+      childIds: [],
+    }
+
+    const updatedNodes = flow.nodes.map((n) =>
+      n.id === nodeId ? { ...n, childIds: [...n.childIds, callFlowNode.id] } : n,
+    )
+    updatedNodes.push(callFlowNode)
+
+    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
+    set({ currentFlow: updatedFlow })
+    return callFlowNode
+  },
 
   setReplayingNode: (nodeId) => set({ replayingNodeId: nodeId }),
 

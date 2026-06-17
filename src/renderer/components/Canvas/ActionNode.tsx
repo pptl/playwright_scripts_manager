@@ -16,6 +16,7 @@ const TYPE_COLORS: Record<string, string> = {
   assertVisible: '#22c55e',
   assertText: '#22c55e',
   assertValue: '#22c55e',
+  callFlow: '#f59e0b',
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -31,6 +32,7 @@ const TYPE_ICONS: Record<string, string> = {
   assertVisible: '👁',
   assertText: '📝',
   assertValue: '🔢',
+  callFlow: '⛓',
 }
 
 export interface ActionNodeData {
@@ -51,13 +53,14 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
   if (nodeStatus === 'error') borderColor = '#ef4444'
 
   const borderWidth = action.isPageNavigation ? 3 : 1.5
+  const borderStyle = action.type === 'callFlow' ? 'dashed' : 'solid'
   const animation = isReplaying ? 'pulse 0.8s infinite' : 'none'
 
   return (
     <div
       style={{
         background: '#1e1e3a',
-        border: `${borderWidth}px solid ${borderColor}`,
+        border: `${borderWidth}px ${borderStyle} ${borderColor}`,
         borderRadius: 8,
         padding: '8px 12px',
         minWidth: 180,

@@ -26,6 +26,9 @@ function _interopNamespaceDefault(e) {
 const path__namespace = /* @__PURE__ */ _interopNamespaceDefault(path);
 const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
 const vm__namespace = /* @__PURE__ */ _interopNamespaceDefault(vm);
+function isCallFlowAction(action) {
+  return action.type === "callFlow" && typeof action.subFlowId === "string" && typeof action.subFlowExitNodeId === "string";
+}
 const IPC_CHANNELS = {
   // Renderer → Main
   BROWSER_LAUNCH: "browser:launch",
@@ -41,6 +44,8 @@ const IPC_CHANNELS = {
   EXPORT_SCRIPTS: "export:scripts",
   RUN_TESTS: "test:run",
   SHOW_REPORT: "test:showReport",
+  FLOW_GET: "flow:get",
+  FLOW_CHECK_CYCLE: "flow:checkCycle",
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: "assertion:pickStart",
   // Main → Renderer
@@ -749,6 +754,52 @@ function _ftTimestamp() {
   return \`\${d.getFullYear()}\${p(d.getMonth() + 1)}\${p(d.getDate())}\${p(d.getHours())}\${p(d.getMinutes())}\${p(d.getSeconds())}\${p(d.getMilliseconds(), 3)}\`;
 }
 `;
+function flowsDir() {
+  const base = electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "flows") : path.join(process.cwd(), "flows");
+  return base;
+}
+class FlowStorage {
+  static async ensureDir() {
+    await fs.promises.mkdir(flowsDir(), { recursive: true });
+  }
+  static filePath(flowId) {
+    return path.join(flowsDir(), `${flowId}.json`);
+  }
+  static async save(flow) {
+    await FlowStorage.ensureDir();
+    flow.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    await fs.promises.writeFile(FlowStorage.filePath(flow.id), JSON.stringify(flow, null, 2), "utf-8");
+  }
+  static async load(flowId) {
+    try {
+      const raw = await fs.promises.readFile(FlowStorage.filePath(flowId), "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  static async list() {
+    await FlowStorage.ensureDir();
+    const files = await fs.promises.readdir(flowsDir());
+    const results = [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const raw = await fs.promises.readFile(path.join(flowsDir(), file), "utf-8");
+        const flow = JSON.parse(raw);
+        results.push({ id: flow.id, name: flow.name, description: flow.description, updatedAt: flow.updatedAt });
+      } catch {
+      }
+    }
+    return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+  static async delete(flowId) {
+    try {
+      await fs.promises.unlink(FlowStorage.filePath(flowId));
+    } catch {
+    }
+  }
+}
 class Replayer {
   page;
   sessionVars = /* @__PURE__ */ new Map();
@@ -775,9 +826,13 @@ class Replayer {
     for (const node of path2) {
       onNodeStart(node.id);
       try {
-        await this.executeAction(node.action);
-        if (node.action.assertion) {
-          await this.executeAssertion(node.action);
+        if (isCallFlowAction(node.action)) {
+          await this.executeCallFlow(node.action, onNodeStart, onNodeComplete, speed);
+        } else {
+          await this.executeAction(node.action);
+          if (node.action.assertion) {
+            await this.executeAssertion(node.action);
+          }
         }
         onNodeComplete(node.id, true);
       } catch (err) {
@@ -785,6 +840,31 @@ class Replayer {
         throw err;
       }
       await new Promise((res) => setTimeout(res, speed));
+    }
+  }
+  getSessionVars() {
+    return this.sessionVars;
+  }
+  async executeCallFlow(action, onNodeStart, onNodeComplete, speed) {
+    const subFlow = await FlowStorage.load(action.subFlowId);
+    if (!subFlow) throw new Error(`子流程 "${action.subFlowId}" 不存在`);
+    let subProfileVars = {};
+    if (action.subFlowProfileId) {
+      const profile = subFlow.profiles?.find((p) => p.id === action.subFlowProfileId);
+      if (profile) {
+        subProfileVars = Object.fromEntries(profile.vars.map((v) => [v.key, v.value]));
+      }
+    }
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars);
+    await nested.replayToNode(
+      subFlow.nodes,
+      action.subFlowExitNodeId,
+      onNodeStart,
+      onNodeComplete,
+      speed
+    );
+    for (const [k, v] of nested.getSessionVars()) {
+      this.sessionVars.set(k, v);
     }
   }
   /**
@@ -902,52 +982,6 @@ class Replayer {
     return path2;
   }
 }
-function flowsDir() {
-  const base = electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "flows") : path.join(process.cwd(), "flows");
-  return base;
-}
-class FlowStorage {
-  static async ensureDir() {
-    await fs.promises.mkdir(flowsDir(), { recursive: true });
-  }
-  static filePath(flowId) {
-    return path.join(flowsDir(), `${flowId}.json`);
-  }
-  static async save(flow) {
-    await FlowStorage.ensureDir();
-    flow.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    await fs.promises.writeFile(FlowStorage.filePath(flow.id), JSON.stringify(flow, null, 2), "utf-8");
-  }
-  static async load(flowId) {
-    try {
-      const raw = await fs.promises.readFile(FlowStorage.filePath(flowId), "utf-8");
-      return JSON.parse(raw);
-    } catch {
-      return null;
-    }
-  }
-  static async list() {
-    await FlowStorage.ensureDir();
-    const files = await fs.promises.readdir(flowsDir());
-    const results = [];
-    for (const file of files) {
-      if (!file.endsWith(".json")) continue;
-      try {
-        const raw = await fs.promises.readFile(path.join(flowsDir(), file), "utf-8");
-        const flow = JSON.parse(raw);
-        results.push({ id: flow.id, name: flow.name, description: flow.description, updatedAt: flow.updatedAt });
-      } catch {
-      }
-    }
-    return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  }
-  static async delete(flowId) {
-    try {
-      await fs.promises.unlink(FlowStorage.filePath(flowId));
-    } catch {
-    }
-  }
-}
 function exportsDir() {
   return electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "exports") : path.join(process.cwd(), "exports");
 }
@@ -955,6 +989,7 @@ class ScriptExporter {
   static async export(flow, config) {
     const outputDir = config.outputDir || exportsDir();
     await fs.promises.mkdir(outputDir, { recursive: true });
+    const subFlowMap = await ScriptExporter.resolveSubFlows(flow);
     const paths = ScriptExporter.computePaths(flow);
     const nodeMap = new Map(flow.nodes.map((n) => [n.id, n]));
     let helperImport = "";
@@ -969,10 +1004,60 @@ class ScriptExporter {
         await fs.promises.writeFile(path.join(helpersDir, `${flow.id}-helpers.ts`), helperCode, "utf-8");
       }
     }
-    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport);
+    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap);
     const specPath = path.join(outputDir, `${flow.id}.spec.ts`);
     await fs.promises.writeFile(specPath, specContent, "utf-8");
     return specPath;
+  }
+  static async resolveSubFlows(flow, visited = /* @__PURE__ */ new Set()) {
+    const result = /* @__PURE__ */ new Map();
+    for (const node of flow.nodes) {
+      if (isCallFlowAction(node.action) && !visited.has(node.action.subFlowId)) {
+        visited.add(node.action.subFlowId);
+        const sub = await FlowStorage.load(node.action.subFlowId);
+        if (sub) {
+          result.set(sub.id, sub);
+          const nested = await ScriptExporter.resolveSubFlows(sub, visited);
+          for (const [k, v] of nested) result.set(k, v);
+        }
+      }
+    }
+    return result;
+  }
+  static getSubFlowPath(subFlow, exitNodeId, subFlowMap) {
+    const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]));
+    const path2 = [];
+    const visited = /* @__PURE__ */ new Set();
+    let cur = nodeMap.get(exitNodeId);
+    while (cur && !visited.has(cur.id)) {
+      visited.add(cur.id);
+      if (isCallFlowAction(cur.action)) {
+        const nested = subFlowMap.get(cur.action.subFlowId);
+        if (nested) {
+          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap));
+        }
+      } else {
+        path2.unshift(cur);
+      }
+      cur = cur.parentId ? nodeMap.get(cur.parentId) : void 0;
+    }
+    return path2;
+  }
+  static buildStepSequence(nodeIds, nodeMap, subFlowMap) {
+    const result = [];
+    for (const id of nodeIds) {
+      const node = nodeMap.get(id);
+      if (!node) continue;
+      if (isCallFlowAction(node.action)) {
+        const subFlow = subFlowMap.get(node.action.subFlowId);
+        if (subFlow) {
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap));
+        }
+      } else {
+        result.push(node);
+      }
+    }
+    return result;
   }
   // Compute all root-to-leaf paths
   static computePaths(flow) {
@@ -994,11 +1079,11 @@ class ScriptExporter {
         if (child) walk(child, newPath, newName);
       }
     };
-    const root = nodeMap.get(flow.rootNodeId);
+    const root = nodeMap.get(flow.rootNodeId) ?? flow.nodes.find((n) => n.parentId === null);
     if (root) walk(root, [], []);
     return paths;
   }
-  static generateSpec(flow, paths, nodeMap, config, helperImport) {
+  static generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap = /* @__PURE__ */ new Map()) {
     const profileVars = config.profileVars ?? {};
     const profileVarKeys = new Set(Object.keys(profileVars));
     const hasProfileVars = profileVarKeys.size > 0;
@@ -1012,7 +1097,7 @@ class ScriptExporter {
     const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value));
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
-      const steps = path2.nodeIds.map((id) => nodeMap.get(id)).filter(Boolean);
+      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const stepCode = steps.map((node) => {
         const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, baseOrigin, profileVars);
@@ -1116,6 +1201,8 @@ ${emitProfileVarDecls(profileVars)}` : "",
         return `${captureDecl}await expect(${loc}).toContainText(${va(action.value ?? "")});`;
       case "assertValue":
         return `${captureDecl}await expect(${loc}).toHaveValue(${va(action.value ?? "")});`;
+      case "callFlow":
+        return "// [callFlow — should have been expanded by buildStepSequence]";
       default:
         return `// TODO: ${action.type}`;
     }
@@ -1259,6 +1346,15 @@ function registerIpcHandlers(win) {
   electron.ipcMain.handle(IPC_CHANNELS.FLOW_DELETE, async (_e, flowId) => {
     await FlowStorage.delete(flowId);
   });
+  electron.ipcMain.handle(IPC_CHANNELS.FLOW_GET, async (_e, { flowId }) => {
+    return await FlowStorage.load(flowId);
+  });
+  electron.ipcMain.handle(
+    IPC_CHANNELS.FLOW_CHECK_CYCLE,
+    async (_e, { currentFlowId, candidateSubFlowId }) => {
+      return await hasCallFlowCycle(currentFlowId, candidateSubFlowId);
+    }
+  );
   electron.ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload) => {
     return await ScriptExporter.export(payload.flow, payload.config);
   });
@@ -1276,12 +1372,12 @@ function registerIpcHandlers(win) {
       win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode: 1, passed: false });
       return;
     }
-    const relSpecPath = path.relative(cwd, specPath).replace(/\\/g, "/");
-    win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${relSpecPath}
+    const specFilename = path.basename(specPath);
+    win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${specFilename}
 
 `);
     const exitCode = await new Promise((resolve) => {
-      const child = child_process.spawn("npx", ["playwright", "test", relSpecPath, "--reporter=list,html"], {
+      const child = child_process.spawn("npx", ["playwright", "test", specFilename, "--reporter=list,html"], {
         cwd,
         shell: true
       });
@@ -1302,6 +1398,18 @@ function registerIpcHandlers(win) {
     await killProcessOnPort(9323);
     child_process.spawn("npx", ["playwright", "show-report"], { cwd, shell: true, detached: true });
   });
+}
+async function hasCallFlowCycle(startFlowId, candidateSubFlowId, visited = /* @__PURE__ */ new Set()) {
+  if (candidateSubFlowId === startFlowId) return true;
+  if (visited.has(candidateSubFlowId)) return false;
+  visited.add(candidateSubFlowId);
+  const subFlow = await FlowStorage.load(candidateSubFlowId);
+  if (!subFlow) return false;
+  const nestedCallIds = subFlow.nodes.filter((n) => isCallFlowAction(n.action)).map((n) => n.action.subFlowId);
+  for (const nestedId of nestedCallIds) {
+    if (await hasCallFlowCycle(startFlowId, nestedId, visited)) return true;
+  }
+  return false;
 }
 function killProcessOnPort(port) {
   return new Promise((resolve) => {

@@ -2,6 +2,8 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import type { Flow, FlowNode, ExportConfig, TestPath } from '../../shared/types'
+import { isCallFlowAction } from '../../shared/types'
+import { FlowStorage } from './flowStorage'
 import {
   hasVariables,
   valueToCodeExpr,
@@ -21,6 +23,7 @@ export class ScriptExporter {
     const outputDir = config.outputDir || exportsDir()
     await fs.mkdir(outputDir, { recursive: true })
 
+    const subFlowMap = await ScriptExporter.resolveSubFlows(flow)
     const paths = ScriptExporter.computePaths(flow)
     const nodeMap = new Map(flow.nodes.map((n) => [n.id, n]))
 
@@ -38,11 +41,72 @@ export class ScriptExporter {
       }
     }
 
-    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport)
+    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap)
     const specPath = join(outputDir, `${flow.id}.spec.ts`)
     await fs.writeFile(specPath, specContent, 'utf-8')
 
     return specPath
+  }
+
+  private static async resolveSubFlows(flow: Flow, visited = new Set<string>()): Promise<Map<string, Flow>> {
+    const result = new Map<string, Flow>()
+    for (const node of flow.nodes) {
+      if (isCallFlowAction(node.action) && !visited.has(node.action.subFlowId)) {
+        visited.add(node.action.subFlowId)
+        const sub = await FlowStorage.load(node.action.subFlowId)
+        if (sub) {
+          result.set(sub.id, sub)
+          const nested = await ScriptExporter.resolveSubFlows(sub, visited)
+          for (const [k, v] of nested) result.set(k, v)
+        }
+      }
+    }
+    return result
+  }
+
+  private static getSubFlowPath(
+    subFlow: Flow,
+    exitNodeId: string,
+    subFlowMap: Map<string, Flow>,
+  ): FlowNode[] {
+    const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]))
+    const path: FlowNode[] = []
+    const visited = new Set<string>()
+    let cur = nodeMap.get(exitNodeId)
+    while (cur && !visited.has(cur.id)) {
+      visited.add(cur.id)
+      if (isCallFlowAction(cur.action)) {
+        const nested = subFlowMap.get(cur.action.subFlowId)
+        if (nested) {
+          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap))
+        }
+      } else {
+        path.unshift(cur)
+      }
+      cur = cur.parentId ? nodeMap.get(cur.parentId) : undefined
+    }
+    return path
+  }
+
+  private static buildStepSequence(
+    nodeIds: string[],
+    nodeMap: Map<string, FlowNode>,
+    subFlowMap: Map<string, Flow>,
+  ): FlowNode[] {
+    const result: FlowNode[] = []
+    for (const id of nodeIds) {
+      const node = nodeMap.get(id)
+      if (!node) continue
+      if (isCallFlowAction(node.action)) {
+        const subFlow = subFlowMap.get(node.action.subFlowId)
+        if (subFlow) {
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap))
+        }
+      } else {
+        result.push(node)
+      }
+    }
+    return result
   }
 
   // Compute all root-to-leaf paths
@@ -69,7 +133,7 @@ export class ScriptExporter {
       }
     }
 
-    const root = nodeMap.get(flow.rootNodeId)
+    const root = nodeMap.get(flow.rootNodeId) ?? flow.nodes.find((n) => n.parentId === null)
     if (root) walk(root, [], [])
 
     return paths
@@ -81,6 +145,7 @@ export class ScriptExporter {
     nodeMap: Map<string, FlowNode>,
     config: ExportConfig,
     helperImport: string,
+    subFlowMap: Map<string, Flow> = new Map(),
   ): string {
     const profileVars = config.profileVars ?? {}
     const profileVarKeys = new Set(Object.keys(profileVars))
@@ -95,7 +160,7 @@ export class ScriptExporter {
     const tests = paths
       .map((path, idx) => {
         const testName = path.name || `測試路徑 ${idx + 1}`
-        const steps = path.nodeIds.map((id) => nodeMap.get(id)!).filter(Boolean)
+        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap)
         const sessionVarsDefined = new Set<string>()
         const stepCode = steps
           .map((node) => {
@@ -234,6 +299,8 @@ export class ScriptExporter {
         return `${captureDecl}await expect(${loc}).toContainText(${va(action.value ?? '')});`
       case 'assertValue':
         return `${captureDecl}await expect(${loc}).toHaveValue(${va(action.value ?? '')});`
+      case 'callFlow':
+        return '// [callFlow — should have been expanded by buildStepSequence]'
       default:
         return `// TODO: ${action.type}`
     }

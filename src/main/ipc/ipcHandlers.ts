@@ -1,6 +1,6 @@
 import { BrowserWindow, ipcMain, app } from 'electron'
 import { spawn } from 'child_process'
-import { join, relative } from 'path'
+import { join, basename } from 'path'
 import { IPC_CHANNELS } from '../../shared/types'
 import type {
   ReplayToNodePayload,
@@ -10,6 +10,7 @@ import type {
   RecordingStartPayload,
   ActionType,
 } from '../../shared/types'
+import { isCallFlowAction } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
 import { Recorder } from '../playwright/recorder'
 import { Replayer } from '../playwright/replayer'
@@ -127,6 +128,17 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     await FlowStorage.delete(flowId)
   })
 
+  ipcMain.handle(IPC_CHANNELS.FLOW_GET, async (_e, { flowId }: { flowId: string }) => {
+    return await FlowStorage.load(flowId)
+  })
+
+  ipcMain.handle(
+    IPC_CHANNELS.FLOW_CHECK_CYCLE,
+    async (_e, { currentFlowId, candidateSubFlowId }: { currentFlowId: string; candidateSubFlowId: string }) => {
+      return await hasCallFlowCycle(currentFlowId, candidateSubFlowId)
+    },
+  )
+
   // ── Export ───────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload: ExportScriptsPayload) => {
     return await ScriptExporter.export(payload.flow, payload.config)
@@ -147,12 +159,14 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       return
     }
 
-    // 2. Run playwright test (use relative path with forward slashes — absolute Windows
-    //    paths with backslashes are treated as broken regex by Playwright's test filter)
-    const relSpecPath = relative(cwd, specPath).replace(/\\/g, '/')
-    win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${relSpecPath}\n\n`)
+    // 2. Run playwright test — pass only the filename because playwright.config.ts
+    //    sets testDir to './exports', so Playwright already scopes its search there.
+    //    Passing the full relative path (exports/uuid.spec.ts) makes Playwright treat
+    //    it as a regex filter against paths relative to testDir, which never matches.
+    const specFilename = basename(specPath)
+    win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${specFilename}\n\n`)
     const exitCode = await new Promise<number>((resolve) => {
-      const child = spawn('npx', ['playwright', 'test', relSpecPath, '--reporter=list,html'], {
+      const child = spawn('npx', ['playwright', 'test', specFilename, '--reporter=list,html'], {
         cwd,
         shell: true,
       })
@@ -173,6 +187,28 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     await killProcessOnPort(9323)
     spawn('npx', ['playwright', 'show-report'], { cwd, shell: true, detached: true })
   })
+}
+
+async function hasCallFlowCycle(
+  startFlowId: string,
+  candidateSubFlowId: string,
+  visited = new Set<string>(),
+): Promise<boolean> {
+  if (candidateSubFlowId === startFlowId) return true
+  if (visited.has(candidateSubFlowId)) return false
+  visited.add(candidateSubFlowId)
+
+  const subFlow = await FlowStorage.load(candidateSubFlowId)
+  if (!subFlow) return false
+
+  const nestedCallIds = subFlow.nodes
+    .filter((n) => isCallFlowAction(n.action))
+    .map((n) => n.action.subFlowId!)
+
+  for (const nestedId of nestedCallIds) {
+    if (await hasCallFlowCycle(startFlowId, nestedId, visited)) return true
+  }
+  return false
 }
 
 /** Kill any process listening on the given port, then wait briefly for the OS to free it. */

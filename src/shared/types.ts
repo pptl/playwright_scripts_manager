@@ -13,6 +13,7 @@ export type ActionType =
   | 'assertVisible'
   | 'assertText'
   | 'assertValue'
+  | 'callFlow'
 
 export interface Assertion {
   type: 'text' | 'visible' | 'url' | 'count'
@@ -34,6 +35,23 @@ export interface Action {
   assertion?: Assertion
   url: string
   isPageNavigation: boolean
+  /** callFlow only: ID of the flow to call */
+  subFlowId?: string
+  /** callFlow only: which leaf node in the sub-flow is the exit point */
+  subFlowExitNodeId?: string
+  /** callFlow only: which profile from the sub-flow to use */
+  subFlowProfileId?: string
+}
+
+export function isCallFlowAction(action: Action): action is Action & {
+  subFlowId: string
+  subFlowExitNodeId: string
+} {
+  return (
+    action.type === 'callFlow' &&
+    typeof action.subFlowId === 'string' &&
+    typeof action.subFlowExitNodeId === 'string'
+  )
 }
 
 export interface NodePosition {
@@ -115,6 +133,8 @@ export const IPC_CHANNELS = {
   EXPORT_SCRIPTS: 'export:scripts',
   RUN_TESTS: 'test:run',
   SHOW_REPORT: 'test:showReport',
+  FLOW_GET: 'flow:get',
+  FLOW_CHECK_CYCLE: 'flow:checkCycle',
 
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: 'assertion:pickStart',

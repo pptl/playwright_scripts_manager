@@ -4,7 +4,8 @@ import { usePlaywright } from '../../hooks/usePlaywright'
 import { useFlowManager } from '../../hooks/useFlowStore'
 import { TestOutputModal } from './TestOutputModal'
 import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
-import type { ActionType, ExportConfig, TestFinishedPayload } from '../../../shared/types'
+import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
+import type { ActionType, Action, ExportConfig, TestFinishedPayload } from '../../../shared/types'
 
 const assertBtn = (label: string, onClick: () => void) => (
   <button
@@ -58,6 +59,7 @@ export function Toolbar() {
   } = useFlowStore()
   const { startRecording, stopRecording } = usePlaywright()
   const { newFlow } = useFlowManager()
+  const { addActionNode } = useFlowStore()
   const [showNewFlowDialog, setShowNewFlowDialog] = useState(false)
   const [newName, setNewName] = useState('')
   const [newURL, setNewURL] = useState('')
@@ -71,6 +73,7 @@ export function Toolbar() {
   // Profile selector state
   const [showProfileMenu, setShowProfileMenu] = useState(false)
   const [showProfileEditor, setShowProfileEditor] = useState(false)
+  const [showCallFlowModal, setShowCallFlowModal] = useState(false)
   const profileMenuRef = useRef<HTMLDivElement>(null)
 
   // Close profile menu on outside click
@@ -178,6 +181,27 @@ export function Toolbar() {
       </span>
 
       {btn('新增流程', () => setShowNewFlowDialog(true))}
+
+      {currentFlow && (
+        <button
+          disabled={hasNodes || isRecording || isReplaying}
+          onClick={() => setShowCallFlowModal(true)}
+          title={hasNodes ? '只有空流程可以設定起始子流程' : '加入Flow作為起始節點'}
+          style={{
+            padding: '6px 14px',
+            borderRadius: 6,
+            border: '1px solid #f59e0b',
+            cursor: hasNodes || isRecording || isReplaying ? 'not-allowed' : 'pointer',
+            background: 'transparent',
+            color: hasNodes || isRecording || isReplaying ? '#475569' : '#f59e0b',
+            fontSize: 13,
+            fontWeight: 500,
+            opacity: hasNodes || isRecording || isReplaying ? 0.5 : 1,
+          }}
+        >
+          ⛓ 加入Flow作為起始節點
+        </button>
+      )}
 
       {!isRecording
         ? btn('▶ 開始錄製', () => startRecording(), !currentFlow)
@@ -420,6 +444,20 @@ export function Toolbar() {
       {/* Profile Editor Modal */}
       {showProfileEditor && (
         <ProfileEditorModal onClose={() => setShowProfileEditor(false)} />
+      )}
+
+      {/* CallFlow Modal — for adding a sub-flow as root node */}
+      {showCallFlowModal && currentFlow && (
+        <CallFlowModal
+          mode="asRoot"
+          onClose={() => setShowCallFlowModal(false)}
+          onConfirm={async (callFlowAction: Action) => {
+            addActionNode(callFlowAction, null)
+            const updated = useFlowStore.getState().currentFlow
+            if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
+            setShowCallFlowModal(false)
+          }}
+        />
       )}
     </div>
   )

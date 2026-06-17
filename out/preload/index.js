@@ -15,6 +15,8 @@ const IPC_CHANNELS = {
   EXPORT_SCRIPTS: "export:scripts",
   RUN_TESTS: "test:run",
   SHOW_REPORT: "test:showReport",
+  FLOW_GET: "flow:get",
+  FLOW_CHECK_CYCLE: "flow:checkCycle",
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: "assertion:pickStart",
   // Main → Renderer
@@ -49,6 +51,9 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   showReport: () => electron.ipcRenderer.invoke(IPC_CHANNELS.SHOW_REPORT),
   // Assertion pick
   startAssertionPick: (assertionType) => electron.ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
+  // Sub-flow support
+  getFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
+  checkFlowCycle: (currentFlowId, candidateSubFlowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_CHECK_CYCLE, { currentFlowId, candidateSubFlowId }),
   // Event listeners (Main → Renderer)
   onActionCaptured: (cb) => {
     const handler = (_, action) => cb(action);

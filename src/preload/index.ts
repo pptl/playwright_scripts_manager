@@ -46,6 +46,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startAssertionPick: (assertionType: ActionType) =>
     ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
 
+  // Sub-flow support
+  getFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
+  checkFlowCycle: (currentFlowId: string, candidateSubFlowId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.FLOW_CHECK_CYCLE, { currentFlowId, candidateSubFlowId }),
+
   // Event listeners (Main → Renderer)
   onActionCaptured: (cb: (action: Action) => void) => {
     const handler = (_: Electron.IpcRendererEvent, action: Action) => cb(action)

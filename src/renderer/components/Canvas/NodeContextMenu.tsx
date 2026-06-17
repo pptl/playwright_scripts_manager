@@ -13,6 +13,10 @@ interface NodeContextMenuProps {
   hasValue: boolean
   currentCaptureAs?: string
   onCaptureAsVar: (varName: string | undefined) => void
+  isRoot: boolean
+  isLeaf: boolean
+  onInsertCallFlowBefore: () => void
+  onAppendCallFlowAfter: () => void
 }
 
 export function NodeContextMenu({
@@ -27,6 +31,10 @@ export function NodeContextMenu({
   hasValue,
   currentCaptureAs,
   onCaptureAsVar,
+  isRoot,
+  isLeaf,
+  onInsertCallFlowBefore,
+  onAppendCallFlowAfter,
 }: NodeContextMenuProps) {
   const disabled = isRecording || isReplaying
   const [captureInput, setCaptureInput] = useState<string | null>(null)
@@ -87,6 +95,30 @@ export function NodeContextMenu({
             onBranchRecord()
           }}
         />
+
+        <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+        {!isRoot && (
+          <MenuItem
+            icon="⛓"
+            label="在此節點前插入子流程"
+            disabled={disabled}
+            onClick={() => {
+              onClose()
+              onInsertCallFlowBefore()
+            }}
+          />
+        )}
+        {isLeaf && (
+          <MenuItem
+            icon="⛓"
+            label="在此節點後加入子流程"
+            disabled={disabled}
+            onClick={() => {
+              onClose()
+              onAppendCallFlowAfter()
+            }}
+          />
+        )}
 
         {hasValue && (
           <>

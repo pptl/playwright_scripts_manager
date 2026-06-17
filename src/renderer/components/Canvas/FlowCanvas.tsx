@@ -18,7 +18,8 @@ import { BranchEdge } from './BranchEdge'
 import { NodeContextMenu } from './NodeContextMenu'
 import type { ActionNodeData } from './ActionNode'
 import { usePlaywright } from '../../hooks/usePlaywright'
-import type { FlowNode, NodePosition } from '@shared/types'
+import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
+import type { FlowNode, NodePosition, Action } from '@shared/types'
 
 const nodeTypes = { actionNode: ActionNode }
 const edgeTypes = { branchEdge: BranchEdge }
@@ -62,10 +63,11 @@ function computeTreeLayout(nodes: FlowNode[], rootNodeId: string): Map<string, N
 }
 
 function FlowCanvasInner() {
-  const { currentFlow, selectNode, selectedNodeId, isRecording, isReplaying, replaySpeed, deleteNode, updateNode } =
+  const { currentFlow, selectNode, selectedNodeId, isRecording, isReplaying, replaySpeed, deleteNode, updateNode, insertCallFlowBefore, appendCallFlowAfter } =
     useFlowStore()
   const { replayToNode, startBranchRecording } = usePlaywright()
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null)
+  const [callFlowModal, setCallFlowModal] = useState<{ mode: 'insertBefore' | 'appendAfter'; targetNodeId: string } | null>(null)
 
   // Convert FlowNodes to React Flow nodes and edges
   const rfNodes: Node<ActionNodeData>[] = useMemo(() => {
@@ -189,9 +191,30 @@ function FlowCanvasInner() {
               const updated = useFlowStore.getState().currentFlow
               if (updated) await window.electronAPI.saveFlow(updated)
             }}
+            isRoot={contextNode?.parentId === null}
+            isLeaf={(contextNode?.childIds.length ?? 0) === 0}
+            onInsertCallFlowBefore={() => setCallFlowModal({ mode: 'insertBefore', targetNodeId: contextMenu.nodeId })}
+            onAppendCallFlowAfter={() => setCallFlowModal({ mode: 'appendAfter', targetNodeId: contextMenu.nodeId })}
           />
         )
       })()}
+      {callFlowModal && (
+        <CallFlowModal
+          mode={callFlowModal.mode}
+          targetNodeId={callFlowModal.targetNodeId}
+          onClose={() => setCallFlowModal(null)}
+          onConfirm={async (callFlowAction: Action) => {
+            if (callFlowModal.mode === 'insertBefore') {
+              insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction)
+            } else {
+              appendCallFlowAfter(callFlowModal.targetNodeId, callFlowAction)
+            }
+            setCallFlowModal(null)
+            const updated = useFlowStore.getState().currentFlow
+            if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
+          }}
+        />
+      )}
       {isRecording && (
         <div
           style={{

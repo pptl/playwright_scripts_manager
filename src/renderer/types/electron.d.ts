@@ -23,6 +23,8 @@ export interface ElectronAPI {
   onTestOutput: (cb: (line: string) => void) => () => void
   onTestFinished: (cb: (payload: TestFinishedPayload) => void) => () => void
   onAssertionPickCancelled: (cb: () => void) => () => void
+  getFlow: (flowId: string) => Promise<Flow | null>
+  checkFlowCycle: (currentFlowId: string, candidateSubFlowId: string) => Promise<boolean>
 }
 
 declare global {

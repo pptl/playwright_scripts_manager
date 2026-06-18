@@ -306,7 +306,12 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   addProfile: async (name) => {
     const flow = get().currentFlow
     if (!flow) return
-    const newProfile: FlowProfile = { id: uuidv4(), name, vars: [] }
+    const existingVars = flow.profiles?.[0]?.vars ?? []
+    const newProfile: FlowProfile = {
+      id: uuidv4(),
+      name,
+      vars: existingVars.map((v) => ({ key: v.key, value: v.value, description: v.description ?? '' })),
+    }
     const updatedFlow: Flow = {
       ...flow,
       profiles: [...(flow.profiles ?? []), newProfile],

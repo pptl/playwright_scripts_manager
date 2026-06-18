@@ -229,6 +229,9 @@ export function getDOMCaptureScript(): () => void {
       const tag = el.tagName.toLowerCase()
       const type = ((el as HTMLInputElement).type || '').toLowerCase()
 
+      // Skip FlowTest-injected overlay elements (assertion picker, cursor highlight, etc.)
+      if ((el as HTMLElement).id?.startsWith('__ft_')) return
+
       // Playwright blacklist
       if (tag === 'select' || tag === 'option') return
       if (tag === 'input' && (type === 'date' || type === 'range')) return

@@ -41,6 +41,8 @@ export interface Action {
   subFlowExitNodeId?: string
   /** callFlow only: which profile from the sub-flow to use */
   subFlowProfileId?: string
+  /** callFlow only: display name of the selected profile (stored at creation time) */
+  subFlowProfileName?: string
 }
 
 export function isCallFlowAction(action: Action): action is Action & {

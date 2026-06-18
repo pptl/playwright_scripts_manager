@@ -10,6 +10,7 @@ import {
   sessionAwareValueToCodeExpr,
   emitProfileVarDecls,
   VARIABLE_HELPERS_CODE,
+  resolveValue,
 } from '../../shared/variableResolver'
 
 function exportsDir(): string {
@@ -64,13 +65,23 @@ export class ScriptExporter {
     return result
   }
 
+  private static resolveProfileVars(flow: Flow, profileId: string | undefined): Record<string, string> {
+    const profile = profileId
+      ? (flow.profiles ?? []).find((p) => p.id === profileId)
+      : (flow.profiles ?? [])[0]
+    if (!profile) return {}
+    return Object.fromEntries(profile.vars.map((v) => [v.key, v.value]))
+  }
+
   private static getSubFlowPath(
     subFlow: Flow,
     exitNodeId: string,
     subFlowMap: Map<string, Flow>,
-  ): FlowNode[] {
+    subProfileVars: Record<string, string>,
+    subBaseOrigin: string,
+  ): Array<{ node: FlowNode; profileVars: Record<string, string>; baseOrigin: string; inlineVars: boolean }> {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]))
-    const path: FlowNode[] = []
+    const path: Array<{ node: FlowNode; profileVars: Record<string, string>; baseOrigin: string; inlineVars: boolean }> = []
     const visited = new Set<string>()
     let cur = nodeMap.get(exitNodeId)
     while (cur && !visited.has(cur.id)) {
@@ -78,10 +89,12 @@ export class ScriptExporter {
       if (isCallFlowAction(cur.action)) {
         const nested = subFlowMap.get(cur.action.subFlowId)
         if (nested) {
-          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap))
+          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, cur.action.subFlowProfileId)
+          const nestedBaseOrigin = (() => { try { return new URL(nested.baseURL).origin } catch { return '' } })()
+          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin))
         }
       } else {
-        path.unshift(cur)
+        path.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true })
       }
       cur = cur.parentId ? nodeMap.get(cur.parentId) : undefined
     }
@@ -92,18 +105,22 @@ export class ScriptExporter {
     nodeIds: string[],
     nodeMap: Map<string, FlowNode>,
     subFlowMap: Map<string, Flow>,
-  ): FlowNode[] {
-    const result: FlowNode[] = []
+    defaultProfileVars: Record<string, string> = {},
+    defaultBaseOrigin: string = '',
+  ): Array<{ node: FlowNode; profileVars: Record<string, string>; baseOrigin: string; inlineVars: boolean }> {
+    const result: Array<{ node: FlowNode; profileVars: Record<string, string>; baseOrigin: string; inlineVars: boolean }> = []
     for (const id of nodeIds) {
       const node = nodeMap.get(id)
       if (!node) continue
       if (isCallFlowAction(node.action)) {
         const subFlow = subFlowMap.get(node.action.subFlowId)
         if (subFlow) {
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap))
+          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, node.action.subFlowProfileId)
+          const subBaseOrigin = (() => { try { return new URL(subFlow.baseURL).origin } catch { return '' } })()
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin))
         }
       } else {
-        result.push(node)
+        result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false })
       }
     }
     return result
@@ -160,11 +177,11 @@ export class ScriptExporter {
     const tests = paths
       .map((path, idx) => {
         const testName = path.name || `測試路徑 ${idx + 1}`
-        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap)
+        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin)
         const sessionVarsDefined = new Set<string>()
         const stepCode = steps
-          .map((node) => {
-            const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, baseOrigin, profileVars)
+          .map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {
+            const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars)
             const assertCode = node.action.assertion
               ? ScriptExporter.assertionToCode(node.action)
               : ''
@@ -202,9 +219,12 @@ export class ScriptExporter {
     sessionVarsDefined: Set<string>,
     baseOrigin = '',
     profileVars: Record<string, string> = {},
+    inlineVars = false,
   ): string {
     const { action } = node
-    const profileVarKeys = new Set(Object.keys(profileVars))
+    // For sub-flow nodes (inlineVars=true), profile vars are baked into actual values at code-gen
+    // time so we don't emit _ftProf_* references (which would resolve to the parent flow's values).
+    const profileVarKeys = inlineVars ? new Set<string>() : new Set(Object.keys(profileVars))
 
     // Locator priority:
     // 1. If selector has [name="..."] (form inputs), always use it — it's already
@@ -248,31 +268,44 @@ export class ScriptExporter {
       loc = `page.locator('${selector}')`
     }
 
+    // For sub-flow nodes: pre-resolve profile var placeholders to actual values.
+    // Built-in vars ({{randomText}} etc.) are NOT resolved here — they remain runtime calls.
+    const resolveProfilePlaceholders = (v: string) =>
+      inlineVars ? v.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : v
+
     // If this action defines a session variable, emit a const declaration before the action.
     const captureAs = action.captureAs
     let captureDecl = ''
     if (captureAs) {
-      captureDecl = `const ${captureAs} = ${valueToCodeExpr(action.value ?? '', profileVarKeys)};\n`
+      captureDecl = `const ${captureAs} = ${valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ''), profileVarKeys)};\n`
       sessionVarsDefined.add(captureAs)
     }
 
     // Value argument: use captureAs var name when this node defines it,
     // otherwise use session-aware expression so {{varName}} resolves to the right reference.
-    const va = (v: string) => captureAs ? captureAs : sessionAwareValueToCodeExpr(v, sessionVarsDefined, profileVarKeys)
+    const va = (v: string) => captureAs ? captureAs : sessionAwareValueToCodeExpr(resolveProfilePlaceholders(v), sessionVarsDefined, profileVarKeys)
 
     switch (action.type) {
       case 'goto': {
         let gotoVal = action.value ?? ''
         const domainOverride = profileVars['domain']
-        // When the profile has a domain var and the URL matches base origin, emit parameterized goto
         if (domainOverride && baseOrigin) {
           try {
             const parsed = new URL(gotoVal)
             if (parsed.origin === baseOrigin) {
               const rest = parsed.pathname + parsed.search + parsed.hash
+              if (inlineVars) {
+                // Sub-flow: bake the actual domain value directly into the URL
+                return `${captureDecl}await page.goto('${domainOverride}${rest}');`
+              }
+              // Parent flow: emit a parameterized reference so different profiles can be swapped at runtime
               return `${captureDecl}await page.goto(\`\${_ftProf_domain}${rest}\`);`
             }
           } catch { /* not a URL, fall through */ }
+        }
+        if (inlineVars) {
+          // Resolve any remaining {{key}} placeholders with actual profile var values
+          gotoVal = resolveValue(gotoVal, profileVars)
         }
         return `${captureDecl}await page.goto(${va(gotoVal)});`
       }

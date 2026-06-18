@@ -116,7 +116,29 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
         {action.description}
       </div>
 
-      {action.selector && (
+      {action.type === 'callFlow' && action.subFlowProfileName && (
+        <div
+          style={{
+            fontSize: 10,
+            color: '#f59e0b',
+            marginTop: 3,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            background: '#1c1a0e',
+            borderRadius: 3,
+            padding: '1px 5px',
+            border: '1px solid #78350f',
+            display: 'inline-block',
+            maxWidth: '100%',
+          }}
+          title={`配置: ${action.subFlowProfileName}`}
+        >
+          ⚙ {action.subFlowProfileName}
+        </div>
+      )}
+
+      {action.type !== 'callFlow' && action.selector && (
         <div
           style={{
             fontSize: 10,

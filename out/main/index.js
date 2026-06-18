@@ -235,6 +235,7 @@ function getDOMCaptureScript() {
       if (!el?.tagName) return;
       const tag = el.tagName.toLowerCase();
       const type = (el.type || "").toLowerCase();
+      if (el.id?.startsWith("__ft_")) return;
       if (tag === "select" || tag === "option") return;
       if (tag === "input" && (type === "date" || type === "range")) return;
       if (tag === "html" || tag === "body") return;

@@ -181,18 +181,32 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       <>
                         <span
                           style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}
-                          onDoubleClick={(e) => {
-                            e.stopPropagation()
-                            setRenamingId(p.id)
-                            setRenameInput(p.name)
-                          }}
-                          title="按兩下重新命名"
                         >
                           {p.name}
                         </span>
                         {p.id === activeProfileId && (
                           <span style={{ fontSize: 9, color: '#4ade80', flexShrink: 0 }}>使用中</span>
                         )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setRenamingId(p.id); setRenameInput(p.name) }}
+                          title="重新命名"
+                          style={{
+                            flexShrink: 0,
+                            background: 'transparent',
+                            border: 'none',
+                            cursor: 'pointer',
+                            color: '#93c5fd',
+                            fontSize: 12,
+                            padding: '1px 3px',
+                            borderRadius: 3,
+                            opacity: 0.5,
+                            lineHeight: 1,
+                          }}
+                          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '1' }}
+                          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.5' }}
+                        >
+                          ✏
+                        </button>
                         {profiles.length > 1 && (
                           <button
                             onClick={(e) => { e.stopPropagation(); handleDeleteProfile(p.id) }}

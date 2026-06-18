@@ -88,6 +88,9 @@ export function CallFlowModal({ mode, onClose, onConfirm }: CallFlowModalProps) 
       subFlowId: subFlow.id,
       subFlowExitNodeId: selectedExitNodeId,
       subFlowProfileId: selectedProfileId ?? undefined,
+      subFlowProfileName: selectedProfileId
+        ? profiles.find((p) => p.id === selectedProfileId)?.name
+        : undefined,
     }
     onConfirm(callFlowAction)
   }

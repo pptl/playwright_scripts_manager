@@ -682,6 +682,17 @@ function generateTimestamp() {
   const d = /* @__PURE__ */ new Date();
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}${pad(d.getMilliseconds(), 3)}`;
 }
+function resolveValue(value, profileVars) {
+  return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+    if (profileVars && name in profileVars) return profileVars[name];
+    if (name === "randomText") return generateRandomText();
+    if (name === "randomNumber") return generateRandomNumber();
+    if (name === "randomOneText") return generateRandomOneLetter();
+    if (name === "randomOneNumber") return generateRandomOneDigit();
+    if (name === "timestamp") return generateTimestamp();
+    return match;
+  });
+}
 function resolveValueWithSession(value, sessionVars, profileVars) {
   return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
     if (sessionVars.has(name)) return sessionVars.get(name);
@@ -1025,7 +1036,12 @@ class ScriptExporter {
     }
     return result;
   }
-  static getSubFlowPath(subFlow, exitNodeId, subFlowMap) {
+  static resolveProfileVars(flow, profileId) {
+    const profile = profileId ? (flow.profiles ?? []).find((p) => p.id === profileId) : (flow.profiles ?? [])[0];
+    if (!profile) return {};
+    return Object.fromEntries(profile.vars.map((v) => [v.key, v.value]));
+  }
+  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin) {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]));
     const path2 = [];
     const visited = /* @__PURE__ */ new Set();
@@ -1035,16 +1051,24 @@ class ScriptExporter {
       if (isCallFlowAction(cur.action)) {
         const nested = subFlowMap.get(cur.action.subFlowId);
         if (nested) {
-          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap));
+          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, cur.action.subFlowProfileId);
+          const nestedBaseOrigin = (() => {
+            try {
+              return new URL(nested.baseURL).origin;
+            } catch {
+              return "";
+            }
+          })();
+          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin));
         }
       } else {
-        path2.unshift(cur);
+        path2.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true });
       }
       cur = cur.parentId ? nodeMap.get(cur.parentId) : void 0;
     }
     return path2;
   }
-  static buildStepSequence(nodeIds, nodeMap, subFlowMap) {
+  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "") {
     const result = [];
     for (const id of nodeIds) {
       const node = nodeMap.get(id);
@@ -1052,10 +1076,18 @@ class ScriptExporter {
       if (isCallFlowAction(node.action)) {
         const subFlow = subFlowMap.get(node.action.subFlowId);
         if (subFlow) {
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap));
+          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, node.action.subFlowProfileId);
+          const subBaseOrigin = (() => {
+            try {
+              return new URL(subFlow.baseURL).origin;
+            } catch {
+              return "";
+            }
+          })();
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin));
         }
       } else {
-        result.push(node);
+        result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false });
       }
     }
     return result;
@@ -1098,10 +1130,10 @@ class ScriptExporter {
     const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value));
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
-      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap);
+      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
-      const stepCode = steps.map((node) => {
-        const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, baseOrigin, profileVars);
+      const stepCode = steps.map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {
+        const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars);
         const assertCode = node.action.assertion ? ScriptExporter.assertionToCode(node.action) : "";
         if (config.useTestStep) {
           const action2 = rawAction.replace(/\n/g, "\n      ");
@@ -1131,9 +1163,9 @@ ${emitProfileVarDecls(profileVars)}` : "",
       "});"
     ].filter((line) => line !== void 0).join("\n");
   }
-  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}) {
+  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false) {
     const { action } = node;
-    const profileVarKeys = new Set(Object.keys(profileVars));
+    const profileVarKeys = inlineVars ? /* @__PURE__ */ new Set() : new Set(Object.keys(profileVars));
     let loc;
     const { locatorExpr, selector } = action;
     if (selector && /^\[name=/.test(selector)) {
@@ -1158,14 +1190,15 @@ ${emitProfileVarDecls(profileVars)}` : "",
     } else {
       loc = `page.locator('${selector}')`;
     }
+    const resolveProfilePlaceholders = (v) => inlineVars ? v.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : v;
     const captureAs = action.captureAs;
     let captureDecl = "";
     if (captureAs) {
-      captureDecl = `const ${captureAs} = ${valueToCodeExpr(action.value ?? "", profileVarKeys)};
+      captureDecl = `const ${captureAs} = ${valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ""), profileVarKeys)};
 `;
       sessionVarsDefined.add(captureAs);
     }
-    const va = (v) => captureAs ? captureAs : sessionAwareValueToCodeExpr(v, sessionVarsDefined, profileVarKeys);
+    const va = (v) => captureAs ? captureAs : sessionAwareValueToCodeExpr(resolveProfilePlaceholders(v), sessionVarsDefined, profileVarKeys);
     switch (action.type) {
       case "goto": {
         let gotoVal = action.value ?? "";
@@ -1175,10 +1208,16 @@ ${emitProfileVarDecls(profileVars)}` : "",
             const parsed = new URL(gotoVal);
             if (parsed.origin === baseOrigin) {
               const rest = parsed.pathname + parsed.search + parsed.hash;
+              if (inlineVars) {
+                return `${captureDecl}await page.goto('${domainOverride}${rest}');`;
+              }
               return `${captureDecl}await page.goto(\`\${_ftProf_domain}${rest}\`);`;
             }
           } catch {
           }
+        }
+        if (inlineVars) {
+          gotoVal = resolveValue(gotoVal, profileVars);
         }
         return `${captureDecl}await page.goto(${va(gotoVal)});`;
       }
@@ -1279,7 +1318,7 @@ function registerIpcHandlers(win) {
     await browserController.launch();
     const page = browserController.getPage();
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL);
+      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars);
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,

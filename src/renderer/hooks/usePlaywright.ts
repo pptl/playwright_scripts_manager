@@ -22,17 +22,24 @@ export function usePlaywright() {
 
   const startBranchRecording = useCallback(
     async (fromNodeId: string) => {
-      const flow = useFlowStore.getState().currentFlow
-      if (!flow) return
+      const { currentFlow, activeProfileId } = useFlowStore.getState()
+      if (!currentFlow) return
       // Set recording head so new actions append as children of this node
       useFlowStore.getState().setRecordingHead(fromNodeId)
       setIsRecording(true)
+
+      const activeProfile = currentFlow.profiles?.find((p) => p.id === activeProfileId)
+      const profileVars = activeProfile
+        ? Object.fromEntries(activeProfile.vars.map((v) => [v.key, v.value]))
+        : undefined
+
       try {
         await window.electronAPI.startRecording({
-          baseURL: flow.baseURL,
+          baseURL: currentFlow.baseURL,
           branchFromNodeId: fromNodeId,
-          branchNodes: flow.nodes,
+          branchNodes: currentFlow.nodes,
           replaySpeed: 200,
+          profileVars,
         })
       } catch (err) {
         setIsRecording(false)

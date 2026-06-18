@@ -197,4 +197,6 @@ export interface RecordingStartPayload {
   branchNodes?: FlowNode[]
   /** Speed ms per step in silent replay. Default 200. */
   replaySpeed?: number
+  /** Active profile variables for silent replay variable substitution */
+  profileVars?: Record<string, string>
 }

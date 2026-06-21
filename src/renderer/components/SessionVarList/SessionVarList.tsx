@@ -4,7 +4,7 @@ import { isCallFlowAction } from '@shared/types'
 import type { Flow } from '@shared/types'
 
 export function SessionVarList() {
-  const { currentFlow, selectedNodeId, updateNode } = useFlowStore()
+  const { currentFlow, updateNode } = useFlowStore()
   const [copiedName, setCopiedName] = useState<string | null>(null)
   const [subFlowVars, setSubFlowVars] = useState<{ flowName: string; varName: string; placeholder: string }[]>([])
 
@@ -18,18 +18,10 @@ export function SessionVarList() {
       value: n.action.value ?? '',
     }))
 
-  // Collect ancestor callFlow nodes of the currently selected node
+  // Collect all callFlow nodes in the current flow so their sub-flow vars are always visible
   const ancestorCallFlowNodes = useMemo(() => {
-    if (!currentFlow || !selectedNodeId) return []
-    const nodeMap = new Map(currentFlow.nodes.map((n) => [n.id, n]))
-    const ancestors = []
-    let cur = nodeMap.get(selectedNodeId)
-    while (cur?.parentId) {
-      cur = nodeMap.get(cur.parentId)
-      if (cur && isCallFlowAction(cur.action)) ancestors.push(cur)
-    }
-    return ancestors
-  }, [currentFlow, selectedNodeId])
+    return (currentFlow?.nodes ?? []).filter((n) => isCallFlowAction(n.action))
+  }, [currentFlow])
 
   // Load sub-flow captureAs vars for each ancestor callFlow node
   useEffect(() => {
@@ -51,7 +43,10 @@ export function SessionVarList() {
           }))
       }),
     ).then((results) => {
-      if (!cancelled) setSubFlowVars(results.flat())
+      if (!cancelled) {
+        const seen = new Set<string>()
+        setSubFlowVars(results.flat().filter((v) => !seen.has(v.varName) && (seen.add(v.varName), true)))
+      }
     })
     return () => { cancelled = true }
   }, [ancestorCallFlowNodes])

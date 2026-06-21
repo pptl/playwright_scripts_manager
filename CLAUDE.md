@@ -56,7 +56,7 @@ Main → Renderer: `mainWindow.webContents.send(channel, payload)` → `usePlayw
 
 ### IPC channels (`src/shared/types.ts` → `IPC_CHANNELS`)
 
-**Renderer → Main (11):** `BROWSER_LAUNCH`, `BROWSER_CLOSE`, `RECORDING_START`, `RECORDING_STOP`, `START_ASSERTION_PICK`, `REPLAY_TO_NODE`, `REPLAY_STOP`, `FLOW_SAVE`, `FLOW_LOAD`, `FLOW_LIST`, `EXPORT_SCRIPTS`, `RUN_TESTS`
+**Renderer → Main (13):** `BROWSER_LAUNCH`, `BROWSER_CLOSE`, `RECORDING_START`, `RECORDING_STOP`, `START_ASSERTION_PICK`, `REPLAY_TO_NODE`, `REPLAY_STOP`, `FLOW_SAVE`, `FLOW_LOAD`, `FLOW_LIST`, `FLOW_DELETE`, `EXPORT_SCRIPTS`, `RUN_TESTS`, `FLOW_GET` (fetch one flow JSON by ID — used async by PropertyPanel and CallFlowModal to load sub-flow profiles), `FLOW_CHECK_CYCLE` (validate that adding a callFlow won't create a circular reference — recursively checks the sub-flow's callFlow graph before insertion)
 
 **Main → Renderer (9):** `ACTION_CAPTURED`, `ASSERTION_PICK_CANCELLED`, `REPLAY_NODE_START`, `REPLAY_NODE_COMPLETE`, `REPLAY_FINISHED`, `REPLAY_ERROR`, `TEST_OUTPUT`, `TEST_FINISHED`
 
@@ -113,6 +113,14 @@ Three kinds of `{{...}}` placeholders can appear in action `value` fields, resol
 3. **Built-in variables** (`src/shared/variableResolver.ts`) — `{{randomText}}`, `{{randomNumber}}`, `{{timestamp}}` only (3 total; `{{domain}}` was removed from built-ins and is now a profile variable key).
 
 `valueToCodeExpr(value, profileVarKeys?)` converts a value string to a TypeScript literal, substituting profile var keys as `${_ftProf_key}` template references. `sessionAwareValueToCodeExpr()` additionally handles session vars. `emitProfileVarDecls(profileVars)` emits `const _ftProf_key = '...'` declarations at the top of generated spec files. Helper functions (`_ftRandomText`, `_ftRandomNumber`, `_ftTimestamp`) are injected when needed (`VARIABLE_HELPERS_CODE`).
+
+#### Session variable hoisting in `useTestStep` mode
+
+When `config.useTestStep` is true, each action is wrapped in its own `test.step('…', async () => { … })` closure. A `captureAs` variable declared with `const` inside one closure is invisible to subsequent closures (JavaScript block scoping). Fix: `generateSpec()` collects all `captureAs` names across every step into `hoistedVars: Set<string>`, emits `let varName = ''` declarations immediately after the `async ({ page }) => {` opening (before the first step), and passes `hoistedVars` down to `actionToCode()`. Inside `actionToCode()`: if `captureAs ∈ hoistedVars`, emit `varName = expr` (plain assignment); otherwise emit `const varName = expr` (normal declaration). Without `useTestStep` no hoisting is needed.
+
+#### `assertText` session-variable locator fix
+
+The `locatorExpr` stored on an `assertText` node at recording time may embed the element's text content (e.g. `getByRole('cell', { name: 'Bottest_20260621162212389' })`). When `action.value` is a pure session-variable reference (`{{varName}}` and `varName ∈ sessionVarsDefined`) and `action.selector` exists, `actionToCode()` replaces the hardcoded locator with `page.locator(selector).filter({ hasText: valueExpr })`. This tracks the *runtime* value of the session variable instead of the stale recording-time text. The fallback (no `action.selector`, or value is not a session var) still uses the original `locatorExpr`. `assertValue` is unaffected — its locator targets an input by label/name, not by value.
 
 ### Environment Profiles system
 
@@ -174,7 +182,7 @@ Flows are stored as `flows/{flowId}.json` in dev mode or `app.getPath('userData'
 | File | Role |
 |------|------|
 | `src/main/index.ts` | Electron entry point — creates BrowserWindow, registers IPC handlers |
-| `src/main/ipc/ipcHandlers.ts` | Central orchestrator — 18 IPC channel handlers; holds singleton BrowserController/Recorder/Replayer |
+| `src/main/ipc/ipcHandlers.ts` | Central orchestrator — IPC channel handlers for all 13 Renderer→Main channels; holds singleton BrowserController/Recorder/Replayer |
 | `src/main/playwright/browserController.ts` | Wraps playwright-core chromium: launch, context, page, auto-cleanup on disconnect |
 | `src/main/playwright/recorder.ts` | Thin wrapper around CodegenCapture; tracks recording state and assertion-picking mode |
 | `src/main/playwright/codegenCapture.ts` | Multi-page recorder: injects scripts, exposes `__flowtest_report`, filters navigation events |
@@ -182,7 +190,7 @@ Flows are stored as `flows/{flowId}.json` in dev mode or `app.getPath('userData'
 | `src/main/playwright/captureShared.ts` | Shared utilities: extracts InjectedScript from coreBundle.js, DOM event capture (blacklist-based, Shadow DOM-aware), locator builder, assertion-pick logic, variable helper codegen |
 | `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events; constructor takes `(page, baseURL, profileVars?, activeProfileId?)`; resolves `subFlowProfileMapping` for callFlow nodes at any nesting depth |
 | `src/main/storage/flowStorage.ts` | Flow CRUD: save/load/list/delete JSON files; sorts by updatedAt |
-| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` code generation; emits `_ftProf_*` declarations from `profileVars`; threads `activeProfileId` through recursive sub-flow expansion via `resolveSubFlowProfileId()` |
+| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` code generation; emits `_ftProf_*` declarations from `profileVars`; threads `activeProfileId` through recursive sub-flow expansion via `resolveSubFlowProfileId()`; hoists `captureAs` vars as `let` at test-function scope when `useTestStep` is true; generates `filter({ hasText })` locators for `assertText` nodes whose value is a pure session variable |
 | `src/renderer/App.tsx` | Root component — calls `usePlaywrightEvents()` once; renders Toolbar + FlowList + FlowCanvas + PropertyPanel + right sidebar (VariableList / ProfileVarList / SessionVarList) |
 | `src/renderer/components/Toolbar/Toolbar.tsx` | Action bar: record/stop/branch/replay/export/run-tests buttons; assertion picker buttons; speed selector; profile selector dropdown; status pills |
 | `src/renderer/components/Toolbar/TestOutputModal.tsx` | Modal that streams live `TEST_OUTPUT` lines during `RUN_TESTS` execution |
@@ -191,7 +199,7 @@ Flows are stored as `flows/{flowId}.json` in dev mode or `app.getPath('userData'
 | `src/renderer/components/Canvas/ActionNode.tsx` | Custom node: action icon + label + description; color-coded type; replay status border; page-nav indicator; callFlow badge: indigo `⚙ 動態配置` (multi-profile mapping) or amber `⚙ <name>` (single) |
 | `src/renderer/components/Canvas/BranchEdge.tsx` | Custom bezier edge with optional branch label badge |
 | `src/renderer/components/FlowList/FlowList.tsx` | Sidebar: lists flows sorted by updatedAt; highlights current flow |
-| `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | Bottom panel: edit description/selector/value/assertion for selected node; shows "配置對應" mapping grid for callFlow nodes (loads sub-flow profiles async) |
+| `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | Bottom panel: edit description/selector/value for selected node; `assertText` nodes show editable "驗證文字" field, `assertValue` nodes show editable "驗證值" field (both accept `{{variable}}` placeholders); shows "配置對應" mapping grid for callFlow nodes (loads sub-flow profiles async via `FLOW_GET`) |
 | `src/renderer/components/ProfileEditor/ProfileEditorModal.tsx` | Two-column modal: left = profile list (add/rename/delete); right = variable table (key synced across profiles, value/description per-profile) |
 | `src/renderer/components/CallFlowModal/CallFlowModal.tsx` | 2–3 step modal for embedding a sub-flow: Step 1 = select sub-flow + edit description; Step 2 = select exit node; Step 3 = profile mapping (shown only when sub-flow has >1 profiles) |
 | `src/renderer/stores/flowStore.ts` | Zustand store — 11 state fields, 20 actions; profile CRUD + 3 cross-profile sync actions; legacy domain migration; `migrateCallFlowProfiles()` migrates legacy `subFlowProfileId` → `subFlowProfileMapping`; `addProfile`/`deleteProfile` keep callFlow mappings in sync |

@@ -196,9 +196,20 @@ export class ScriptExporter {
         const testName = path.name || `測試路徑 ${idx + 1}`
         const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId)
         const sessionVarsDefined = new Set<string>()
+
+        // When useTestStep, each step is wrapped in its own async closure.
+        // captureAs variables declared with `const` inside one closure are invisible to
+        // subsequent steps. Hoist them as `let` at the test function scope instead.
+        const hoistedVars: Set<string> = config.useTestStep
+          ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v): v is string => !!v))
+          : new Set()
+        const hoistDecls = hoistedVars.size > 0
+          ? [...hoistedVars].map((v) => `    let ${v} = ''`).join('\n') + '\n'
+          : ''
+
         const stepCode = steps
           .map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {
-            const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars)
+            const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars)
             const assertCode = node.action.assertion
               ? ScriptExporter.assertionToCode(node.action)
               : ''
@@ -211,7 +222,7 @@ export class ScriptExporter {
           })
           .join('\n\n')
 
-        return `  test('${testName}', async ({ page }) => {\n${stepCode}\n  });`
+        return `  test('${testName}', async ({ page }) => {\n${hoistDecls}${stepCode}\n  });`
       })
       .join('\n\n')
 
@@ -237,6 +248,7 @@ export class ScriptExporter {
     baseOrigin = '',
     profileVars: Record<string, string> = {},
     inlineVars = false,
+    hoistedVars: Set<string> = new Set(),
   ): string {
     const { action } = node
     // For sub-flow nodes (inlineVars=true), profile vars are baked into actual values at code-gen
@@ -290,11 +302,16 @@ export class ScriptExporter {
     const resolveProfilePlaceholders = (v: string) =>
       inlineVars ? v.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : v
 
-    // If this action defines a session variable, emit a const declaration before the action.
+    // If this action defines a session variable, emit a declaration before the action.
+    // When the variable is hoisted (useTestStep mode), emit assignment only — the `let`
+    // declaration lives at the test function scope so sibling step closures can read it.
     const captureAs = action.captureAs
     let captureDecl = ''
     if (captureAs) {
-      captureDecl = `const ${captureAs} = ${valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ''), profileVarKeys)};\n`
+      const expr = valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ''), profileVarKeys)
+      captureDecl = hoistedVars.has(captureAs)
+        ? `${captureAs} = ${expr};\n`
+        : `const ${captureAs} = ${expr};\n`
       sessionVarsDefined.add(captureAs)
     }
 
@@ -345,8 +362,19 @@ export class ScriptExporter {
         return `await ${loc}.waitFor({ state: 'visible' });`
       case 'assertVisible':
         return `await expect(${loc}).toBeVisible();`
-      case 'assertText':
-        return `${captureDecl}await expect(${loc}).toContainText(${va(action.value ?? '')});`
+      case 'assertText': {
+        const valueExpr = va(action.value ?? '')
+        // When the value is a session variable (e.g. {{sign_off_title}}), the locatorExpr
+        // still contains the hardcoded text captured at recording time and will find a stale
+        // element. Replace the locator with a CSS selector + filter so it tracks the
+        // runtime value instead.
+        const isSessionVar = !!action.value && /^\{\{(\w+)\}\}$/.test(action.value)
+          && sessionVarsDefined.has(action.value.slice(2, -2))
+        const assertLoc = isSessionVar && action.selector
+          ? `page.locator('${action.selector}').filter({ hasText: ${valueExpr} })`
+          : loc
+        return `${captureDecl}await expect(${assertLoc}).toContainText(${valueExpr});`
+      }
       case 'assertValue':
         return `${captureDecl}await expect(${loc}).toHaveValue(${va(action.value ?? '')});`
       case 'callFlow':

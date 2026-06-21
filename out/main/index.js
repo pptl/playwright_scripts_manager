@@ -1152,8 +1152,10 @@ class ScriptExporter {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
       const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
+      const hoistedVars = config.useTestStep ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v) => !!v)) : /* @__PURE__ */ new Set();
+      const hoistDecls = hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "";
       const stepCode = steps.map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {
-        const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars);
+        const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars);
         const assertCode = node.action.assertion ? ScriptExporter.assertionToCode(node.action) : "";
         if (config.useTestStep) {
           const action2 = rawAction.replace(/\n/g, "\n      ");
@@ -1166,7 +1168,7 @@ class ScriptExporter {
     ${action}${assertCode ? "\n    " + assertCode : ""}`;
       }).join("\n\n");
       return `  test('${testName}', async ({ page }) => {
-${stepCode}
+${hoistDecls}${stepCode}
   });`;
     }).join("\n\n");
     return [
@@ -1183,7 +1185,7 @@ ${emitProfileVarDecls(profileVars)}` : "",
       "});"
     ].filter((line) => line !== void 0).join("\n");
   }
-  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false) {
+  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false, hoistedVars = /* @__PURE__ */ new Set()) {
     const { action } = node;
     const profileVarKeys = inlineVars ? /* @__PURE__ */ new Set() : new Set(Object.keys(profileVars));
     let loc;
@@ -1214,7 +1216,9 @@ ${emitProfileVarDecls(profileVars)}` : "",
     const captureAs = action.captureAs;
     let captureDecl = "";
     if (captureAs) {
-      captureDecl = `const ${captureAs} = ${valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ""), profileVarKeys)};
+      const expr = valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ""), profileVarKeys);
+      captureDecl = hoistedVars.has(captureAs) ? `${captureAs} = ${expr};
+` : `const ${captureAs} = ${expr};
 `;
       sessionVarsDefined.add(captureAs);
     }
@@ -1257,8 +1261,12 @@ ${emitProfileVarDecls(profileVars)}` : "",
         return `await ${loc}.waitFor({ state: 'visible' });`;
       case "assertVisible":
         return `await expect(${loc}).toBeVisible();`;
-      case "assertText":
-        return `${captureDecl}await expect(${loc}).toContainText(${va(action.value ?? "")});`;
+      case "assertText": {
+        const valueExpr = va(action.value ?? "");
+        const isSessionVar = !!action.value && /^\{\{(\w+)\}\}$/.test(action.value) && sessionVarsDefined.has(action.value.slice(2, -2));
+        const assertLoc = isSessionVar && action.selector ? `page.locator('${action.selector}').filter({ hasText: ${valueExpr} })` : loc;
+        return `${captureDecl}await expect(${assertLoc}).toContainText(${valueExpr});`;
+      }
       case "assertValue":
         return `${captureDecl}await expect(${loc}).toHaveValue(${va(action.value ?? "")});`;
       case "callFlow":

@@ -122,8 +122,11 @@ export function PropertyPanel() {
             )}
 
             {/* Value */}
-            {['fill', 'selectOption', 'goto', 'press'].includes(selectedNode.action.type) && (
-              <Field label="值">
+            {['fill', 'selectOption', 'goto', 'press', 'assertText', 'assertValue'].includes(selectedNode.action.type) && (
+              <Field label={
+                selectedNode.action.type === 'assertText' ? '驗證文字' :
+                selectedNode.action.type === 'assertValue' ? '驗證值' : '值'
+              }>
                 <input
                   value={value}
                   onChange={(e) => setValue(e.target.value)}

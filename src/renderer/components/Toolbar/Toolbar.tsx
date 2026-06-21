@@ -139,6 +139,7 @@ export function Toolbar() {
       helperFunctions: false,
       useTestStep: true,
       profileVars: getProfileVars(),
+      activeProfileId: activeProfileId ?? undefined,
     }
     try {
       const path = await window.electronAPI.exportScripts(currentFlow, config)
@@ -155,6 +156,7 @@ export function Toolbar() {
       helperFunctions: false,
       useTestStep: true,
       profileVars: getProfileVars(),
+      activeProfileId: activeProfileId ?? undefined,
     }
     testLinesRef.current = []
     setTestLines([])

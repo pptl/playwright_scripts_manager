@@ -13,10 +13,12 @@ export class Replayer {
   private sessionVars = new Map<string, string>()
   private baseOrigin: string
   private profileVars: Record<string, string>
+  private activeProfileId?: string
 
-  constructor(page: Page, baseURL = '', profileVars?: Record<string, string>) {
+  constructor(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string) {
     this.page = page
     this.profileVars = profileVars ?? {}
+    this.activeProfileId = activeProfileId
     this.baseOrigin = (() => { try { return new URL(baseURL).origin } catch { return '' } })()
   }
 
@@ -66,15 +68,28 @@ export class Replayer {
     const subFlow = await FlowStorage.load(action.subFlowId!)
     if (!subFlow) throw new Error(`子流程 "${action.subFlowId}" 不存在`)
 
+    // Resolve sub-flow profile: mapping takes precedence over legacy subFlowProfileId
+    let resolvedSubProfileId: string | null | undefined = action.subFlowProfileId ?? null
+    if (action.subFlowProfileMapping && this.activeProfileId && this.activeProfileId in action.subFlowProfileMapping) {
+      resolvedSubProfileId = action.subFlowProfileMapping[this.activeProfileId]
+    }
+
     let subProfileVars: Record<string, string> = {}
-    if (action.subFlowProfileId) {
-      const profile = subFlow.profiles?.find((p) => p.id === action.subFlowProfileId)
+    if (resolvedSubProfileId) {
+      const profile = subFlow.profiles?.find((p) => p.id === resolvedSubProfileId)
       if (profile) {
         subProfileVars = Object.fromEntries(profile.vars.map((v) => [v.key, v.value]))
       }
+    } else if (!resolvedSubProfileId && subFlow.profiles && subFlow.profiles.length > 0) {
+      // Fall back to first profile when mapping resolves to null
+      const firstProfile = subFlow.profiles[0]
+      subProfileVars = Object.fromEntries(firstProfile.vars.map((v) => [v.key, v.value]))
+      resolvedSubProfileId = firstProfile.id
     }
 
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars)
+    // Pass the resolved sub-flow profile ID as the nested Replayer's activeProfileId so it
+    // can resolve its own sub-flow mappings — this enables correct N-level nesting
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? undefined)
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId!,

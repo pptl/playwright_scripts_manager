@@ -817,9 +817,11 @@ class Replayer {
   sessionVars = /* @__PURE__ */ new Map();
   baseOrigin;
   profileVars;
-  constructor(page, baseURL = "", profileVars) {
+  activeProfileId;
+  constructor(page, baseURL = "", profileVars, activeProfileId) {
     this.page = page;
     this.profileVars = profileVars ?? {};
+    this.activeProfileId = activeProfileId;
     this.baseOrigin = (() => {
       try {
         return new URL(baseURL).origin;
@@ -860,14 +862,22 @@ class Replayer {
   async executeCallFlow(action, onNodeStart, onNodeComplete, speed) {
     const subFlow = await FlowStorage.load(action.subFlowId);
     if (!subFlow) throw new Error(`子流程 "${action.subFlowId}" 不存在`);
+    let resolvedSubProfileId = action.subFlowProfileId ?? null;
+    if (action.subFlowProfileMapping && this.activeProfileId && this.activeProfileId in action.subFlowProfileMapping) {
+      resolvedSubProfileId = action.subFlowProfileMapping[this.activeProfileId];
+    }
     let subProfileVars = {};
-    if (action.subFlowProfileId) {
-      const profile = subFlow.profiles?.find((p) => p.id === action.subFlowProfileId);
+    if (resolvedSubProfileId) {
+      const profile = subFlow.profiles?.find((p) => p.id === resolvedSubProfileId);
       if (profile) {
         subProfileVars = Object.fromEntries(profile.vars.map((v) => [v.key, v.value]));
       }
+    } else if (!resolvedSubProfileId && subFlow.profiles && subFlow.profiles.length > 0) {
+      const firstProfile = subFlow.profiles[0];
+      subProfileVars = Object.fromEntries(firstProfile.vars.map((v) => [v.key, v.value]));
+      resolvedSubProfileId = firstProfile.id;
     }
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars);
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0);
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId,
@@ -1016,7 +1026,7 @@ class ScriptExporter {
         await fs.promises.writeFile(path.join(helpersDir, `${flow.id}-helpers.ts`), helperCode, "utf-8");
       }
     }
-    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap);
+    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap, config.activeProfileId);
     const specPath = path.join(outputDir, `${flow.id}.spec.ts`);
     await fs.promises.writeFile(specPath, specContent, "utf-8");
     return specPath;
@@ -1041,7 +1051,15 @@ class ScriptExporter {
     if (!profile) return {};
     return Object.fromEntries(profile.vars.map((v) => [v.key, v.value]));
   }
-  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin) {
+  /** Resolve which sub-flow profile ID to use given the parent's active profile.
+   *  subFlowProfileMapping takes precedence; falls back to legacy subFlowProfileId. */
+  static resolveSubFlowProfileId(action, parentActiveProfileId) {
+    if (action.subFlowProfileMapping && parentActiveProfileId && parentActiveProfileId in action.subFlowProfileMapping) {
+      return action.subFlowProfileMapping[parentActiveProfileId];
+    }
+    return action.subFlowProfileId ?? null;
+  }
+  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin, activeProfileId) {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]));
     const path2 = [];
     const visited = /* @__PURE__ */ new Set();
@@ -1051,7 +1069,8 @@ class ScriptExporter {
       if (isCallFlowAction(cur.action)) {
         const nested = subFlowMap.get(cur.action.subFlowId);
         if (nested) {
-          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, cur.action.subFlowProfileId);
+          const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, activeProfileId);
+          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId);
           const nestedBaseOrigin = (() => {
             try {
               return new URL(nested.baseURL).origin;
@@ -1059,7 +1078,7 @@ class ScriptExporter {
               return "";
             }
           })();
-          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin));
+          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedProfileId ?? void 0));
         }
       } else {
         path2.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true });
@@ -1068,7 +1087,7 @@ class ScriptExporter {
     }
     return path2;
   }
-  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "") {
+  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "", activeProfileId) {
     const result = [];
     for (const id of nodeIds) {
       const node = nodeMap.get(id);
@@ -1076,7 +1095,8 @@ class ScriptExporter {
       if (isCallFlowAction(node.action)) {
         const subFlow = subFlowMap.get(node.action.subFlowId);
         if (subFlow) {
-          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, node.action.subFlowProfileId);
+          const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, activeProfileId);
+          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId);
           const subBaseOrigin = (() => {
             try {
               return new URL(subFlow.baseURL).origin;
@@ -1084,7 +1104,7 @@ class ScriptExporter {
               return "";
             }
           })();
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin));
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subProfileId ?? void 0));
         }
       } else {
         result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false });
@@ -1116,7 +1136,7 @@ class ScriptExporter {
     if (root) walk(root, [], []);
     return paths;
   }
-  static generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap = /* @__PURE__ */ new Map()) {
+  static generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap = /* @__PURE__ */ new Map(), activeProfileId) {
     const profileVars = config.profileVars ?? {};
     const profileVarKeys = new Set(Object.keys(profileVars));
     const hasProfileVars = profileVarKeys.size > 0;
@@ -1130,7 +1150,7 @@ class ScriptExporter {
     const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value));
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
-      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin);
+      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const stepCode = steps.map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {
         const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars);
@@ -1318,7 +1338,7 @@ function registerIpcHandlers(win) {
     await browserController.launch();
     const page = browserController.getPage();
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars);
+      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId);
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -1358,7 +1378,7 @@ function registerIpcHandlers(win) {
         await browserController.launch();
       }
       const page = browserController.getPage();
-      replayer = new Replayer(page, payload.baseURL, payload.profileVars);
+      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId);
       await replayer.replayToNode(
         payload.nodes,
         payload.targetNodeId,

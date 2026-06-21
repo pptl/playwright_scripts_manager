@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import type { FlowProfile } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
 import { useFlowManager } from '../../hooks/useFlowStore'
 
@@ -13,6 +14,11 @@ export function PropertyPanel() {
   const [value, setValue] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
 
+  // callFlow-specific state
+  const [subFlowProfiles, setSubFlowProfiles] = useState<FlowProfile[]>([])
+  const [profileMapping, setProfileMapping] = useState<Record<string, string | null>>({})
+  const [subFlowLoading, setSubFlowLoading] = useState(false)
+
   useEffect(() => {
     setFlowName(currentFlow?.name ?? '')
   }, [currentFlow?.id])
@@ -24,6 +30,23 @@ export function PropertyPanel() {
       setValue(selectedNode.action.value ?? '')
     }
   }, [selectedNodeId, selectedNode])
+
+  // When a callFlow node is selected, load sub-flow profiles and initialize mapping
+  useEffect(() => {
+    if (selectedNode?.action.type !== 'callFlow') {
+      setSubFlowProfiles([])
+      setProfileMapping({})
+      return
+    }
+    const subFlowId = selectedNode.action.subFlowId
+    if (!subFlowId) return
+    setSubFlowLoading(true)
+    window.electronAPI.getFlow(subFlowId).then((flow) => {
+      setSubFlowProfiles(flow?.profiles ?? [])
+      setProfileMapping(selectedNode.action.subFlowProfileMapping ?? {})
+      setSubFlowLoading(false)
+    })
+  }, [selectedNodeId, selectedNode?.action.subFlowId])
 
   if (!currentFlow) return null
 
@@ -45,16 +68,22 @@ export function PropertyPanel() {
 
   const saveNode = () => {
     if (!selectedNode) return
+    const isCallFlow = selectedNode.action.type === 'callFlow'
     updateNode(selectedNode.id, {
       action: {
         ...selectedNode.action,
         description: desc,
         selector,
         value: value || undefined,
+        ...(isCallFlow ? { subFlowProfileMapping: profileMapping } : {}),
       },
     })
     window.electronAPI.saveFlow(useFlowStore.getState().currentFlow!).catch(console.error)
   }
+
+  const parentProfiles = currentFlow.profiles ?? []
+  const isCallFlow = selectedNode?.action.type === 'callFlow'
+  const showMappingSection = isCallFlow && parentProfiles.length > 0 && (subFlowLoading || subFlowProfiles.length > 0)
 
   return (
     <div
@@ -79,8 +108,10 @@ export function PropertyPanel() {
               />
             </Field>
 
-            {/* Selector */}
-            {selectedNode.action.type !== 'goto' && selectedNode.action.type !== 'press' && (
+            {/* Selector — hidden for callFlow, goto, press */}
+            {selectedNode.action.type !== 'goto' &&
+              selectedNode.action.type !== 'press' &&
+              selectedNode.action.type !== 'callFlow' && (
               <Field label="Selector">
                 <input
                   value={selector}
@@ -102,6 +133,63 @@ export function PropertyPanel() {
                   可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code>
                 </div>
               </Field>
+            )}
+
+            {/* callFlow: Profile Mapping */}
+            {showMappingSection && (
+              <div style={{ width: '100%', marginTop: 8 }}>
+                <div style={{
+                  fontSize: 11, color: '#64748b', fontWeight: 600,
+                  textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.05em',
+                }}>
+                  配置對應
+                </div>
+                {subFlowLoading ? (
+                  <div style={{ fontSize: 12, color: '#64748b' }}>載入中…</div>
+                ) : (
+                  <>
+                    <div style={{
+                      display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6,
+                      marginBottom: 4,
+                    }}>
+                      <div style={{ fontSize: 10, color: '#475569', fontWeight: 600, textTransform: 'uppercase' }}>父流程配置</div>
+                      <div style={{ fontSize: 10, color: '#475569', fontWeight: 600, textTransform: 'uppercase' }}>子流程套用配置</div>
+                    </div>
+                    {parentProfiles.map((pp) => (
+                      <div
+                        key={pp.id}
+                        style={{
+                          display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6,
+                          alignItems: 'center', marginBottom: 5,
+                        }}
+                      >
+                        <div style={{
+                          fontSize: 12, color: '#cbd5e1',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        }}>
+                          {pp.name}
+                        </div>
+                        <select
+                          value={profileMapping[pp.id] ?? (subFlowProfiles[0]?.id ?? '')}
+                          onChange={(e) => setProfileMapping((prev) => ({
+                            ...prev,
+                            [pp.id]: e.target.value || null,
+                          }))}
+                          style={{
+                            background: '#0f172a', color: '#e2e8f0',
+                            border: '1px solid #334155', borderRadius: 4,
+                            padding: '3px 6px', fontSize: 12, cursor: 'pointer', width: '100%',
+                          }}
+                        >
+                          {subFlowProfiles.map((sp) => (
+                            <option key={sp.id} value={sp.id}>{sp.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
             )}
 
             <div style={{ display: 'flex', alignItems: 'flex-end' }}>

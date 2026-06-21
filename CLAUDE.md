@@ -42,17 +42,17 @@ Main → Renderer: `mainWindow.webContents.send(channel, payload)` → `usePlayw
 
 ### Key data types (`src/shared/types.ts`)
 
-- **`ActionType`** — 13 variants: `goto | click | fill | selectOption | check | uncheck | press | upload | wait | assertVisible | assertText | assertValue`
-- **`Action`** — one browser interaction: `type`, `locatorExpr` (high-quality Playwright locator), `selector` (CSS fallback), `value`, `captureAs` (optional session variable name), `description`, `url`, `isPageNavigation`, optional `assertion`
+- **`ActionType`** — 14 variants: `goto | click | fill | selectOption | check | uncheck | press | upload | wait | assertVisible | assertText | assertValue | callFlow`
+- **`Action`** — one browser interaction: `type`, `locatorExpr` (high-quality Playwright locator), `selector` (CSS fallback), `value`, `captureAs` (optional session variable name), `description`, `url`, `isPageNavigation`, optional `assertion`. For `callFlow` actions: `subFlowId`, `subFlowExitNodeId`, `subFlowProfileMapping?: Record<string, string | null>` (parent profile ID → sub-flow profile ID), legacy `subFlowProfileId` / `subFlowProfileName` (for single-parent badge display)
 - **`Assertion`** — `type` (`text|visible|url|count`), optional `target` selector, `expected` value
 - **`FlowNode`** — `Action` + canvas `position` + `parentId` + `childIds[]` + optional `branchLabel`
 - **`ProfileVariable`** — `{ key: string, value: string, description?: string }` — one variable entry in a profile
 - **`FlowProfile`** — `{ id, name, vars: ProfileVariable[] }` — a named environment configuration
 - **`Flow`** — `nodes: FlowNode[]`, `rootNodeId`, `baseURL`, `profiles?: FlowProfile[]`, metadata. `domains?: string[]` is deprecated (migrated to profiles on load)
 - **`ReplaySpeed`** — `'fast' | 'normal' | 'slow'` mapped to 100 / 500 / 1000 ms
-- **`RecordingStartPayload`** — `baseURL`, optional `branchFromNodeId` + `branchNodes` + `replaySpeed` for branch recording
-- **`ExportConfig`** — `outputDir`, `helperFunctions` (extract common prefix), `useTestStep`, `profileVars?: Record<string, string>` (active profile's flat key-value map for code generation)
-- **`ReplayToNodePayload`** — includes `profileVars?: Record<string, string>` for runtime variable substitution
+- **`RecordingStartPayload`** — `baseURL`, optional `branchFromNodeId` + `branchNodes` + `replaySpeed` for branch recording, `activeProfileId?` for sub-flow profile resolution
+- **`ExportConfig`** — `outputDir`, `helperFunctions` (extract common prefix), `useTestStep`, `profileVars?: Record<string, string>` (active profile's flat key-value map for code generation), `activeProfileId?` for sub-flow profile resolution
+- **`ReplayToNodePayload`** — includes `profileVars?: Record<string, string>` for runtime variable substitution, `activeProfileId?` for sub-flow profile resolution
 
 ### IPC channels (`src/shared/types.ts` → `IPC_CHANNELS`)
 
@@ -87,7 +87,7 @@ Main → Renderer: `mainWindow.webContents.send(channel, payload)` → `usePlayw
 
 `Replayer.replayToNode()` walks `parentId` pointers from the target node up to the root to build an ordered path, then executes each `Action` sequentially. Assertions support `text`, `visible`, `url`, and `count` types with a 10 s timeout. Each step fires `REPLAY_NODE_START` / `REPLAY_NODE_COMPLETE` events to drive the canvas status badges (running → success/error border colors).
 
-`Replayer` constructor: `(page: Page, baseURL = '', profileVars?: Record<string, string>)`. The `domain` profile variable drives goto URL origin substitution — if a goto URL's origin matches `baseURL`'s origin, it is replaced with `profileVars['domain']`.
+`Replayer` constructor: `(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string)`. The `domain` profile variable drives goto URL origin substitution — if a goto URL's origin matches `baseURL`'s origin, it is replaced with `profileVars['domain']`. `activeProfileId` enables the replayer to resolve `subFlowProfileMapping` on `callFlow` nodes at any nesting depth.
 
 ### Branch recording pipeline
 
@@ -131,6 +131,33 @@ Per-profile mutations (`value`, `description`, `name`) use `updateProfile(id, up
 
 **UI:** Toolbar profile selector (⚙ button) → dropdown to switch profiles → "管理配置…" opens `ProfileEditorModal`. Right sidebar shows active profile's vars in the `ProfileVarList` panel (amber colour), between `VariableList` (built-ins) and `SessionVarList` (session vars). Click any var to copy its `{{key}}` placeholder.
 
+### Sub-flow Profile Mapping system
+
+A `callFlow` action node embeds another flow inline. Because the parent flow and the sub-flow each have their own set of `FlowProfile`s, the mapping between them must be configurable per parent profile.
+
+**`subFlowProfileMapping: Record<parentProfileId, subFlowProfileId | null>`** — stored on the `callFlow` action. Each parent profile ID maps to the sub-flow profile ID to activate. `null` means "use the sub-flow's first profile".
+
+**N-level nesting:** Each `Replayer` receives the *resolved sub-flow profile ID* as its own `activeProfileId`. When that replayer hits a nested `callFlow`, it resolves `subFlowProfileMapping[this.activeProfileId]` to get the next level's profile ID, creating a chain that supports unlimited nesting depth.
+
+**Resolution order in `Replayer.executeCallFlow()`:**
+1. Check `action.subFlowProfileMapping[this.activeProfileId]` → use if key exists
+2. Fallback to legacy `action.subFlowProfileId`
+3. Fallback to first profile of the sub-flow
+
+**ScriptExporter** threads `activeProfileId` through `generateSpec()` → `buildStepSequence()` → `getSubFlowPath()` recursively, calling `resolveSubFlowProfileId()` at each `callFlow` node.
+
+**Migration:** Legacy `callFlow` nodes that have `subFlowProfileId` but no `subFlowProfileMapping` are auto-migrated in memory on flow load (`migrateCallFlowProfiles()` in `flowStore.ts`) — all parent profiles map to the existing `subFlowProfileId`. No disk write.
+
+**Store maintenance:**
+- `addProfile()` — extends all callFlow node mappings with `[newProfile.id]: lastMappedId ?? null` (copies the last profile's mapping as default)
+- `deleteProfile()` — removes the deleted profile ID key from all callFlow node `subFlowProfileMapping` objects
+
+**UI entry points:**
+1. **CallFlowModal Step 3** — shown when sub-flow has >1 profiles. If parent has ≥2 profiles: 2-column mapping table (parent profile → sub-flow profile dropdown per row). If parent has 1 profile: original single-selection list.
+2. **PropertyPanel "配置對應" section** — visible whenever a callFlow node is selected and parent flow has ≥1 profiles. Loads sub-flow profiles async, shows mapping grid, saves via "儲存" button.
+
+**ActionNode badge:** If `subFlowProfileMapping` has >1 entries → indigo `⚙ 動態配置` badge; if 1 entry → amber `⚙ <profileName>` badge.
+
 ### Storage
 
 Flows are stored as `flows/{flowId}.json` in dev mode or `app.getPath('userData')/flows` in production (plain JSON, no database). `ScriptExporter` computes all root-to-leaf paths in the tree and emits one `test()` block per path into `exports/{flowId}.spec.ts`. Optionally extracts a shared prefix into `helpers/{flowId}-helpers.ts`.
@@ -153,20 +180,21 @@ Flows are stored as `flows/{flowId}.json` in dev mode or `app.getPath('userData'
 | `src/main/playwright/codegenCapture.ts` | Multi-page recorder: injects scripts, exposes `__flowtest_report`, filters navigation events |
 | `src/main/playwright/actionCapture.ts` | Single-page variant of CodegenCapture (supports stop/restart without re-injection; not yet active in main flow) |
 | `src/main/playwright/captureShared.ts` | Shared utilities: extracts InjectedScript from coreBundle.js, DOM event capture (blacklist-based, Shadow DOM-aware), locator builder, assertion-pick logic, variable helper codegen |
-| `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events; constructor takes `(page, baseURL, profileVars?)` |
+| `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events; constructor takes `(page, baseURL, profileVars?, activeProfileId?)`; resolves `subFlowProfileMapping` for callFlow nodes at any nesting depth |
 | `src/main/storage/flowStorage.ts` | Flow CRUD: save/load/list/delete JSON files; sorts by updatedAt |
-| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` code generation; emits `_ftProf_*` declarations from `profileVars` |
+| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` code generation; emits `_ftProf_*` declarations from `profileVars`; threads `activeProfileId` through recursive sub-flow expansion via `resolveSubFlowProfileId()` |
 | `src/renderer/App.tsx` | Root component — calls `usePlaywrightEvents()` once; renders Toolbar + FlowList + FlowCanvas + PropertyPanel + right sidebar (VariableList / ProfileVarList / SessionVarList) |
 | `src/renderer/components/Toolbar/Toolbar.tsx` | Action bar: record/stop/branch/replay/export/run-tests buttons; assertion picker buttons; speed selector; profile selector dropdown; status pills |
 | `src/renderer/components/Toolbar/TestOutputModal.tsx` | Modal that streams live `TEST_OUTPUT` lines during `RUN_TESTS` execution |
 | `src/renderer/components/Canvas/FlowCanvas.tsx` | ReactFlow canvas: tree layout, right-click to open NodeContextMenu, recording indicator overlay |
 | `src/renderer/components/Canvas/NodeContextMenu.tsx` | Context menu for nodes: replay-to-here, branch-from-here, delete node+children |
-| `src/renderer/components/Canvas/ActionNode.tsx` | Custom node: action icon + label + description; color-coded type; replay status border; page-nav indicator |
+| `src/renderer/components/Canvas/ActionNode.tsx` | Custom node: action icon + label + description; color-coded type; replay status border; page-nav indicator; callFlow badge: indigo `⚙ 動態配置` (multi-profile mapping) or amber `⚙ <name>` (single) |
 | `src/renderer/components/Canvas/BranchEdge.tsx` | Custom bezier edge with optional branch label badge |
 | `src/renderer/components/FlowList/FlowList.tsx` | Sidebar: lists flows sorted by updatedAt; highlights current flow |
-| `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | Bottom panel: edit description/selector/value/assertion for selected node |
+| `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | Bottom panel: edit description/selector/value/assertion for selected node; shows "配置對應" mapping grid for callFlow nodes (loads sub-flow profiles async) |
 | `src/renderer/components/ProfileEditor/ProfileEditorModal.tsx` | Two-column modal: left = profile list (add/rename/delete); right = variable table (key synced across profiles, value/description per-profile) |
-| `src/renderer/stores/flowStore.ts` | Zustand store — 11 state fields, 20 actions; profile CRUD + 3 cross-profile sync actions; legacy domain migration |
+| `src/renderer/components/CallFlowModal/CallFlowModal.tsx` | 2–3 step modal for embedding a sub-flow: Step 1 = select sub-flow + edit description; Step 2 = select exit node; Step 3 = profile mapping (shown only when sub-flow has >1 profiles) |
+| `src/renderer/stores/flowStore.ts` | Zustand store — 11 state fields, 20 actions; profile CRUD + 3 cross-profile sync actions; legacy domain migration; `migrateCallFlowProfiles()` migrates legacy `subFlowProfileId` → `subFlowProfileMapping`; `addProfile`/`deleteProfile` keep callFlow mappings in sync |
 | `src/renderer/hooks/usePlaywrightEvents.ts` | 6 IPC event subscriptions: ACTION_CAPTURED, REPLAY_NODE_*, REPLAY_FINISHED/ERROR, ASSERTION_PICK_CANCELLED |
 | `src/renderer/hooks/usePlaywright.ts` | IPC invocation wrappers: startRecording, startBranchRecording, stopRecording, replayToNode (builds profileVars from active profile) |
 | `src/renderer/hooks/useRecording.ts` | Branch recording state: which node to branch from, branch label |

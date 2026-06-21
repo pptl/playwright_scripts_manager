@@ -40,6 +40,7 @@ export function usePlaywright() {
           branchNodes: currentFlow.nodes,
           replaySpeed: 200,
           profileVars,
+          activeProfileId: activeProfileId ?? undefined,
         })
       } catch (err) {
         setIsRecording(false)
@@ -83,6 +84,7 @@ export function usePlaywright() {
           speed,
           currentFlow.baseURL,
           profileVars,
+          activeProfileId ?? undefined,
         )
       } catch (err) {
         console.error('Replay IPC error:', err)

@@ -47,7 +47,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
     // Branch recording: silently replay to the branch point first
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars)
+      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId)
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -91,7 +91,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         await browserController.launch()
       }
       const page = browserController.getPage()
-      replayer = new Replayer(page, payload.baseURL, payload.profileVars)
+      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId)
 
       await replayer.replayToNode(
         payload.nodes,

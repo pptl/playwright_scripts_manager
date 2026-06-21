@@ -63,6 +63,31 @@ interface FlowStore {
   deleteVarFromAllProfiles: (index: number) => Promise<void>
 }
 
+/** Migrate legacy callFlow actions that have subFlowProfileId but no subFlowProfileMapping.
+ *  Creates a mapping where every current parent profile maps to the same subFlowProfileId.
+ *  Applied in-memory only (no auto-save), consistent with migrateDomainsToProfiles. */
+function migrateCallFlowProfiles(flow: Flow): Flow {
+  const profiles = flow.profiles ?? []
+  const needsMigration = flow.nodes.some(
+    (n) => n.action.type === 'callFlow' && n.action.subFlowProfileId && !n.action.subFlowProfileMapping,
+  )
+  if (!needsMigration || profiles.length === 0) return flow
+
+  const updatedNodes = flow.nodes.map((n) => {
+    if (n.action.type === 'callFlow' && n.action.subFlowProfileId && !n.action.subFlowProfileMapping) {
+      return {
+        ...n,
+        action: {
+          ...n.action,
+          subFlowProfileMapping: Object.fromEntries(profiles.map((p) => [p.id, n.action.subFlowProfileId!])),
+        },
+      }
+    }
+    return n
+  })
+  return { ...flow, nodes: updatedNodes }
+}
+
 /** Migrate legacy domains[] field to profiles[] in memory (no auto-save). */
 function migrateDomainsToProfiles(flow: Flow): FlowProfile[] {
   if (flow.profiles && flow.profiles.length > 0) return flow.profiles
@@ -120,7 +145,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
     // Migrate old flows that have domains[] but no profiles[]
     const profiles = migrateDomainsToProfiles(flow)
-    const migratedFlow = profiles !== flow.profiles ? { ...flow, profiles } : flow
+    const withDomainsMigrated = profiles !== flow.profiles ? { ...flow, profiles } : flow
+    // Migrate callFlow nodes with static subFlowProfileId to per-profile mapping
+    const migratedFlow = migrateCallFlowProfiles(withDomainsMigrated)
     set({
       currentFlow: migratedFlow,
       selectedNodeId: null,
@@ -307,15 +334,32 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const flow = get().currentFlow
     if (!flow) return
     const existingProfiles = flow.profiles ?? []
-    const existingVars = existingProfiles[existingProfiles.length - 1]?.vars ?? []
+    const lastProfile = existingProfiles[existingProfiles.length - 1]
+    const existingVars = lastProfile?.vars ?? []
     const newProfile: FlowProfile = {
       id: uuidv4(),
       name,
       vars: existingVars.map((v) => ({ key: v.key, value: v.value, description: v.description ?? '' })),
     }
+    // Extend all callFlow node mappings to include the new profile.
+    // Default to the same sub-flow profile as the last existing profile (best-guess default).
+    const updatedNodes = flow.nodes.map((n) => {
+      if (n.action.type === 'callFlow' && n.action.subFlowProfileMapping) {
+        const lastMappedId = lastProfile ? (n.action.subFlowProfileMapping[lastProfile.id] ?? null) : null
+        return {
+          ...n,
+          action: {
+            ...n.action,
+            subFlowProfileMapping: { ...n.action.subFlowProfileMapping, [newProfile.id]: lastMappedId },
+          },
+        }
+      }
+      return n
+    })
     const updatedFlow: Flow = {
       ...flow,
       profiles: [...(flow.profiles ?? []), newProfile],
+      nodes: updatedNodes,
       updatedAt: new Date().toISOString(),
     }
     set({ currentFlow: updatedFlow })
@@ -340,10 +384,20 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const flow = get().currentFlow
     if (!flow) return
     const updatedProfiles = (flow.profiles ?? []).filter((p) => p.id !== id)
+    // Remove the deleted profile ID from all callFlow node mappings
+    const updatedNodes = flow.nodes.map((n) => {
+      if (n.action.type === 'callFlow' && n.action.subFlowProfileMapping && id in n.action.subFlowProfileMapping) {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { [id]: _removed, ...rest } = n.action.subFlowProfileMapping
+        return { ...n, action: { ...n.action, subFlowProfileMapping: rest } }
+      }
+      return n
+    })
     const { activeProfileId } = get()
     const updatedFlow: Flow = {
       ...flow,
       profiles: updatedProfiles,
+      nodes: updatedNodes,
       updatedAt: new Date().toISOString(),
     }
     set({

@@ -116,27 +116,31 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
         {action.description}
       </div>
 
-      {action.type === 'callFlow' && action.subFlowProfileName && (
-        <div
-          style={{
-            fontSize: 10,
-            color: '#f59e0b',
-            marginTop: 3,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            background: '#1c1a0e',
-            borderRadius: 3,
-            padding: '1px 5px',
-            border: '1px solid #78350f',
-            display: 'inline-block',
-            maxWidth: '100%',
-          }}
-          title={`配置: ${action.subFlowProfileName}`}
-        >
-          ⚙ {action.subFlowProfileName}
-        </div>
-      )}
+      {action.type === 'callFlow' && (action.subFlowProfileName || (action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 0)) && (() => {
+        const isDynamic = action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 1
+        const label = isDynamic ? '動態配置' : (action.subFlowProfileName ?? '已配置')
+        return (
+          <div
+            style={{
+              fontSize: 10,
+              color: isDynamic ? '#818cf8' : '#f59e0b',
+              marginTop: 3,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              background: isDynamic ? '#1e1b4b' : '#1c1a0e',
+              borderRadius: 3,
+              padding: '1px 5px',
+              border: `1px solid ${isDynamic ? '#4338ca' : '#78350f'}`,
+              display: 'inline-block',
+              maxWidth: '100%',
+            }}
+            title={isDynamic ? '配置依父流程環境動態切換' : `配置: ${action.subFlowProfileName}`}
+          >
+            ⚙ {label}
+          </div>
+        )
+      })()}
 
       {action.type !== 'callFlow' && action.selector && (
         <div

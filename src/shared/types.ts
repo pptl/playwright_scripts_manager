@@ -39,10 +39,14 @@ export interface Action {
   subFlowId?: string
   /** callFlow only: which leaf node in the sub-flow is the exit point */
   subFlowExitNodeId?: string
-  /** callFlow only: which profile from the sub-flow to use */
+  /** callFlow only: which profile from the sub-flow to use (legacy — single static selection) */
   subFlowProfileId?: string
-  /** callFlow only: display name of the selected profile (stored at creation time) */
+  /** callFlow only: display name of the selected profile (single-parent-profile case) */
   subFlowProfileName?: string
+  /** callFlow only: per-parent-profile mapping — parentProfileId → subFlowProfileId.
+   *  Takes precedence over subFlowProfileId at runtime. Enables dynamic profile resolution
+   *  when the parent flow switches environments, including N-level nesting. */
+  subFlowProfileMapping?: Record<string, string | null>
 }
 
 export function isCallFlowAction(action: Action): action is Action & {
@@ -103,6 +107,8 @@ export interface ExportConfig {
   useTestStep: boolean
   /** Active profile's variables as a flat map — used for replay substitution and code generation */
   profileVars?: Record<string, string>
+  /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
+  activeProfileId?: string
 }
 
 export interface TestPath {
@@ -163,6 +169,8 @@ export interface ReplayToNodePayload {
   baseURL?: string
   /** Active profile's variables — used for variable resolution and goto origin substitution */
   profileVars?: Record<string, string>
+  /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
+  activeProfileId?: string
 }
 
 export interface ReplayNodeCompletePayload {
@@ -199,4 +207,6 @@ export interface RecordingStartPayload {
   replaySpeed?: number
   /** Active profile variables for silent replay variable substitution */
   profileVars?: Record<string, string>
+  /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
+  activeProfileId?: string
 }

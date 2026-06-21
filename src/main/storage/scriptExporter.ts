@@ -42,7 +42,7 @@ export class ScriptExporter {
       }
     }
 
-    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap)
+    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap, config.activeProfileId)
     const specPath = join(outputDir, `${flow.id}.spec.ts`)
     await fs.writeFile(specPath, specContent, 'utf-8')
 
@@ -65,12 +65,24 @@ export class ScriptExporter {
     return result
   }
 
-  private static resolveProfileVars(flow: Flow, profileId: string | undefined): Record<string, string> {
+  private static resolveProfileVars(flow: Flow, profileId: string | null | undefined): Record<string, string> {
     const profile = profileId
       ? (flow.profiles ?? []).find((p) => p.id === profileId)
       : (flow.profiles ?? [])[0]
     if (!profile) return {}
     return Object.fromEntries(profile.vars.map((v) => [v.key, v.value]))
+  }
+
+  /** Resolve which sub-flow profile ID to use given the parent's active profile.
+   *  subFlowProfileMapping takes precedence; falls back to legacy subFlowProfileId. */
+  private static resolveSubFlowProfileId(
+    action: { subFlowProfileId?: string; subFlowProfileMapping?: Record<string, string | null> },
+    parentActiveProfileId: string | undefined,
+  ): string | null | undefined {
+    if (action.subFlowProfileMapping && parentActiveProfileId && parentActiveProfileId in action.subFlowProfileMapping) {
+      return action.subFlowProfileMapping[parentActiveProfileId]
+    }
+    return action.subFlowProfileId ?? null
   }
 
   private static getSubFlowPath(
@@ -79,6 +91,7 @@ export class ScriptExporter {
     subFlowMap: Map<string, Flow>,
     subProfileVars: Record<string, string>,
     subBaseOrigin: string,
+    activeProfileId?: string,
   ): Array<{ node: FlowNode; profileVars: Record<string, string>; baseOrigin: string; inlineVars: boolean }> {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]))
     const path: Array<{ node: FlowNode; profileVars: Record<string, string>; baseOrigin: string; inlineVars: boolean }> = []
@@ -89,9 +102,10 @@ export class ScriptExporter {
       if (isCallFlowAction(cur.action)) {
         const nested = subFlowMap.get(cur.action.subFlowId)
         if (nested) {
-          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, cur.action.subFlowProfileId)
+          const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, activeProfileId)
+          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId)
           const nestedBaseOrigin = (() => { try { return new URL(nested.baseURL).origin } catch { return '' } })()
-          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin))
+          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedProfileId ?? undefined))
         }
       } else {
         path.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true })
@@ -107,6 +121,7 @@ export class ScriptExporter {
     subFlowMap: Map<string, Flow>,
     defaultProfileVars: Record<string, string> = {},
     defaultBaseOrigin: string = '',
+    activeProfileId?: string,
   ): Array<{ node: FlowNode; profileVars: Record<string, string>; baseOrigin: string; inlineVars: boolean }> {
     const result: Array<{ node: FlowNode; profileVars: Record<string, string>; baseOrigin: string; inlineVars: boolean }> = []
     for (const id of nodeIds) {
@@ -115,9 +130,10 @@ export class ScriptExporter {
       if (isCallFlowAction(node.action)) {
         const subFlow = subFlowMap.get(node.action.subFlowId)
         if (subFlow) {
-          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, node.action.subFlowProfileId)
+          const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, activeProfileId)
+          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId)
           const subBaseOrigin = (() => { try { return new URL(subFlow.baseURL).origin } catch { return '' } })()
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin))
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subProfileId ?? undefined))
         }
       } else {
         result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false })
@@ -163,6 +179,7 @@ export class ScriptExporter {
     config: ExportConfig,
     helperImport: string,
     subFlowMap: Map<string, Flow> = new Map(),
+    activeProfileId?: string,
   ): string {
     const profileVars = config.profileVars ?? {}
     const profileVarKeys = new Set(Object.keys(profileVars))
@@ -177,7 +194,7 @@ export class ScriptExporter {
     const tests = paths
       .map((path, idx) => {
         const testName = path.name || `測試路徑 ${idx + 1}`
-        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin)
+        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId)
         const sessionVarsDefined = new Set<string>()
         const stepCode = steps
           .map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {

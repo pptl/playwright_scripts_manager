@@ -40,10 +40,26 @@ export function PropertyPanel() {
     }
     const subFlowId = selectedNode.action.subFlowId
     if (!subFlowId) return
+    // Capture before async to avoid stale closure issues
+    const existingMapping = selectedNode.action.subFlowProfileMapping ?? {}
+    const legacySubProfileId = selectedNode.action.subFlowProfileId ?? null
     setSubFlowLoading(true)
     window.electronAPI.getFlow(subFlowId).then((flow) => {
-      setSubFlowProfiles(flow?.profiles ?? [])
-      setProfileMapping(selectedNode.action.subFlowProfileMapping ?? {})
+      const profiles = flow?.profiles ?? []
+      setSubFlowProfiles(profiles)
+      // Pre-fill defaults for all parent profiles so the dropdown value is always persisted on save.
+      // Priority: existing mapping entry > legacy subFlowProfileId > first sub-flow profile
+      const parentProfs = useFlowStore.getState().currentFlow?.profiles ?? []
+      const defaultSubProfileId = profiles[0]?.id ?? null
+      const initialMapping: Record<string, string | null> = {}
+      parentProfs.forEach((pp) => {
+        if (pp.id in existingMapping) {
+          initialMapping[pp.id] = existingMapping[pp.id]
+        } else {
+          initialMapping[pp.id] = legacySubProfileId ?? defaultSubProfileId
+        }
+      })
+      setProfileMapping(initialMapping)
       setSubFlowLoading(false)
     })
   }, [selectedNodeId, selectedNode?.action.subFlowId])
@@ -69,13 +85,28 @@ export function PropertyPanel() {
   const saveNode = () => {
     if (!selectedNode) return
     const isCallFlow = selectedNode.action.type === 'callFlow'
+    let callFlowUpdates: object = {}
+    if (isCallFlow) {
+      // When only 1 mapping entry, update the legacy badge fields so ActionNode reflects the change
+      const keys = Object.keys(profileMapping)
+      if (keys.length === 1) {
+        const subProfileId = profileMapping[keys[0]] ?? subFlowProfiles[0]?.id ?? null
+        const subProfileName = subFlowProfiles.find((p) => p.id === subProfileId)?.name
+        callFlowUpdates = {
+          subFlowProfileMapping: profileMapping,
+          ...(subProfileId ? { subFlowProfileId: subProfileId, subFlowProfileName: subProfileName } : {}),
+        }
+      } else {
+        callFlowUpdates = { subFlowProfileMapping: profileMapping }
+      }
+    }
     updateNode(selectedNode.id, {
       action: {
         ...selectedNode.action,
         description: desc,
         selector,
         value: value || undefined,
-        ...(isCallFlow ? { subFlowProfileMapping: profileMapping } : {}),
+        ...callFlowUpdates,
       },
     })
     window.electronAPI.saveFlow(useFlowStore.getState().currentFlow!).catch(console.error)

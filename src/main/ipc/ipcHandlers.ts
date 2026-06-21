@@ -9,12 +9,15 @@ import type {
   FlowLoadPayload,
   RecordingStartPayload,
   ActionType,
+  ProjectSavePayload,
+  ProjectLoadPayload,
 } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
 import { Recorder } from '../playwright/recorder'
 import { Replayer } from '../playwright/replayer'
 import { FlowStorage } from '../storage/flowStorage'
+import { ProjectStorage } from '../storage/projectStorage'
 import { ScriptExporter } from '../storage/scriptExporter'
 
 let browserController: BrowserController | null = null
@@ -47,7 +50,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
     // Branch recording: silently replay to the branch point first
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId)
+      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId)
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -91,7 +94,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         await browserController.launch()
       }
       const page = browserController.getPage()
-      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId)
+      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId)
 
       await replayer.replayToNode(
         payload.nodes,
@@ -130,6 +133,23 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
   ipcMain.handle(IPC_CHANNELS.FLOW_GET, async (_e, { flowId }: { flowId: string }) => {
     return await FlowStorage.load(flowId)
+  })
+
+  // ── Projects ─────────────────────────────────────────────
+  ipcMain.handle(IPC_CHANNELS.PROJECT_SAVE, async (_e, payload: ProjectSavePayload) => {
+    await ProjectStorage.save(payload.project)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.PROJECT_LOAD, async (_e, payload: ProjectLoadPayload) => {
+    return await ProjectStorage.load(payload.projectId)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.PROJECT_LIST, async () => {
+    return await ProjectStorage.list()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.PROJECT_DELETE, async (_e, projectId: string) => {
+    await ProjectStorage.delete(projectId)
   })
 
   ipcMain.handle(

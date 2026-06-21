@@ -1,0 +1,16 @@
+{
+  "id": "9a0615bb-2472-40a7-9a0e-f8cc27778f8d",
+  "name": "ERP",
+  "environments": [
+    {
+      "id": "647fe17a-b8dd-401e-9e61-8ed151eb0f90",
+      "name": "ESD環境"
+    },
+    {
+      "id": "bf164487-9f07-4d5f-a0eb-f6b5a39cc8ef",
+      "name": "RDE環境"
+    }
+  ],
+  "createdAt": "2026-06-21T10:59:12.623Z",
+  "updatedAt": "2026-06-21T13:24:46.701Z"
+}

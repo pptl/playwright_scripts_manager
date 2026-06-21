@@ -17,9 +17,13 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     addVarToAllProfiles,
     updateVarKeyInAllProfiles,
     deleteVarFromAllProfiles,
+    currentProject,
+    activeEnvironmentId,
+    setActiveEnvironment,
   } = useFlowStore()
 
   const profiles = currentFlow?.profiles ?? []
+  const environments = currentProject?.environments ?? []
   const [selectedProfileId, setSelectedProfileId] = useState<string>(
     () => activeProfileId ?? profiles[0]?.id ?? '',
   )
@@ -29,6 +33,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
   const [renameInput, setRenameInput] = useState('')
 
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId) ?? profiles[0] ?? null
+  const activeEnvName = environments.find((e) => e.id === activeEnvironmentId)?.name
 
   // ── Profile list actions ──────────────────────────────────
 
@@ -61,12 +66,17 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
 
   // ── Variable actions ──────────────────────────────────────
 
-  /** Update value or description on the selected profile only */
+  /** Update value or description on the selected profile only.
+   *  When an env is active and field is 'value', writes to envValues[envId] instead of value. */
   const handleVarField = (index: number, field: 'value' | 'description', raw: string) => {
     if (!selectedProfile) return
-    const newVars = selectedProfile.vars.map((v, i) =>
-      i === index ? { ...v, [field]: raw } : v,
-    )
+    const newVars = selectedProfile.vars.map((v, i) => {
+      if (i !== index) return v
+      if (field === 'value' && activeEnvironmentId) {
+        return { ...v, envValues: { ...v.envValues, [activeEnvironmentId]: raw } }
+      }
+      return { ...v, [field]: raw }
+    })
     updateProfile(selectedProfile.id, { vars: newVars })
   }
 
@@ -319,6 +329,41 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   </button>
                 </div>
 
+                {/* Env switcher — only when flow belongs to a project with environments */}
+                {environments.length > 0 && (
+                  <div
+                    style={{
+                      padding: '6px 16px',
+                      borderBottom: '1px solid #334155',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>環境值:</span>
+                    <select
+                      value={activeEnvironmentId ?? ''}
+                      onChange={(e) => setActiveEnvironment(e.target.value || null)}
+                      style={{
+                        background: '#0f172a',
+                        border: '1px solid #334155',
+                        borderRadius: 4,
+                        color: '#e2e8f0',
+                        fontSize: 12,
+                        padding: '2px 6px',
+                        cursor: 'pointer',
+                        outline: 'none',
+                      }}
+                    >
+                      <option value="">— 預設值 —</option>
+                      {environments.map((env) => (
+                        <option key={env.id} value={env.id}>{env.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 <div style={{ overflowY: 'auto', flex: 1, padding: '8px 0' }}>
                   {/* Column headers */}
                   <div
@@ -331,12 +376,18 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     }}
                   >
                     <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>參數名稱</span>
-                    <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>值</span>
+                    <span style={{ fontSize: 11, color: activeEnvironmentId ? '#4ade80' : '#64748b', fontWeight: 600 }}>
+                      值{activeEnvName ? ` (${activeEnvName})` : ''}
+                    </span>
                     <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>敘述（選填）</span>
                     <span />
                   </div>
 
-                  {selectedProfile.vars.map((v, i) => (
+                  {selectedProfile.vars.map((v, i) => {
+                    const displayValue = activeEnvironmentId
+                      ? (v.envValues?.[activeEnvironmentId] ?? '')
+                      : v.value
+                    return (
                     <div
                       key={i}
                       style={{
@@ -355,10 +406,13 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         title="修改參數名稱將同步至所有配置"
                       />
                       <input
-                        value={v.value}
+                        value={displayValue}
                         onChange={(e) => handleVarField(i, 'value', e.target.value)}
-                        placeholder="value"
-                        style={cellInputStyle}
+                        placeholder={activeEnvironmentId ? `預設: ${v.value || '(空)'}` : 'value'}
+                        style={{
+                          ...cellInputStyle,
+                          ...(activeEnvironmentId ? { borderColor: '#166534' } : {}),
+                        }}
                       />
                       <input
                         value={v.description ?? ''}
@@ -386,7 +440,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         🗑
                       </button>
                     </div>
-                  ))}
+                  )
+                  })}
 
                   {selectedProfile.vars.length === 0 && (
                     <div style={{ padding: '16px', color: '#64748b', fontSize: 12 }}>

@@ -1,5 +1,21 @@
 import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
+import type { Flow } from '../../../shared/types'
+
+function buildProfileVars(
+  flow: Flow | null,
+  activeProfileId: string | null,
+  activeEnvironmentId: string | null,
+): Record<string, string> | undefined {
+  const profile = flow?.profiles?.find((p) => p.id === activeProfileId)
+  if (!profile) return undefined
+  return Object.fromEntries(
+    profile.vars.map((v) => [
+      v.key,
+      (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value,
+    ]),
+  )
+}
 
 /**
  * Returns action functions for controlling Playwright (record / replay).
@@ -22,16 +38,13 @@ export function usePlaywright() {
 
   const startBranchRecording = useCallback(
     async (fromNodeId: string) => {
-      const { currentFlow, activeProfileId } = useFlowStore.getState()
+      const { currentFlow, activeProfileId, activeEnvironmentId } = useFlowStore.getState()
       if (!currentFlow) return
       // Set recording head so new actions append as children of this node
       useFlowStore.getState().setRecordingHead(fromNodeId)
       setIsRecording(true)
 
-      const activeProfile = currentFlow.profiles?.find((p) => p.id === activeProfileId)
-      const profileVars = activeProfile
-        ? Object.fromEntries(activeProfile.vars.map((v) => [v.key, v.value]))
-        : undefined
+      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId)
 
       try {
         await window.electronAPI.startRecording({
@@ -41,6 +54,7 @@ export function usePlaywright() {
           replaySpeed: 200,
           profileVars,
           activeProfileId: activeProfileId ?? undefined,
+          activeEnvironmentId: activeEnvironmentId ?? undefined,
         })
       } catch (err) {
         setIsRecording(false)
@@ -66,16 +80,12 @@ export function usePlaywright() {
 
   const replayToNode = useCallback(
     async (targetNodeId: string, speed: number) => {
-      const { currentFlow, activeProfileId } = useFlowStore.getState()
+      const { currentFlow, activeProfileId, activeEnvironmentId } = useFlowStore.getState()
       if (!currentFlow) return
       clearReplayStatus()
       setIsReplaying(true)
 
-      // Build profileVars from active profile
-      const activeProfile = currentFlow.profiles?.find((p) => p.id === activeProfileId)
-      const profileVars = activeProfile
-        ? Object.fromEntries(activeProfile.vars.map((v) => [v.key, v.value]))
-        : undefined
+      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId)
 
       try {
         await window.electronAPI.replayToNode(
@@ -85,6 +95,7 @@ export function usePlaywright() {
           currentFlow.baseURL,
           profileVars,
           activeProfileId ?? undefined,
+          activeEnvironmentId ?? undefined,
         )
       } catch (err) {
         console.error('Replay IPC error:', err)

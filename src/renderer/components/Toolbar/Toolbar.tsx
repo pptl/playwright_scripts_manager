@@ -56,6 +56,11 @@ export function Toolbar() {
     setIsPickingAssertion,
     activeProfileId,
     setActiveProfile,
+    currentProject,
+    projects,
+    activeEnvironmentId,
+    setActiveEnvironment,
+    addEnvironmentToProject,
   } = useFlowStore()
   const { startRecording, stopRecording } = usePlaywright()
   const { newFlow } = useFlowManager()
@@ -63,6 +68,7 @@ export function Toolbar() {
   const [showNewFlowDialog, setShowNewFlowDialog] = useState(false)
   const [newName, setNewName] = useState('')
   const [newURL, setNewURL] = useState('')
+  const [newProjectId, setNewProjectId] = useState('')
   const [isRunningTests, setIsRunningTests] = useState(false)
   const [showTestModal, setShowTestModal] = useState(false)
   const [testLines, setTestLines] = useState<string[]>([])
@@ -76,6 +82,12 @@ export function Toolbar() {
   const [showCallFlowModal, setShowCallFlowModal] = useState(false)
   const profileMenuRef = useRef<HTMLDivElement>(null)
 
+  // Env selector state
+  const [showEnvMenu, setShowEnvMenu] = useState(false)
+  const [addingEnv, setAddingEnv] = useState(false)
+  const [newEnvName, setNewEnvName] = useState('')
+  const envMenuRef = useRef<HTMLDivElement>(null)
+
   // Close profile menu on outside click
   useEffect(() => {
     if (!showProfileMenu) return
@@ -88,16 +100,35 @@ export function Toolbar() {
     return () => document.removeEventListener('mousedown', handler)
   }, [showProfileMenu])
 
+  // Close env menu on outside click
+  useEffect(() => {
+    if (!showEnvMenu) return
+    const handler = (e: MouseEvent) => {
+      if (envMenuRef.current && !envMenuRef.current.contains(e.target as Node)) {
+        setShowEnvMenu(false)
+        setAddingEnv(false)
+        setNewEnvName('')
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showEnvMenu])
+
   // Derive current profile info
   const profiles = currentFlow?.profiles ?? []
   const activeProfile = profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null
   const activeProfileName = activeProfile?.name ?? '— 無配置 —'
   const isOverriding = activeProfile !== null && activeProfile !== profiles[0]
 
-  /** Build profileVars Record from the active profile */
+  /** Build profileVars with env-aware resolution: envValues[activeEnvId] ?? value */
   function getProfileVars(): Record<string, string> | undefined {
     if (!activeProfile) return undefined
-    return Object.fromEntries(activeProfile.vars.map((v) => [v.key, v.value]))
+    return Object.fromEntries(
+      activeProfile.vars.map((v) => [
+        v.key,
+        (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value,
+      ]),
+    )
   }
 
   useEffect(() => {
@@ -121,10 +152,11 @@ export function Toolbar() {
 
   const handleNewFlow = async () => {
     if (!newName || !newURL) return
-    await newFlow(newName, newURL)
+    await newFlow(newName, newURL, undefined, newProjectId || undefined)
     setShowNewFlowDialog(false)
     setNewName('')
     setNewURL('')
+    setNewProjectId('')
   }
 
   const handleAssertionPick = async (type: ActionType) => {
@@ -140,6 +172,7 @@ export function Toolbar() {
       useTestStep: true,
       profileVars: getProfileVars(),
       activeProfileId: activeProfileId ?? undefined,
+      activeEnvironmentId: activeEnvironmentId ?? undefined,
     }
     try {
       const path = await window.electronAPI.exportScripts(currentFlow, config)
@@ -157,6 +190,7 @@ export function Toolbar() {
       useTestStep: true,
       profileVars: getProfileVars(),
       activeProfileId: activeProfileId ?? undefined,
+      activeEnvironmentId: activeEnvironmentId ?? undefined,
     }
     testLinesRef.current = []
     setTestLines([])
@@ -268,6 +302,153 @@ export function Toolbar() {
           </button>
         ))}
       </div>
+
+      {/* Env selector — visible whenever flow belongs to a project (even with 0 envs, so user can add the first one) */}
+      {currentFlow?.projectId && (() => {
+        const environments = currentProject?.environments ?? []
+        const activeEnvName = environments.find((e) => e.id === activeEnvironmentId)?.name
+        return (
+          <div ref={envMenuRef} style={{ position: 'relative', marginLeft: 8 }}>
+            <button
+              onClick={() => setShowEnvMenu((v) => !v)}
+              title="切換環境"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                padding: '3px 10px',
+                borderRadius: 4,
+                border: `1px solid ${activeEnvironmentId ? '#22c55e' : '#475569'}`,
+                cursor: 'pointer',
+                background: activeEnvironmentId ? '#14532d' : '#1e293b',
+                color: activeEnvironmentId ? '#4ade80' : '#94a3b8',
+                fontSize: 12,
+                fontWeight: activeEnvironmentId ? 600 : 400,
+                whiteSpace: 'nowrap',
+                maxWidth: 160,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              🌐 {activeEnvName ?? '— 選擇環境 —'} ▾
+            </button>
+
+            {showEnvMenu && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 6px)',
+                  right: 0,
+                  background: '#1e293b',
+                  border: '1px solid #334155',
+                  borderRadius: 8,
+                  minWidth: 220,
+                  zIndex: 2000,
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                  padding: '6px 0',
+                }}
+              >
+                <div style={{ padding: '4px 12px 8px', fontSize: 11, color: '#64748b', borderBottom: '1px solid #334155' }}>
+                  環境選擇
+                </div>
+
+                <div
+                  onClick={() => { setActiveEnvironment(null); setShowEnvMenu(false) }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '7px 12px', cursor: 'pointer',
+                    background: !activeEnvironmentId ? '#1e3a5f' : 'transparent',
+                    color: !activeEnvironmentId ? '#93c5fd' : '#cbd5e1',
+                    fontSize: 13,
+                  }}
+                  onMouseEnter={(e) => { if (activeEnvironmentId) (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                  onMouseLeave={(e) => { if (activeEnvironmentId) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+                >
+                  <span style={{ fontSize: 10, width: 10, flexShrink: 0 }}>{!activeEnvironmentId ? '●' : '○'}</span>
+                  — 預設值 —
+                </div>
+
+                {environments.map((env) => {
+                  const isSelected = env.id === activeEnvironmentId
+                  return (
+                    <div
+                      key={env.id}
+                      onClick={() => { setActiveEnvironment(env.id); setShowEnvMenu(false) }}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        padding: '7px 12px', cursor: 'pointer',
+                        background: isSelected ? '#1e3a5f' : 'transparent',
+                        color: isSelected ? '#93c5fd' : '#cbd5e1',
+                        fontSize: 13,
+                      }}
+                      onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                      onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+                    >
+                      <span style={{ fontSize: 10, width: 10, flexShrink: 0 }}>{isSelected ? '●' : '○'}</span>
+                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {env.name}
+                      </span>
+                    </div>
+                  )
+                })}
+
+                {/* Add new environment */}
+                <div style={{ borderTop: '1px solid #334155', padding: '6px 10px', marginTop: 4 }}>
+                  {addingEnv ? (
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <input
+                        autoFocus
+                        value={newEnvName}
+                        onChange={(e) => setNewEnvName(e.target.value)}
+                        onKeyDown={async (e) => {
+                          if (e.key === 'Enter' && newEnvName.trim()) {
+                            await addEnvironmentToProject(newEnvName.trim())
+                            setNewEnvName('')
+                            setAddingEnv(false)
+                          }
+                          if (e.key === 'Escape') { setAddingEnv(false); setNewEnvName('') }
+                        }}
+                        placeholder="環境名稱"
+                        style={{
+                          flex: 1, padding: '3px 6px',
+                          background: '#0f172a', border: '1px solid #3b82f6', borderRadius: 3,
+                          color: '#e2e8f0', fontSize: 12, outline: 'none',
+                        }}
+                      />
+                      <button
+                        onClick={async () => {
+                          if (newEnvName.trim()) {
+                            await addEnvironmentToProject(newEnvName.trim())
+                            setNewEnvName('')
+                            setAddingEnv(false)
+                          }
+                        }}
+                        style={{
+                          padding: '3px 7px', borderRadius: 3, border: 'none',
+                          background: '#3b82f6', color: '#fff', fontSize: 11, cursor: 'pointer',
+                        }}
+                      >
+                        ✓
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setAddingEnv(true)}
+                      style={{
+                        width: '100%', padding: '4px 0', borderRadius: 3,
+                        border: '1px dashed #334155', background: 'transparent',
+                        color: '#3b82f6', fontSize: 12, cursor: 'pointer',
+                      }}
+                    >
+                      ＋ 新增環境
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       {/* Profile selector — only visible when a flow is loaded */}
       {currentFlow && (
@@ -387,7 +568,7 @@ export function Toolbar() {
             justifyContent: 'center',
             zIndex: 1000,
           }}
-          onClick={(e) => e.target === e.currentTarget && setShowNewFlowDialog(false)}
+          onClick={(e) => { if (e.target === e.currentTarget) { setShowNewFlowDialog(false); setNewProjectId('') } }}
         >
           <div
             style={{
@@ -409,7 +590,7 @@ export function Toolbar() {
                 autoFocus
               />
             </label>
-            <label style={{ display: 'block', marginBottom: 20, color: '#94a3b8', fontSize: 13 }}>
+            <label style={{ display: 'block', marginBottom: 12, color: '#94a3b8', fontSize: 13 }}>
               目標 URL
               <input
                 value={newURL}
@@ -418,8 +599,24 @@ export function Toolbar() {
                 style={inputStyle}
               />
             </label>
+            {projects.length > 0 && (
+              <label style={{ display: 'block', marginBottom: 20, color: '#94a3b8', fontSize: 13 }}>
+                歸類至專案
+                <select
+                  value={newProjectId}
+                  onChange={(e) => setNewProjectId(e.target.value)}
+                  style={{ ...inputStyle, marginTop: 6 }}
+                >
+                  <option value="">— 不歸類 —</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {projects.length === 0 && <div style={{ marginBottom: 20 }} />}
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button onClick={() => setShowNewFlowDialog(false)} style={cancelBtnStyle}>
+              <button onClick={() => { setShowNewFlowDialog(false); setNewProjectId('') }} style={cancelBtnStyle}>
                 取消
               </button>
               <button

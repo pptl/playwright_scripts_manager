@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 
 export function ProfileVarList() {
-  const { currentFlow, activeProfileId } = useFlowStore()
+  const { currentFlow, activeProfileId, activeEnvironmentId } = useFlowStore()
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
   const profiles = currentFlow?.profiles ?? []
@@ -69,6 +69,7 @@ export function ProfileVarList() {
         ) : (
           activeProfile.vars.map((v) => {
             const placeholder = `{{${v.key}}}`
+            const resolvedValue = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
             return (
               <div
                 key={v.key}
@@ -121,7 +122,7 @@ export function ProfileVarList() {
                     {v.description}
                   </div>
                 )}
-                {v.value && (
+                {resolvedValue && (
                   <div
                     style={{
                       fontSize: 10,
@@ -131,7 +132,7 @@ export function ProfileVarList() {
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    {v.value}
+                    {resolvedValue}
                   </div>
                 )}
               </div>

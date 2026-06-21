@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import type { Flow, FlowNode, Action, NodePosition, FlowProfile } from '../../shared/types'
+import type { Flow, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment } from '../../shared/types'
 
 const NODE_VERTICAL_GAP = 80
 const NODE_START_Y = 50
@@ -8,7 +8,7 @@ const NODE_START_X = 300
 
 interface FlowStore {
   // State
-  flows: Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt'>[]
+  flows: Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt' | 'projectId'>[]
   currentFlow: Flow | null
   selectedNodeId: string | null
   replayingNodeId: string | null
@@ -61,6 +61,22 @@ interface FlowStore {
   updateVarKeyInAllProfiles: (index: number, newKey: string) => Promise<void>
   /** Delete the variable at the given index from ALL profiles */
   deleteVarFromAllProfiles: (index: number) => Promise<void>
+
+  // Projects and environments
+  projects: Pick<Project, 'id' | 'name' | 'updatedAt'>[]
+  currentProject: Project | null
+  /** Active project environment ID; null = use profile var fallback values */
+  activeEnvironmentId: string | null
+  setProjects: (projects: FlowStore['projects']) => void
+  setCurrentProject: (project: Project | null) => void
+  setActiveEnvironment: (envId: string | null) => void
+  createProject: (name: string) => Promise<Project>
+  addEnvironmentToProject: (name: string) => Promise<void>
+  renameEnvironment: (envId: string, name: string) => Promise<void>
+  deleteEnvironment: (envId: string) => Promise<void>
+  deleteProject: (projectId: string) => Promise<void>
+  /** Assign any flow (by ID) to a project. Pass null to detach. */
+  assignFlowToProject: (flowId: string, projectId: string | null) => Promise<void>
 }
 
 /** Migrate legacy callFlow actions that have subFlowProfileId but no subFlowProfileMapping.
@@ -113,6 +129,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   replaySpeed: 500,
   isPickingAssertion: false,
   activeProfileId: null,
+  projects: [],
+  currentProject: null,
+  activeEnvironmentId: null,
 
   setFlows: (flows) => set({ flows }),
 
@@ -140,7 +159,10 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
 
   setCurrentFlow: (flow) => {
     if (!flow) {
-      set({ currentFlow: null, selectedNodeId: null, replayStatus: {}, recordingHeadId: null, activeProfileId: null })
+      set({
+        currentFlow: null, selectedNodeId: null, replayStatus: {}, recordingHeadId: null,
+        activeProfileId: null, currentProject: null, activeEnvironmentId: null,
+      })
       return
     }
     // Migrate old flows that have domains[] but no profiles[]
@@ -148,12 +170,17 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const withDomainsMigrated = profiles !== flow.profiles ? { ...flow, profiles } : flow
     // Migrate callFlow nodes with static subFlowProfileId to per-profile mapping
     const migratedFlow = migrateCallFlowProfiles(withDomainsMigrated)
+    // Clear project context if the new flow belongs to a different project
+    // (project loading happens async in useFlowStore.openFlow after setCurrentFlow)
+    const { currentProject } = get()
+    const changingProject = flow.projectId !== currentProject?.id
     set({
       currentFlow: migratedFlow,
       selectedNodeId: null,
       replayStatus: {},
       recordingHeadId: null,
       activeProfileId: profiles[0]?.id ?? null,
+      ...(changingProject ? { currentProject: null, activeEnvironmentId: null } : {}),
     })
   },
 
@@ -450,5 +477,82 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
     set({ currentFlow: updatedFlow })
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
+
+  setProjects: (projects) => set({ projects }),
+  setCurrentProject: (project) => set({ currentProject: project }),
+  setActiveEnvironment: (envId) => set({ activeEnvironmentId: envId }),
+
+  createProject: async (name) => {
+    const project: Project = {
+      id: uuidv4(),
+      name,
+      environments: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+    await window.electronAPI.saveProject(project)
+    const list = await window.electronAPI.listProjects()
+    set({ projects: list })
+    return project
+  },
+
+  addEnvironmentToProject: async (name) => {
+    const project = get().currentProject
+    if (!project) return
+    const newEnv: ProjectEnvironment = { id: uuidv4(), name }
+    const updatedProject: Project = { ...project, environments: [...project.environments, newEnv] }
+    await window.electronAPI.saveProject(updatedProject)
+    set({ currentProject: updatedProject })
+  },
+
+  renameEnvironment: async (envId, name) => {
+    const project = get().currentProject
+    if (!project) return
+    const updatedProject: Project = {
+      ...project,
+      environments: project.environments.map((e) => (e.id === envId ? { ...e, name } : e)),
+    }
+    await window.electronAPI.saveProject(updatedProject)
+    set({ currentProject: updatedProject })
+  },
+
+  deleteEnvironment: async (envId) => {
+    const project = get().currentProject
+    if (!project) return
+    const updatedProject: Project = {
+      ...project,
+      environments: project.environments.filter((e) => e.id !== envId),
+    }
+    await window.electronAPI.saveProject(updatedProject)
+    const { activeEnvironmentId } = get()
+    set({
+      currentProject: updatedProject,
+      activeEnvironmentId:
+        activeEnvironmentId === envId
+          ? (updatedProject.environments[0]?.id ?? null)
+          : activeEnvironmentId,
+    })
+  },
+
+  deleteProject: async (projectId) => {
+    await window.electronAPI.deleteProject(projectId)
+    const list = await window.electronAPI.listProjects()
+    const { currentProject } = get()
+    set({
+      projects: list,
+      ...(currentProject?.id === projectId ? { currentProject: null, activeEnvironmentId: null } : {}),
+    })
+  },
+
+  assignFlowToProject: async (flowId, projectId) => {
+    const flowData = await window.electronAPI.getFlow(flowId)
+    if (!flowData) return
+    const updatedFlow: Flow = { ...flowData, projectId: projectId ?? undefined }
+    await window.electronAPI.saveFlow(updatedFlow)
+    const { currentFlow } = get()
+    if (currentFlow?.id === flowId) {
+      set({ currentFlow: updatedFlow })
+    }
   },
 }))

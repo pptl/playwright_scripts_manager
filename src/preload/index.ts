@@ -9,6 +9,7 @@ import type {
   ReplayNodeCompletePayload,
   RecordingStartPayload,
   TestFinishedPayload,
+  Project,
 } from '../shared/types'
 
 // Expose a type-safe API to the renderer via window.electronAPI
@@ -23,8 +24,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopRecording: () => ipcRenderer.invoke(IPC_CHANNELS.RECORDING_STOP),
 
   // Replay
-  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>, activeProfileId?: string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId }),
+  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId }),
   stopReplay: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_STOP),
 
   // Storage
@@ -50,6 +51,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
   checkFlowCycle: (currentFlowId: string, candidateSubFlowId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.FLOW_CHECK_CYCLE, { currentFlowId, candidateSubFlowId }),
+
+  // Projects
+  saveProject: (project: Project) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, { project }),
+  loadProject: (projectId: string) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_LOAD, { projectId }),
+  listProjects: () => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_LIST),
+  deleteProject: (projectId: string) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_DELETE, projectId),
 
   // Event listeners (Main → Renderer)
   onActionCaptured: (cb: (action: Action) => void) => {

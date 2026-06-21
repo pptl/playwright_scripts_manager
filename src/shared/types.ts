@@ -76,14 +76,31 @@ export interface FlowNode {
 
 export interface ProfileVariable {
   key: string
+  /** Standalone / fallback value used when no project environment is active */
   value: string
   description?: string
+  /** Per-environment value overrides keyed by ProjectEnvironment.id.
+   *  Resolution: envValues[activeEnvId] ?? value */
+  envValues?: Record<string, string>
 }
 
 export interface FlowProfile {
   id: string
   name: string
   vars: ProfileVariable[]
+}
+
+export interface ProjectEnvironment {
+  id: string
+  name: string
+}
+
+export interface Project {
+  id: string
+  name: string
+  environments: ProjectEnvironment[]
+  createdAt: string
+  updatedAt: string
 }
 
 export interface Flow {
@@ -93,6 +110,8 @@ export interface Flow {
   createdAt: string
   updatedAt: string
   baseURL: string
+  /** If set, this flow belongs to the given project and supports environment-level variable overrides */
+  projectId?: string
   /** Environment profiles — each holds a named set of key-value variables (e.g. domain, admin_name) */
   profiles?: FlowProfile[]
   /** @deprecated migrated to profiles */
@@ -109,6 +128,8 @@ export interface ExportConfig {
   profileVars?: Record<string, string>
   /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
   activeProfileId?: string
+  /** Active project environment ID — used to resolve envValues overrides in sub-flow profiles */
+  activeEnvironmentId?: string
 }
 
 export interface TestPath {
@@ -144,6 +165,12 @@ export const IPC_CHANNELS = {
   FLOW_GET: 'flow:get',
   FLOW_CHECK_CYCLE: 'flow:checkCycle',
 
+  // Project management
+  PROJECT_SAVE: 'project:save',
+  PROJECT_LOAD: 'project:load',
+  PROJECT_LIST: 'project:list',
+  PROJECT_DELETE: 'project:delete',
+
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: 'assertion:pickStart',
 
@@ -171,6 +198,8 @@ export interface ReplayToNodePayload {
   profileVars?: Record<string, string>
   /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
   activeProfileId?: string
+  /** Active project environment ID — used to resolve envValues overrides in sub-flow profiles */
+  activeEnvironmentId?: string
 }
 
 export interface ReplayNodeCompletePayload {
@@ -209,4 +238,14 @@ export interface RecordingStartPayload {
   profileVars?: Record<string, string>
   /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
   activeProfileId?: string
+  /** Active project environment ID — used to resolve envValues overrides in sub-flow profiles */
+  activeEnvironmentId?: string
+}
+
+export interface ProjectSavePayload {
+  project: Project
+}
+
+export interface ProjectLoadPayload {
+  projectId: string
 }

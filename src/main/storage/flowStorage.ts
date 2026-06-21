@@ -35,17 +35,23 @@ export class FlowStorage {
     }
   }
 
-  static async list(): Promise<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt'>[]> {
+  static async list(): Promise<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt' | 'projectId'>[]> {
     await FlowStorage.ensureDir()
     const files = await fs.readdir(flowsDir())
-    const results: Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt'>[] = []
+    const results: Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt' | 'projectId'>[] = []
 
     for (const file of files) {
       if (!file.endsWith('.json')) continue
       try {
         const raw = await fs.readFile(join(flowsDir(), file), 'utf-8')
         const flow = JSON.parse(raw) as Flow
-        results.push({ id: flow.id, name: flow.name, description: flow.description, updatedAt: flow.updatedAt })
+        results.push({
+          id: flow.id,
+          name: flow.name,
+          description: flow.description,
+          updatedAt: flow.updatedAt,
+          projectId: flow.projectId,
+        })
       } catch {
         // skip corrupted files
       }

@@ -1,15 +1,15 @@
-import type { Action, ActionType, Flow, FlowNode, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload } from '../../shared/types'
+import type { Action, ActionType, Flow, FlowNode, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload, Project } from '../../shared/types'
 
 export interface ElectronAPI {
   launchBrowser: () => Promise<void>
   closeBrowser: () => Promise<void>
   startRecording: (payload: RecordingStartPayload) => Promise<void>
   stopRecording: () => Promise<void>
-  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>, activeProfileId?: string) => Promise<void>
+  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string) => Promise<void>
   stopReplay: () => Promise<void>
   saveFlow: (flow: Flow) => Promise<void>
   loadFlow: (flowId: string) => Promise<Flow | null>
-  listFlows: () => Promise<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt'>[]>
+  listFlows: () => Promise<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt' | 'projectId'>[]>
   deleteFlow: (flowId: string) => Promise<void>
   exportScripts: (flow: Flow, config: ExportConfig) => Promise<string>
   runTests: (flow: Flow, config: ExportConfig) => Promise<void>
@@ -25,6 +25,10 @@ export interface ElectronAPI {
   onAssertionPickCancelled: (cb: () => void) => () => void
   getFlow: (flowId: string) => Promise<Flow | null>
   checkFlowCycle: (currentFlowId: string, candidateSubFlowId: string) => Promise<boolean>
+  saveProject: (project: Project) => Promise<void>
+  loadProject: (projectId: string) => Promise<Project | null>
+  listProjects: () => Promise<Pick<Project, 'id' | 'name' | 'updatedAt'>[]>
+  deleteProject: (projectId: string) => Promise<void>
 }
 
 declare global {

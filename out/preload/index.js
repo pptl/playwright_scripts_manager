@@ -17,6 +17,11 @@ const IPC_CHANNELS = {
   SHOW_REPORT: "test:showReport",
   FLOW_GET: "flow:get",
   FLOW_CHECK_CYCLE: "flow:checkCycle",
+  // Project management
+  PROJECT_SAVE: "project:save",
+  PROJECT_LOAD: "project:load",
+  PROJECT_LIST: "project:list",
+  PROJECT_DELETE: "project:delete",
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: "assertion:pickStart",
   // Main → Renderer
@@ -37,7 +42,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   startRecording: (payload) => electron.ipcRenderer.invoke(IPC_CHANNELS.RECORDING_START, payload),
   stopRecording: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RECORDING_STOP),
   // Replay
-  replayToNode: (nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId) => electron.ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId }),
+  replayToNode: (nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId) => electron.ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId }),
   stopReplay: () => electron.ipcRenderer.invoke(IPC_CHANNELS.REPLAY_STOP),
   // Storage
   saveFlow: (flow) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_SAVE, { flow }),
@@ -54,6 +59,11 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   // Sub-flow support
   getFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
   checkFlowCycle: (currentFlowId, candidateSubFlowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_CHECK_CYCLE, { currentFlowId, candidateSubFlowId }),
+  // Projects
+  saveProject: (project) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, { project }),
+  loadProject: (projectId) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_LOAD, { projectId }),
+  listProjects: () => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_LIST),
+  deleteProject: (projectId) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_DELETE, projectId),
   // Event listeners (Main → Renderer)
   onActionCaptured: (cb) => {
     const handler = (_, action) => cb(action);

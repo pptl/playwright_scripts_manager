@@ -46,6 +46,11 @@ const IPC_CHANNELS = {
   SHOW_REPORT: "test:showReport",
   FLOW_GET: "flow:get",
   FLOW_CHECK_CYCLE: "flow:checkCycle",
+  // Project management
+  PROJECT_SAVE: "project:save",
+  PROJECT_LOAD: "project:load",
+  PROJECT_LIST: "project:list",
+  PROJECT_DELETE: "project:delete",
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: "assertion:pickStart",
   // Main → Renderer
@@ -799,7 +804,13 @@ class FlowStorage {
       try {
         const raw = await fs.promises.readFile(path.join(flowsDir(), file), "utf-8");
         const flow = JSON.parse(raw);
-        results.push({ id: flow.id, name: flow.name, description: flow.description, updatedAt: flow.updatedAt });
+        results.push({
+          id: flow.id,
+          name: flow.name,
+          description: flow.description,
+          updatedAt: flow.updatedAt,
+          projectId: flow.projectId
+        });
       } catch {
       }
     }
@@ -818,10 +829,12 @@ class Replayer {
   baseOrigin;
   profileVars;
   activeProfileId;
-  constructor(page, baseURL = "", profileVars, activeProfileId) {
+  activeEnvironmentId;
+  constructor(page, baseURL = "", profileVars, activeProfileId, activeEnvironmentId) {
     this.page = page;
     this.profileVars = profileVars ?? {};
     this.activeProfileId = activeProfileId;
+    this.activeEnvironmentId = activeEnvironmentId;
     this.baseOrigin = (() => {
       try {
         return new URL(baseURL).origin;
@@ -866,18 +879,24 @@ class Replayer {
     if (action.subFlowProfileMapping && this.activeProfileId && this.activeProfileId in action.subFlowProfileMapping) {
       resolvedSubProfileId = action.subFlowProfileMapping[this.activeProfileId];
     }
+    const resolveVars = (vars) => Object.fromEntries(
+      vars.map((v) => [
+        v.key,
+        (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value
+      ])
+    );
     let subProfileVars = {};
     if (resolvedSubProfileId) {
       const profile = subFlow.profiles?.find((p) => p.id === resolvedSubProfileId);
       if (profile) {
-        subProfileVars = Object.fromEntries(profile.vars.map((v) => [v.key, v.value]));
+        subProfileVars = resolveVars(profile.vars);
       }
     } else if (!resolvedSubProfileId && subFlow.profiles && subFlow.profiles.length > 0) {
       const firstProfile = subFlow.profiles[0];
-      subProfileVars = Object.fromEntries(firstProfile.vars.map((v) => [v.key, v.value]));
+      subProfileVars = resolveVars(firstProfile.vars);
       resolvedSubProfileId = firstProfile.id;
     }
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0);
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0, this.activeEnvironmentId);
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId,
@@ -1004,6 +1023,51 @@ class Replayer {
     return path2;
   }
 }
+function projectsDir() {
+  return electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "projects") : path.join(process.cwd(), "projects");
+}
+class ProjectStorage {
+  static async ensureDir() {
+    await fs.promises.mkdir(projectsDir(), { recursive: true });
+  }
+  static filePath(projectId) {
+    return path.join(projectsDir(), `${projectId}.json`);
+  }
+  static async save(project) {
+    await ProjectStorage.ensureDir();
+    project.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    await fs.promises.writeFile(ProjectStorage.filePath(project.id), JSON.stringify(project, null, 2), "utf-8");
+  }
+  static async load(projectId) {
+    try {
+      const raw = await fs.promises.readFile(ProjectStorage.filePath(projectId), "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  static async list() {
+    await ProjectStorage.ensureDir();
+    const files = await fs.promises.readdir(projectsDir());
+    const results = [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const raw = await fs.promises.readFile(path.join(projectsDir(), file), "utf-8");
+        const project = JSON.parse(raw);
+        results.push({ id: project.id, name: project.name, updatedAt: project.updatedAt });
+      } catch {
+      }
+    }
+    return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+  static async delete(projectId) {
+    try {
+      await fs.promises.unlink(ProjectStorage.filePath(projectId));
+    } catch {
+    }
+  }
+}
 function exportsDir() {
   return electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "exports") : path.join(process.cwd(), "exports");
 }
@@ -1046,10 +1110,15 @@ class ScriptExporter {
     }
     return result;
   }
-  static resolveProfileVars(flow, profileId) {
+  static resolveProfileVars(flow, profileId, activeEnvironmentId) {
     const profile = profileId ? (flow.profiles ?? []).find((p) => p.id === profileId) : (flow.profiles ?? [])[0];
     if (!profile) return {};
-    return Object.fromEntries(profile.vars.map((v) => [v.key, v.value]));
+    return Object.fromEntries(
+      profile.vars.map((v) => [
+        v.key,
+        (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
+      ])
+    );
   }
   /** Resolve which sub-flow profile ID to use given the parent's active profile.
    *  subFlowProfileMapping takes precedence; falls back to legacy subFlowProfileId. */
@@ -1059,7 +1128,7 @@ class ScriptExporter {
     }
     return action.subFlowProfileId ?? null;
   }
-  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin, activeProfileId) {
+  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin, activeProfileId, activeEnvironmentId) {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]));
     const path2 = [];
     const visited = /* @__PURE__ */ new Set();
@@ -1070,7 +1139,7 @@ class ScriptExporter {
         const nested = subFlowMap.get(cur.action.subFlowId);
         if (nested) {
           const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, activeProfileId);
-          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId);
+          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId, activeEnvironmentId);
           const nestedBaseOrigin = (() => {
             try {
               return new URL(nested.baseURL).origin;
@@ -1078,7 +1147,7 @@ class ScriptExporter {
               return "";
             }
           })();
-          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedProfileId ?? void 0));
+          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedProfileId ?? void 0, activeEnvironmentId));
         }
       } else {
         path2.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true });
@@ -1087,7 +1156,7 @@ class ScriptExporter {
     }
     return path2;
   }
-  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "", activeProfileId) {
+  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "", activeProfileId, activeEnvironmentId) {
     const result = [];
     for (const id of nodeIds) {
       const node = nodeMap.get(id);
@@ -1096,7 +1165,7 @@ class ScriptExporter {
         const subFlow = subFlowMap.get(node.action.subFlowId);
         if (subFlow) {
           const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, activeProfileId);
-          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId);
+          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId, activeEnvironmentId);
           const subBaseOrigin = (() => {
             try {
               return new URL(subFlow.baseURL).origin;
@@ -1104,7 +1173,7 @@ class ScriptExporter {
               return "";
             }
           })();
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subProfileId ?? void 0));
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subProfileId ?? void 0, activeEnvironmentId));
         }
       } else {
         result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false });
@@ -1150,7 +1219,7 @@ class ScriptExporter {
     const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value));
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
-      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId);
+      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId, config.activeEnvironmentId);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const hoistedVars = config.useTestStep ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       const hoistDecls = hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "";
@@ -1346,7 +1415,7 @@ function registerIpcHandlers(win) {
     await browserController.launch();
     const page = browserController.getPage();
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId);
+      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId);
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -1386,7 +1455,7 @@ function registerIpcHandlers(win) {
         await browserController.launch();
       }
       const page = browserController.getPage();
-      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId);
+      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId);
       await replayer.replayToNode(
         payload.nodes,
         payload.targetNodeId,
@@ -1416,6 +1485,18 @@ function registerIpcHandlers(win) {
   });
   electron.ipcMain.handle(IPC_CHANNELS.FLOW_GET, async (_e, { flowId }) => {
     return await FlowStorage.load(flowId);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.PROJECT_SAVE, async (_e, payload) => {
+    await ProjectStorage.save(payload.project);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.PROJECT_LOAD, async (_e, payload) => {
+    return await ProjectStorage.load(payload.projectId);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.PROJECT_LIST, async () => {
+    return await ProjectStorage.list();
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.PROJECT_DELETE, async (_e, projectId) => {
+    await ProjectStorage.delete(projectId);
   });
   electron.ipcMain.handle(
     IPC_CHANNELS.FLOW_CHECK_CYCLE,

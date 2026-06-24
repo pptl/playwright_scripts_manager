@@ -48,6 +48,10 @@ export function usePlaywrightEvents() {
       useFlowStore.getState().setIsPickingAssertion(false)
     })
 
+    const unsubLocatorPick = window.electronAPI.onLocatorPickNeeded((payload) => {
+      useFlowStore.getState().setPendingLocatorPick(payload)
+    })
+
     return () => {
       unsubCaptured()
       unsubNodeStart()
@@ -55,6 +59,7 @@ export function usePlaywrightEvents() {
       unsubFinished()
       unsubError()
       unsubAssertCancelled()
+      unsubLocatorPick()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

@@ -53,7 +53,10 @@ const IPC_CHANNELS = {
   PROJECT_DELETE: "project:delete",
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: "assertion:pickStart",
+  // Renderer → Main (locator pick)
+  LOCATOR_PICK_RESOLVED: "locator:pickResolved",
   // Main → Renderer
+  LOCATOR_PICK_NEEDED: "locator:pickNeeded",
   ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
   TEST_OUTPUT: "test:output",
@@ -268,7 +271,35 @@ function getDOMCaptureScript() {
       }
       const locatorExpr = getLocatorExpr(el);
       const label = extractLabel(locatorExpr, el);
-      report({ kind: "click", locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href });
+      let alternativeLocators;
+      const tr = el.closest?.("tr");
+      if (tr && tr.parentElement) {
+        const rows = Array.from(tr.parentElement.children).filter(
+          (c) => c.tagName === "TR"
+        );
+        const rowIndex = rows.indexOf(tr);
+        if (rowIndex >= 0) {
+          const parentTag = (tr.parentElement.tagName || "tbody").toLowerCase();
+          const table = tr.closest?.("table");
+          let rowExpr;
+          if (table) {
+            const allTables = Array.from(document.querySelectorAll("table"));
+            const tableIndex = allTables.indexOf(table);
+            if (tableIndex >= 0 && allTables.length > 1) {
+              rowExpr = `locator('table').nth(${tableIndex}).locator('${parentTag} tr').nth(${rowIndex})`;
+            } else {
+              rowExpr = `locator('${parentTag} tr').nth(${rowIndex})`;
+            }
+          } else {
+            rowExpr = `locator('${parentTag} tr').nth(${rowIndex})`;
+          }
+          alternativeLocators = [
+            { label: `Cell — ${locatorExpr}`, expr: locatorExpr },
+            { label: `Row ${rowIndex + 1} (nth) — ${rowExpr}`, expr: rowExpr }
+          ];
+        }
+      }
+      report({ kind: "click", locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, alternativeLocators });
     }, true);
     document.addEventListener("focus", (e) => {
       const el = getTarget(e);
@@ -523,6 +554,7 @@ class CodegenCapture {
   context;
   onAction;
   active = false;
+  paused = false;
   lastGotoUrl = "";
   lastInteraction = null;
   assertFunctionsExposed = false;
@@ -555,7 +587,7 @@ class CodegenCapture {
     await page.evaluate(cursorScript).catch(() => {
     });
     await page.exposeFunction("__flowtest_report", (raw) => {
-      if (!this.active) return;
+      if (!this.active || this.paused) return;
       const action = buildAction(raw);
       if (!action) return;
       if (raw.isInputClick) {
@@ -570,7 +602,7 @@ class CodegenCapture {
         this.flushPendingInputClick();
       }
       this.lastInteraction = { time: Date.now(), type: action.type };
-      this.onAction(action);
+      this.onAction(action, raw.alternativeLocators);
     });
     page.on("framenavigated", (frame) => {
       if (!this.active || frame !== page.mainFrame()) return;
@@ -600,9 +632,16 @@ class CodegenCapture {
       this.pendingInputClick = null;
     }
   }
+  pause() {
+    this.paused = true;
+  }
+  resume() {
+    this.paused = false;
+  }
   async stop() {
     this.pendingInputClick = null;
     this.active = false;
+    this.paused = false;
   }
   async startAssertionPick(assertionType, onCancel) {
     const pages = this.context.pages();
@@ -661,6 +700,12 @@ class Recorder {
   }
   async startAssertionPick(assertionType, onCancel) {
     await this.capture.startAssertionPick(assertionType, onCancel);
+  }
+  pause() {
+    this.capture.pause();
+  }
+  resume() {
+    this.capture.resume();
   }
   isRecording() {
     return this.recording;
@@ -1432,8 +1477,13 @@ function registerIpcHandlers(win) {
         return;
       }
     }
-    recorder = new Recorder(page, (action) => {
-      win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action);
+    recorder = new Recorder(page, (action, alternatives) => {
+      if (alternatives?.length) {
+        recorder?.pause();
+        win.webContents.send(IPC_CHANNELS.LOCATOR_PICK_NEEDED, { action, alternatives });
+      } else {
+        win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action);
+      }
     });
     await recorder.start(payload.branchFromNodeId ? void 0 : payload.baseURL);
   });
@@ -1447,6 +1497,9 @@ function registerIpcHandlers(win) {
       assertionType,
       () => win.webContents.send(IPC_CHANNELS.ASSERTION_PICK_CANCELLED)
     );
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.LOCATOR_PICK_RESOLVED, () => {
+    recorder?.resume();
   });
   electron.ipcMain.handle(IPC_CHANNELS.REPLAY_TO_NODE, async (_e, payload) => {
     try {

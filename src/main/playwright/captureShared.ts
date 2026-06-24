@@ -3,9 +3,9 @@ import * as fs from 'fs'
 import * as vm from 'vm'
 import * as path from 'path'
 import { createRequire } from 'module'
-import type { Action } from '../../shared/types'
+import type { Action, LocatorOption } from '../../shared/types'
 
-export type ActionCallback = (action: Action) => void
+export type ActionCallback = (action: Action, alternatives?: LocatorOption[]) => void
 
 // Mirrors Playwright's RecorderSignalProcessor threshold (5 s in production).
 // Navigation within this window after a click/press/fill is treated as a redirect
@@ -41,6 +41,7 @@ export interface RawEvent {
   timestamp: number
   url: string
   isInputClick?: boolean
+  alternativeLocators?: LocatorOption[]
 }
 
 export function generateDescription(
@@ -265,7 +266,44 @@ export function getDOMCaptureScript(): () => void {
 
       const locatorExpr = getLocatorExpr(el)
       const label = extractLabel(locatorExpr, el)
-      report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href })
+
+      // Table cell detection: offer row-based alternative locators
+      let alternativeLocators: { label: string, expr: string }[] | undefined
+      const tr = (el as HTMLElement).closest?.('tr')
+      if (tr && tr.parentElement) {
+        const rows = Array.from(tr.parentElement.children).filter(
+          (c) => c.tagName === 'TR'
+        )
+        const rowIndex = rows.indexOf(tr)
+        if (rowIndex >= 0) {
+          // Scope to the actual parent section (tbody/thead/tfoot) so rowIndex is correct
+          // even when a <thead> exists — getByRole('row') would include header rows in the count
+          const parentTag = (tr.parentElement.tagName || 'tbody').toLowerCase()
+
+          // Scope to the specific <table> when multiple tables exist on the page,
+          // so nth(rowIndex) doesn't accidentally match a row in a different table.
+          const table = tr.closest?.('table')
+          let rowExpr: string
+          if (table) {
+            const allTables = Array.from(document.querySelectorAll('table'))
+            const tableIndex = allTables.indexOf(table as HTMLTableElement)
+            if (tableIndex >= 0 && allTables.length > 1) {
+              rowExpr = `locator('table').nth(${tableIndex}).locator('${parentTag} tr').nth(${rowIndex})`
+            } else {
+              rowExpr = `locator('${parentTag} tr').nth(${rowIndex})`
+            }
+          } else {
+            rowExpr = `locator('${parentTag} tr').nth(${rowIndex})`
+          }
+
+          alternativeLocators = [
+            { label: `Cell — ${locatorExpr}`, expr: locatorExpr },
+            { label: `Row ${rowIndex + 1} (nth) — ${rowExpr}`, expr: rowExpr },
+          ]
+        }
+      }
+
+      report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, alternativeLocators })
     }, true)
 
     // ── Fill: emit on blur when value changed ──────────────────────────────

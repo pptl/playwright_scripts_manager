@@ -11,6 +11,7 @@ import type {
   ActionType,
   ProjectSavePayload,
   ProjectLoadPayload,
+  LocatorPickPayload,
 } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
@@ -66,8 +67,13 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       }
     }
 
-    recorder = new Recorder(page, (action) => {
-      win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
+    recorder = new Recorder(page, (action, alternatives) => {
+      if (alternatives?.length) {
+        recorder?.pause()
+        win.webContents.send(IPC_CHANNELS.LOCATOR_PICK_NEEDED, { action, alternatives } satisfies LocatorPickPayload)
+      } else {
+        win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
+      }
     })
     // For branch recording, don't navigate (we're already at the right page)
     await recorder.start(payload.branchFromNodeId ? undefined : payload.baseURL)
@@ -84,6 +90,10 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       assertionType as 'assertVisible' | 'assertText' | 'assertValue',
       () => win.webContents.send(IPC_CHANNELS.ASSERTION_PICK_CANCELLED),
     )
+  })
+
+  ipcMain.handle(IPC_CHANNELS.LOCATOR_PICK_RESOLVED, () => {
+    recorder?.resume()
   })
 
   // ── Replay ───────────────────────────────────────────────

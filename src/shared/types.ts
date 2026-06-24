@@ -174,7 +174,11 @@ export const IPC_CHANNELS = {
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: 'assertion:pickStart',
 
+  // Renderer → Main (locator pick)
+  LOCATOR_PICK_RESOLVED: 'locator:pickResolved',
+
   // Main → Renderer
+  LOCATOR_PICK_NEEDED: 'locator:pickNeeded',
   ASSERTION_PICK_CANCELLED: 'assertion:pickCancelled',
   ACTION_CAPTURED: 'action:captured',
   TEST_OUTPUT: 'test:output',
@@ -248,4 +252,14 @@ export interface ProjectSavePayload {
 
 export interface ProjectLoadPayload {
   projectId: string
+}
+
+export interface LocatorOption {
+  label: string
+  expr: string
+}
+
+export interface LocatorPickPayload {
+  action: Action
+  alternatives: LocatorOption[]
 }

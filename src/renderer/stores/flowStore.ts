@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import type { Flow, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment } from '../../shared/types'
+import type { Flow, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
 
 const NODE_VERTICAL_GAP = 80
 const NODE_START_Y = 50
@@ -47,6 +47,8 @@ interface FlowStore {
   setReplaySpeed: (ms: number) => void
   isPickingAssertion: boolean
   setIsPickingAssertion: (v: boolean) => void
+  pendingLocatorPick: LocatorPickPayload | null
+  setPendingLocatorPick: (payload: LocatorPickPayload | null) => void
 
   // Environment profiles
   /** ID of the currently active profile; null = no active profile (no substitution) */
@@ -128,6 +130,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   recordingHeadId: null,
   replaySpeed: 500,
   isPickingAssertion: false,
+  pendingLocatorPick: null,
   activeProfileId: null,
   projects: [],
   currentProject: null,
@@ -354,6 +357,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setIsReplaying: (v) => set({ isReplaying: v }),
   setReplaySpeed: (ms) => set({ replaySpeed: ms }),
   setIsPickingAssertion: (v) => set({ isPickingAssertion: v }),
+  setPendingLocatorPick: (payload) => set({ pendingLocatorPick: payload }),
 
   setActiveProfile: (id) => set({ activeProfileId: id }),
 

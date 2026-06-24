@@ -24,7 +24,10 @@ const IPC_CHANNELS = {
   PROJECT_DELETE: "project:delete",
   // Renderer → Main (assertion pick)
   START_ASSERTION_PICK: "assertion:pickStart",
+  // Renderer → Main (locator pick)
+  LOCATOR_PICK_RESOLVED: "locator:pickResolved",
   // Main → Renderer
+  LOCATOR_PICK_NEEDED: "locator:pickNeeded",
   ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
   TEST_OUTPUT: "test:output",
@@ -56,6 +59,8 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   showReport: () => electron.ipcRenderer.invoke(IPC_CHANNELS.SHOW_REPORT),
   // Assertion pick
   startAssertionPick: (assertionType) => electron.ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
+  // Locator pick
+  resolveLocatorPick: () => electron.ipcRenderer.invoke(IPC_CHANNELS.LOCATOR_PICK_RESOLVED),
   // Sub-flow support
   getFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
   checkFlowCycle: (currentFlowId, candidateSubFlowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_CHECK_CYCLE, { currentFlowId, candidateSubFlowId }),
@@ -104,5 +109,10 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     const handler = () => cb();
     electron.ipcRenderer.on(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler);
     return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler);
+  },
+  onLocatorPickNeeded: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    electron.ipcRenderer.on(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler);
   }
 });

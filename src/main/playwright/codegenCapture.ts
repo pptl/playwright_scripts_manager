@@ -20,6 +20,7 @@ export class CodegenCapture {
   private context: BrowserContext
   private onAction: ActionCallback
   private active = false
+  private paused = false
   private lastGotoUrl = ''
   private lastInteraction: LastInteraction | null = null
   private assertFunctionsExposed = false
@@ -64,7 +65,7 @@ export class CodegenCapture {
 
     // Step 4 — Expose report channel to browser
     await page.exposeFunction('__flowtest_report', (raw: RawEvent) => {
-      if (!this.active) return
+      if (!this.active || this.paused) return
       const action = buildAction(raw)
       if (!action) return
 
@@ -86,7 +87,7 @@ export class CodegenCapture {
       }
 
       this.lastInteraction = { time: Date.now(), type: action.type }
-      this.onAction(action)
+      this.onAction(action, raw.alternativeLocators)
     })
 
     // Step 5 — Navigation
@@ -125,9 +126,13 @@ export class CodegenCapture {
     }
   }
 
+  pause(): void  { this.paused = true }
+  resume(): void { this.paused = false }
+
   async stop(): Promise<void> {
     this.pendingInputClick = null
     this.active = false
+    this.paused = false
   }
 
   async startAssertionPick(assertionType: AssertPickType, onCancel: () => void): Promise<void> {

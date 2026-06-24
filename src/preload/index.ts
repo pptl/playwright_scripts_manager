@@ -10,6 +10,7 @@ import type {
   RecordingStartPayload,
   TestFinishedPayload,
   Project,
+  LocatorPickPayload,
 } from '../shared/types'
 
 // Expose a type-safe API to the renderer via window.electronAPI
@@ -46,6 +47,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Assertion pick
   startAssertionPick: (assertionType: ActionType) =>
     ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
+
+  // Locator pick
+  resolveLocatorPick: () => ipcRenderer.invoke(IPC_CHANNELS.LOCATOR_PICK_RESOLVED),
 
   // Sub-flow support
   getFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
@@ -99,5 +103,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = () => cb()
     ipcRenderer.on(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler)
+  },
+  onLocatorPickNeeded: (cb: (payload: LocatorPickPayload) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: LocatorPickPayload) => cb(payload)
+    ipcRenderer.on(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler)
   },
 })

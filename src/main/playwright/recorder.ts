@@ -1,9 +1,9 @@
 import { Page } from 'playwright-core'
-import type { Action } from '../../shared/types'
+import type { Action, LocatorOption } from '../../shared/types'
 import { CodegenCapture } from './codegenCapture'
 import type { AssertPickType } from './captureShared'
 
-type ActionCallback = (action: Action) => void
+type ActionCallback = (action: Action, alternatives?: LocatorOption[]) => void
 
 export class Recorder {
   private page: Page
@@ -36,6 +36,9 @@ export class Recorder {
   async startAssertionPick(assertionType: AssertPickType, onCancel: () => void): Promise<void> {
     await this.capture.startAssertionPick(assertionType, onCancel)
   }
+
+  pause(): void  { this.capture.pause() }
+  resume(): void { this.capture.resume() }
 
   isRecording(): boolean {
     return this.recording

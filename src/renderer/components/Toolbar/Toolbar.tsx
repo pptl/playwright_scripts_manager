@@ -5,25 +5,7 @@ import { useFlowManager } from '../../hooks/useFlowStore'
 import { TestOutputModal } from './TestOutputModal'
 import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
-import type { ActionType, Action, ExportConfig, TestFinishedPayload } from '../../../shared/types'
-
-const assertBtn = (label: string, onClick: () => void) => (
-  <button
-    onClick={onClick}
-    style={{
-      padding: '4px 10px',
-      borderRadius: 6,
-      border: '1px solid #22c55e',
-      cursor: 'pointer',
-      background: 'transparent',
-      color: '#22c55e',
-      fontSize: 12,
-      fontWeight: 500,
-    }}
-  >
-    {label}
-  </button>
-)
+import type { Action, ExportConfig, TestFinishedPayload } from '../../../shared/types'
 
 const btn = (label: string, onClick: () => void, disabled = false, danger = false) => (
   <button
@@ -52,8 +34,6 @@ export function Toolbar() {
     selectedNodeId,
     replaySpeed,
     setReplaySpeed,
-    isPickingAssertion,
-    setIsPickingAssertion,
     activeProfileId,
     setActiveProfile,
     currentProject,
@@ -166,11 +146,6 @@ export function Toolbar() {
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
   }
 
-  const handleAssertionPick = async (type: ActionType) => {
-    setIsPickingAssertion(true)
-    await window.electronAPI.startAssertionPick(type)
-  }
-
   const handleExport = async () => {
     if (!currentFlow) return
     const config: ExportConfig = {
@@ -249,19 +224,6 @@ export function Toolbar() {
       {!isRecording
         ? btn('▶ 開始錄製', () => startRecording(), !currentFlow)
         : btn('⏹ 停止錄製', () => stopRecording(), false, true)}
-
-      {isRecording && !isPickingAssertion && (
-        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: '#64748b', marginRight: 2 }}>驗證:</span>
-          {assertBtn('👁 可見', () => handleAssertionPick('assertVisible'))}
-          {assertBtn('T 文字', () => handleAssertionPick('assertText'))}
-          {assertBtn('= 值', () => handleAssertionPick('assertValue'))}
-        </div>
-      )}
-
-      {isRecording && isPickingAssertion && (
-        <span style={pillStyle('#713f12', '#fde68a')}>⊕ 選取元素中… (Esc 取消)</span>
-      )}
 
       {btn('🧹 整理節點', handleRelayout, !hasNodes || isRecording || isReplaying)}
 

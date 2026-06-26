@@ -6,7 +6,6 @@ import { VariableList } from './components/VariableList/VariableList'
 import { PropertyPanel } from './components/PropertyPanel/PropertyPanel'
 import { SessionVarList } from './components/SessionVarList/SessionVarList'
 import { ProfileVarList } from './components/ProfileVarList/ProfileVarList'
-import { LocatorPickerModal } from './components/LocatorPickerModal/LocatorPickerModal'
 import { usePlaywrightEvents } from './hooks/usePlaywrightEvents'
 import { useFlowStore } from './stores/flowStore'
 
@@ -35,7 +34,6 @@ export default function App() {
           </div>
         )}
       </div>
-      <LocatorPickerModal />
     </div>
   )
 }

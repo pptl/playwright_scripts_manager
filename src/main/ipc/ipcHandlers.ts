@@ -11,7 +11,6 @@ import type {
   ActionType,
   ProjectSavePayload,
   ProjectLoadPayload,
-  LocatorPickPayload,
 } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
@@ -67,13 +66,10 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       }
     }
 
-    recorder = new Recorder(page, (action, alternatives) => {
-      if (alternatives?.length) {
-        recorder?.pause()
-        win.webContents.send(IPC_CHANNELS.LOCATOR_PICK_NEEDED, { action, alternatives } satisfies LocatorPickPayload)
-      } else {
-        win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
-      }
+    // The locator picker (Cell vs Row) is now handled in-browser by CodegenCapture,
+    // so every action arrives here finalised and is forwarded straight to the renderer.
+    recorder = new Recorder(page, (action) => {
+      win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
     })
     // For branch recording, don't navigate (we're already at the right page)
     await recorder.start(payload.branchFromNodeId ? undefined : payload.baseURL)

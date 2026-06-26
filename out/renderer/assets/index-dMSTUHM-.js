@@ -7192,6 +7192,62 @@ function v4(options, buf, offset) {
   rnds[8] = rnds[8] & 63 | 128;
   return unsafeStringify(rnds);
 }
+const NODE_WIDTH = 200;
+const NODE_HEIGHT = 70;
+const H_MARGIN = 25;
+const V_GAP = 30;
+function computeTreeLayout(nodes, rootNodeId) {
+  const nodeMap = new Map(nodes.map((n2) => [n2.id, n2]));
+  const positions = /* @__PURE__ */ new Map();
+  function subtreeWidth(nodeId) {
+    const node = nodeMap.get(nodeId);
+    if (!node || node.childIds.length === 0) return NODE_WIDTH;
+    const childWidths = node.childIds.map(subtreeWidth);
+    const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
+    return Math.max(NODE_WIDTH, total);
+  }
+  function place(nodeId, centerX, y2) {
+    positions.set(nodeId, { x: centerX - NODE_WIDTH / 2, y: y2 });
+    const node = nodeMap.get(nodeId);
+    if (!node || node.childIds.length === 0) return;
+    const childWidths = node.childIds.map(subtreeWidth);
+    const totalW = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
+    let x2 = centerX - totalW / 2;
+    for (let i = 0; i < node.childIds.length; i++) {
+      place(node.childIds[i], x2 + childWidths[i] / 2, y2 + NODE_HEIGHT + V_GAP);
+      x2 += childWidths[i] + H_MARGIN;
+    }
+  }
+  if (rootNodeId && nodeMap.has(rootNodeId)) {
+    const totalW = subtreeWidth(rootNodeId);
+    place(rootNodeId, totalW / 2, 0);
+  }
+  return positions;
+}
+const TREE_H_GAP = 80;
+function computeAllRootsLayout(nodes) {
+  const result = /* @__PURE__ */ new Map();
+  const roots = nodes.filter((n2) => n2.parentId === null).sort((a, b) => a.position.x - b.position.x);
+  let xCursor = 0;
+  const placeTree = (rootId) => {
+    const treePos = computeTreeLayout(nodes, rootId);
+    if (treePos.size === 0) return;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    treePos.forEach((p2) => {
+      if (p2.x < minX) minX = p2.x;
+      if (p2.x > maxX) maxX = p2.x;
+    });
+    const shift = xCursor - minX;
+    treePos.forEach((p2, id2) => result.set(id2, { x: p2.x + shift, y: p2.y }));
+    xCursor += maxX - minX + NODE_WIDTH + TREE_H_GAP;
+  };
+  for (const root2 of roots) placeTree(root2.id);
+  for (const n2 of nodes) {
+    if (!result.has(n2.id)) placeTree(n2.id);
+  }
+  return result;
+}
 const NODE_VERTICAL_GAP = 80;
 const NODE_START_Y = 50;
 const NODE_START_X = 300;
@@ -7371,6 +7427,30 @@ const useFlowStore = create$1((set2, get2) => ({
       selectedNodeId: null
     });
   },
+  deleteNodesOnly: (nodeIds) => {
+    const flow = get2().currentFlow;
+    if (!flow) return;
+    const toDelete = new Set(nodeIds);
+    const updatedNodes = flow.nodes.filter((n2) => !toDelete.has(n2.id)).map((n2) => {
+      const orphaned = n2.parentId !== null && toDelete.has(n2.parentId);
+      return {
+        ...n2,
+        parentId: orphaned ? null : n2.parentId,
+        branchLabel: orphaned ? void 0 : n2.branchLabel,
+        childIds: n2.childIds.filter((cid) => !toDelete.has(cid))
+      };
+    });
+    const newRoot = updatedNodes.find((n2) => n2.parentId === null);
+    set2({
+      currentFlow: {
+        ...flow,
+        nodes: updatedNodes,
+        rootNodeId: newRoot?.id ?? "",
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      },
+      selectedNodeId: null
+    });
+  },
   selectNode: (nodeId) => set2({ selectedNodeId: nodeId }),
   insertCallFlowBefore: (nodeId, callFlowAction) => {
     const flow = get2().currentFlow;
@@ -7429,6 +7509,37 @@ const useFlowStore = create$1((set2, get2) => ({
     const flow = get2().currentFlow;
     if (!flow) return;
     set2({ currentFlow: { ...flow, positionsFinalized: v2, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } });
+  },
+  materializeLayout: (positions) => {
+    const flow = get2().currentFlow;
+    if (!flow || flow.positionsFinalized) return;
+    set2({
+      currentFlow: {
+        ...flow,
+        nodes: flow.nodes.map((n2) => {
+          const pos = positions.get(n2.id);
+          return pos ? { ...n2, position: pos } : n2;
+        }),
+        positionsFinalized: true,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
+  },
+  relayoutAll: () => {
+    const flow = get2().currentFlow;
+    if (!flow) return;
+    const positions = computeAllRootsLayout(flow.nodes);
+    set2({
+      currentFlow: {
+        ...flow,
+        nodes: flow.nodes.map((n2) => {
+          const pos = positions.get(n2.id);
+          return pos ? { ...n2, position: pos } : n2;
+        }),
+        positionsFinalized: true,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
   },
   connectNodes: (sourceId, targetId, branchLabel) => {
     if (sourceId === targetId) return;
@@ -8820,23 +8931,6 @@ function CallFlowModal({ mode, onClose, onConfirm }) {
     ] })
   ] }) });
 }
-const assertBtn = (label, onClick) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-  "button",
-  {
-    onClick,
-    style: {
-      padding: "4px 10px",
-      borderRadius: 6,
-      border: "1px solid #22c55e",
-      cursor: "pointer",
-      background: "transparent",
-      color: "#22c55e",
-      fontSize: 12,
-      fontWeight: 500
-    },
-    children: label
-  }
-);
 const btn = (label, onClick, disabled = false, danger = false) => /* @__PURE__ */ jsxRuntimeExports.jsx(
   "button",
   {
@@ -8863,15 +8957,14 @@ function Toolbar() {
     selectedNodeId,
     replaySpeed,
     setReplaySpeed,
-    isPickingAssertion,
-    setIsPickingAssertion,
     activeProfileId,
     setActiveProfile,
     currentProject,
     projects,
     activeEnvironmentId,
     setActiveEnvironment,
-    addEnvironmentToProject
+    addEnvironmentToProject,
+    relayoutAll
   } = useFlowStore();
   const { startRecording, stopRecording } = usePlaywright();
   const { newFlow } = useFlowManager();
@@ -8953,9 +9046,10 @@ function Toolbar() {
     setNewURL("");
     setNewProjectId("");
   };
-  const handleAssertionPick = async (type) => {
-    setIsPickingAssertion(true);
-    await window.electronAPI.startAssertionPick(type);
+  const handleRelayout = () => {
+    relayoutAll();
+    const updated = useFlowStore.getState().currentFlow;
+    if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
   };
   const handleExport = async () => {
     if (!currentFlow) return;
@@ -9028,13 +9122,7 @@ ${path}`);
           }
         ),
         !isRecording ? btn("▶ 開始錄製", () => startRecording(), !currentFlow) : btn("⏹ 停止錄製", () => stopRecording(), false, true),
-        isRecording && !isPickingAssertion && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 4, alignItems: "center" }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", marginRight: 2 }, children: "驗證:" }),
-          assertBtn("👁 可見", () => handleAssertionPick("assertVisible")),
-          assertBtn("T 文字", () => handleAssertionPick("assertText")),
-          assertBtn("= 值", () => handleAssertionPick("assertValue"))
-        ] }),
-        isRecording && isPickingAssertion && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: pillStyle("#713f12", "#fde68a"), children: "⊕ 選取元素中… (Esc 取消)" }),
+        btn("🧹 整理節點", handleRelayout, !hasNodes || isRecording || isReplaying),
         btn("匯出腳本", handleExport, !hasNodes || isRecording),
         btn(
           isRunningTests ? "⟳ 測試執行中..." : "▶ 執行所有測試",
@@ -16561,6 +16649,8 @@ function NodeContextMenu({
   onReplay,
   onBranchRecord,
   onDelete,
+  onDeleteNodeOnly,
+  deleteOnlyLabel,
   isRecording,
   isReplaying,
   hasValue,
@@ -16569,7 +16659,10 @@ function NodeContextMenu({
   isRoot,
   isLeaf,
   onInsertCallFlowBefore,
-  onAppendCallFlowAfter
+  onAppendCallFlowAfter,
+  showExtract,
+  selectedCount,
+  onExtract
 }) {
   const disabled = isRecording || isReplaying;
   const [captureInput, setCaptureInput] = reactExports.useState(null);
@@ -16635,6 +16728,21 @@ function NodeContextMenu({
                 }
               }
             ),
+            showExtract && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                MenuItem,
+                {
+                  icon: "⧉",
+                  label: `將選取的 ${selectedCount} 個節點另存為子流程`,
+                  disabled,
+                  onClick: () => {
+                    onClose();
+                    onExtract();
+                  }
+                }
+              )
+            ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
             !isRoot && /* @__PURE__ */ jsxRuntimeExports.jsx(
               MenuItem,
@@ -16718,6 +16826,19 @@ function NodeContextMenu({
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               MenuItem,
               {
+                icon: "✂",
+                label: deleteOnlyLabel,
+                disabled,
+                danger: true,
+                onClick: () => {
+                  onClose();
+                  onDeleteNodeOnly();
+                }
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              MenuItem,
+              {
                 icon: "🗑",
                 label: "刪除此節點及其子節點",
                 disabled,
@@ -16774,8 +16895,8 @@ function MenuItem({
     }
   );
 }
-function SelectionToolbar({ selectedCount, onExtract, onClear }) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+function CanvasStatusBar({ selectedCount }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
     "div",
     {
       style: {
@@ -16787,7 +16908,7 @@ function SelectionToolbar({ selectedCount, onExtract, onClear }) {
         background: "#1e293b",
         border: "1px solid #334155",
         borderRadius: 20,
-        padding: "4px 6px",
+        padding: "4px 14px",
         display: "flex",
         alignItems: "center",
         gap: 6,
@@ -16795,46 +16916,11 @@ function SelectionToolbar({ selectedCount, onExtract, onClear }) {
         color: "#94a3b8",
         whiteSpace: "nowrap"
       },
-      children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { paddingLeft: 8 }, children: [
-          "已選取 ",
-          selectedCount,
-          " 個節點"
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            onClick: onExtract,
-            style: {
-              background: "#6366f1",
-              color: "#fff",
-              border: "none",
-              borderRadius: 14,
-              padding: "3px 12px",
-              cursor: "pointer",
-              fontSize: 12,
-              fontWeight: 600
-            },
-            children: "另存為子流程"
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            onClick: onClear,
-            style: {
-              background: "transparent",
-              color: "#64748b",
-              border: "none",
-              borderRadius: 14,
-              padding: "3px 8px",
-              cursor: "pointer",
-              fontSize: 12
-            },
-            children: "取消"
-          }
-        )
-      ]
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+        "已選取 ",
+        selectedCount,
+        " 個節點"
+      ] })
     }
   );
 }
@@ -16962,38 +17048,6 @@ function ExtractSubflowModal({
     }
   );
 }
-const NODE_WIDTH = 200;
-const NODE_HEIGHT = 70;
-const H_MARGIN = 25;
-const V_GAP = 30;
-function computeTreeLayout(nodes, rootNodeId) {
-  const nodeMap = new Map(nodes.map((n2) => [n2.id, n2]));
-  const positions = /* @__PURE__ */ new Map();
-  function subtreeWidth(nodeId) {
-    const node = nodeMap.get(nodeId);
-    if (!node || node.childIds.length === 0) return NODE_WIDTH;
-    const childWidths = node.childIds.map(subtreeWidth);
-    const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
-    return Math.max(NODE_WIDTH, total);
-  }
-  function place(nodeId, centerX, y2) {
-    positions.set(nodeId, { x: centerX - NODE_WIDTH / 2, y: y2 });
-    const node = nodeMap.get(nodeId);
-    if (!node || node.childIds.length === 0) return;
-    const childWidths = node.childIds.map(subtreeWidth);
-    const totalW = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
-    let x2 = centerX - totalW / 2;
-    for (let i = 0; i < node.childIds.length; i++) {
-      place(node.childIds[i], x2 + childWidths[i] / 2, y2 + NODE_HEIGHT + V_GAP);
-      x2 += childWidths[i] + H_MARGIN;
-    }
-  }
-  if (rootNodeId && nodeMap.has(rootNodeId)) {
-    const totalW = subtreeWidth(rootNodeId);
-    place(rootNodeId, totalW / 2, 0);
-  }
-  return positions;
-}
 function validateExtraction(allNodes, selectedIds) {
   if (selectedIds.size < 2) {
     return { valid: false, error: "請至少選取 2 個節點" };
@@ -17118,10 +17172,11 @@ function FlowCanvasInner() {
     isReplaying,
     replaySpeed,
     deleteNode,
+    deleteNodesOnly,
     updateNode,
     insertCallFlowBefore,
     appendCallFlowAfter,
-    setPositionsFinalized,
+    materializeLayout,
     connectNodes,
     disconnectNodes
   } = useFlowStore();
@@ -17132,13 +17187,13 @@ function FlowCanvasInner() {
   const [extractModal, setExtractModal] = reactExports.useState(false);
   const [extractionInfo, setExtractionInfo] = reactExports.useState(null);
   const saveTimerRef = reactExports.useRef(null);
+  const dragPosRef = reactExports.useRef(/* @__PURE__ */ new Map());
   const rfNodes = reactExports.useMemo(() => {
     if (!currentFlow) return [];
-    const layout = !currentFlow.positionsFinalized && currentFlow.rootNodeId ? computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId) : /* @__PURE__ */ new Map();
     return currentFlow.nodes.map((fn) => ({
       id: fn.id,
       type: "actionNode",
-      position: layout.get(fn.id) ?? fn.position,
+      position: fn.position,
       data: { flowNode: fn },
       selected: selectedNodeIds.size <= 1 ? fn.id === selectedNodeId : selectedNodeIds.has(fn.id)
     }));
@@ -17163,6 +17218,13 @@ function FlowCanvasInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   reactExports.useEffect(() => {
+    if (!currentFlow || currentFlow.positionsFinalized || !currentFlow.rootNodeId) return;
+    const layout = computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId);
+    materializeLayout(layout);
+    const updated = useFlowStore.getState().currentFlow;
+    if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
+  }, [currentFlow?.id, materializeLayout]);
+  reactExports.useEffect(() => {
     setNodes(rfNodes);
   }, [rfNodes, setNodes]);
   reactExports.useEffect(() => {
@@ -17179,17 +17241,22 @@ function FlowCanvasInner() {
   const handleNodesChange = reactExports.useCallback(
     (changes) => {
       onNodesChange(changes);
-      const positionDrops = changes.filter(
-        (c) => c.type === "position" && c.dragging === false && c.position != null
-      );
-      if (positionDrops.length > 0) {
-        positionDrops.forEach((c) => {
-          updateNode(c.id, { position: c.position });
-        });
-        const flow = useFlowStore.getState().currentFlow;
-        if (flow && !flow.positionsFinalized) {
-          setPositionsFinalized(true);
+      for (const c of changes) {
+        if (c.type === "position" && c.position) {
+          dragPosRef.current.set(c.id, c.position);
         }
+      }
+      const dragStops = changes.filter(
+        (c) => c.type === "position" && c.dragging === false
+      );
+      if (dragStops.length > 0) {
+        dragStops.forEach((c) => {
+          const pos = dragPosRef.current.get(c.id);
+          if (pos) {
+            updateNode(c.id, { position: pos });
+            dragPosRef.current.delete(c.id);
+          }
+        });
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
         saveTimerRef.current = setTimeout(async () => {
           const updated = useFlowStore.getState().currentFlow;
@@ -17197,7 +17264,7 @@ function FlowCanvasInner() {
         }, 500);
       }
     },
-    [onNodesChange, updateNode, setPositionsFinalized]
+    [onNodesChange, updateNode]
   );
   const onSelectionChange = reactExports.useCallback(({ nodes: selNodes }) => {
     setSelectedNodeIds(new Set(selNodes.map((n2) => n2.id)));
@@ -17281,6 +17348,8 @@ function FlowCanvasInner() {
       const contextNode = currentFlow?.nodes.find((n2) => n2.id === contextMenu.nodeId);
       const VALUE_TYPES = /* @__PURE__ */ new Set(["fill", "selectOption", "goto", "press", "assertText", "assertValue"]);
       const hasValue = !!(contextNode?.action.value && VALUE_TYPES.has(contextNode.action.type));
+      const multi = selectedNodeIds.size >= 2 && selectedNodeIds.has(contextMenu.nodeId);
+      const deleteOnlyLabel = multi ? `刪除選取的 ${selectedNodeIds.size} 個節點` : "刪除此節點";
       return /* @__PURE__ */ jsxRuntimeExports.jsx(
         NodeContextMenu,
         {
@@ -17292,6 +17361,14 @@ function FlowCanvasInner() {
           onBranchRecord: () => startBranchRecording(contextMenu.nodeId),
           onDelete: async () => {
             deleteNode(contextMenu.nodeId);
+            const updated = useFlowStore.getState().currentFlow;
+            if (updated) await window.electronAPI.saveFlow(updated);
+          },
+          deleteOnlyLabel,
+          onDeleteNodeOnly: async () => {
+            const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId];
+            deleteNodesOnly(ids);
+            setSelectedNodeIds(/* @__PURE__ */ new Set());
             const updated = useFlowStore.getState().currentFlow;
             if (updated) await window.electronAPI.saveFlow(updated);
           },
@@ -17310,7 +17387,10 @@ function FlowCanvasInner() {
           isRoot: contextNode?.parentId === null,
           isLeaf: (contextNode?.childIds.length ?? 0) === 0,
           onInsertCallFlowBefore: () => setCallFlowModal({ mode: "insertBefore", targetNodeId: contextMenu.nodeId }),
-          onAppendCallFlowAfter: () => setCallFlowModal({ mode: "appendAfter", targetNodeId: contextMenu.nodeId })
+          onAppendCallFlowAfter: () => setCallFlowModal({ mode: "appendAfter", targetNodeId: contextMenu.nodeId }),
+          showExtract: multi,
+          selectedCount: selectedNodeIds.size,
+          onExtract: handleExtractClick
         }
       );
     })(),
@@ -17379,14 +17459,7 @@ function FlowCanvasInner() {
         ]
       }
     ),
-    selectedNodeIds.size >= 2 && !isRecording && !isReplaying && /* @__PURE__ */ jsxRuntimeExports.jsx(
-      SelectionToolbar,
-      {
-        selectedCount: selectedNodeIds.size,
-        onExtract: handleExtractClick,
-        onClear: () => setSelectedNodeIds(/* @__PURE__ */ new Set())
-      }
-    ),
+    selectedNodeIds.size >= 2 && !isRecording && !isReplaying && /* @__PURE__ */ jsxRuntimeExports.jsx(CanvasStatusBar, { selectedCount: selectedNodeIds.size }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs(
       ReactFlow,
       {
@@ -17959,6 +18032,7 @@ function PropertyPanel() {
   const [flowName, setFlowName] = reactExports.useState("");
   const [desc, setDesc] = reactExports.useState("");
   const [selector2, setSelector] = reactExports.useState("");
+  const [locatorExpr, setLocatorExpr] = reactExports.useState("");
   const [value, setValue] = reactExports.useState("");
   const [confirmDelete, setConfirmDelete] = reactExports.useState(false);
   const [subFlowProfiles, setSubFlowProfiles] = reactExports.useState([]);
@@ -17971,6 +18045,7 @@ function PropertyPanel() {
     if (selectedNode) {
       setDesc(selectedNode.action.description);
       setSelector(selectedNode.action.selector);
+      setLocatorExpr(selectedNode.action.locatorExpr ?? "");
       setValue(selectedNode.action.value ?? "");
     }
   }, [selectedNodeId, selectedNode]);
@@ -18039,6 +18114,7 @@ function PropertyPanel() {
         ...selectedNode.action,
         description: desc,
         selector: selector2,
+        locatorExpr: locatorExpr || selectedNode.action.locatorExpr,
         value: value || void 0,
         ...callFlowUpdates
       }
@@ -18076,6 +18152,20 @@ function PropertyPanel() {
             style: inputStyle
           }
         ) }),
+        selectedNode.action.type !== "goto" && selectedNode.action.type !== "callFlow" && selectedNode.action.locatorExpr !== void 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(Field, { label: "Locator", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              value: locatorExpr,
+              onChange: (e) => setLocatorExpr(e.target.value),
+              style: { ...inputStyle, width: 260 }
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: [
+            "可插入變數，如 ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "{{randomText}}" })
+          ] })
+        ] }),
         ["fill", "selectOption", "goto", "press", "assertText", "assertValue"].includes(selectedNode.action.type) && /* @__PURE__ */ jsxRuntimeExports.jsxs(Field, { label: selectedNode.action.type === "assertText" ? "驗證文字" : selectedNode.action.type === "assertValue" ? "驗證值" : "值", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(
             "input",
@@ -18609,153 +18699,6 @@ function ProfileVarList() {
     }
   );
 }
-function LocatorPickerModal() {
-  const { pendingLocatorPick, setPendingLocatorPick, addActionNode, recordingHeadId } = useFlowStore();
-  const [selectedIndex, setSelectedIndex] = reactExports.useState(0);
-  if (!pendingLocatorPick) return null;
-  const { action, alternatives } = pendingLocatorPick;
-  const handleConfirm = () => {
-    const chosen = alternatives[selectedIndex];
-    const updatedAction = {
-      ...action,
-      locatorExpr: chosen.expr,
-      description: selectedIndex === 0 ? action.description : deriveDescription(chosen.expr)
-    };
-    addActionNode(updatedAction, recordingHeadId);
-    const updated = useFlowStore.getState().currentFlow;
-    if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
-    setPendingLocatorPick(null);
-    setSelectedIndex(0);
-    window.electronAPI.resolveLocatorPick();
-  };
-  return /* @__PURE__ */ jsxRuntimeExports.jsx(
-    "div",
-    {
-      style: {
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.7)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 2e3
-      },
-      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
-        "div",
-        {
-          style: {
-            background: "#0f172a",
-            border: "1px solid #334155",
-            borderRadius: 12,
-            width: 520,
-            maxWidth: "90vw",
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden"
-          },
-          children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "div",
-              {
-                style: {
-                  padding: "12px 16px",
-                  borderBottom: "1px solid #1e293b",
-                  fontSize: 14,
-                  fontWeight: 600,
-                  color: "#e2e8f0"
-                },
-                children: "選擇 Locator 方式"
-              }
-            ),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "12px 16px", display: "flex", flexDirection: "column", gap: 8 }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", marginBottom: 4 }, children: "點擊的元素位於 Table 中，請選擇要記錄的定位方式：" }),
-              alternatives.map((alt, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "label",
-                {
-                  onClick: () => setSelectedIndex(i),
-                  style: {
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: 10,
-                    padding: "10px 12px",
-                    borderRadius: 8,
-                    border: `1px solid ${selectedIndex === i ? "#3b82f6" : "#334155"}`,
-                    background: selectedIndex === i ? "#1e3a5f" : "#1e293b",
-                    cursor: "pointer",
-                    transition: "border-color 0.15s, background 0.15s"
-                  },
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(
-                      "input",
-                      {
-                        type: "radio",
-                        checked: selectedIndex === i,
-                        onChange: () => setSelectedIndex(i),
-                        style: { marginTop: 2, accentColor: "#3b82f6", flexShrink: 0 }
-                      }
-                    ),
-                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { minWidth: 0 }, children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#e2e8f0", fontWeight: 500, marginBottom: 3 }, children: i === 0 ? "Cell（依內容）" : `Row（依位置，第 ${extractRowNum(alt.expr)} 列）` }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        "div",
-                        {
-                          style: {
-                            fontSize: 11,
-                            color: "#94a3b8",
-                            fontFamily: "monospace",
-                            wordBreak: "break-all"
-                          },
-                          children: alt.expr
-                        }
-                      )
-                    ] })
-                  ]
-                },
-                i
-              ))
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "div",
-              {
-                style: {
-                  padding: "10px 16px",
-                  borderTop: "1px solid #1e293b",
-                  display: "flex",
-                  justifyContent: "flex-end"
-                },
-                children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "button",
-                  {
-                    onClick: handleConfirm,
-                    style: {
-                      padding: "6px 20px",
-                      borderRadius: 6,
-                      border: "1px solid #1d4ed8",
-                      background: "#1e40af",
-                      color: "#bfdbfe",
-                      fontSize: 13,
-                      fontWeight: 600,
-                      cursor: "pointer"
-                    },
-                    children: "確認"
-                  }
-                )
-              }
-            )
-          ]
-        }
-      )
-    }
-  );
-}
-function extractRowNum(expr) {
-  const m2 = expr.match(/\.nth\((\d+)\)/);
-  return m2 ? parseInt(m2[1]) + 1 : 1;
-}
-function deriveDescription(expr) {
-  const rowNum = extractRowNum(expr);
-  return `點擊第 ${rowNum} 列 (row)`;
-}
 function usePlaywrightEvents() {
   const { setReplayStatus, setReplayingNode, setIsReplaying } = useFlowStore();
   reactExports.useEffect(() => {
@@ -18816,8 +18759,7 @@ function App() {
         /* @__PURE__ */ jsxRuntimeExports.jsx(ProfileVarList, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx(SessionVarList, {})
       ] })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(LocatorPickerModal, {})
+    ] })
   ] });
 }
 client.createRoot(document.getElementById("root")).render(

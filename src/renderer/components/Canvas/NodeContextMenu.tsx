@@ -22,6 +22,8 @@ interface NodeContextMenuProps {
   showExtract: boolean
   selectedCount: number
   onExtract: () => void
+  onDisconnect: () => void
+  disconnectLabel: string
 }
 
 export function NodeContextMenu({
@@ -45,6 +47,8 @@ export function NodeContextMenu({
   showExtract,
   selectedCount,
   onExtract,
+  onDisconnect,
+  disconnectLabel,
 }: NodeContextMenuProps) {
   const disabled = isRecording || isReplaying
   const [captureInput, setCaptureInput] = useState<string | null>(null)
@@ -201,6 +205,17 @@ export function NodeContextMenu({
             )}
           </>
         )}
+
+        <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+        <MenuItem
+          icon="⊘"
+          label={disconnectLabel}
+          disabled={disabled}
+          onClick={() => {
+            onClose()
+            onDisconnect()
+          }}
+        />
 
         <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
         <MenuItem

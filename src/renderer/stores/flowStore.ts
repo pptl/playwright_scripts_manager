@@ -52,6 +52,8 @@ interface FlowStore {
   connectNodes: (sourceId: string, targetId: string, branchLabel?: string) => void
   /** Remove parent-child relationship. Target's parentId becomes null (floating node). */
   disconnectNodes: (parentId: string, childId: string) => void
+  /** Detach nodeId from its parent AND all its children; node and each child become floating roots. */
+  disconnectNode: (nodeId: string) => void
 
   // Replay status
   setReplayingNode: (nodeId: string | null) => void
@@ -456,6 +458,24 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const updatedNodes = flow.nodes.map((n) => {
       if (n.id === parentId) return { ...n, childIds: n.childIds.filter((c) => c !== childId) }
       if (n.id === childId) return { ...n, parentId: null, branchLabel: undefined }
+      return n
+    })
+    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+  },
+
+  disconnectNode: (nodeId) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const node = flow.nodes.find((n) => n.id === nodeId)
+    if (!node) return
+    const childIds = new Set(node.childIds)
+    const updatedNodes = flow.nodes.map((n) => {
+      // The node itself: detach from parent and drop all children
+      if (n.id === nodeId) return { ...n, parentId: null, branchLabel: undefined, childIds: [] }
+      // The parent: remove the node from its childIds
+      if (n.id === node.parentId) return { ...n, childIds: n.childIds.filter((c) => c !== nodeId) }
+      // Each child: becomes a floating root
+      if (childIds.has(n.id)) return { ...n, parentId: null, branchLabel: undefined }
       return n
     })
     set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })

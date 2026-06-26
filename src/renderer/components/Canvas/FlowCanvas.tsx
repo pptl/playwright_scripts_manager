@@ -47,6 +47,7 @@ function FlowCanvasInner() {
     materializeLayout,
     connectNodes,
     disconnectNodes,
+    disconnectNode,
   } = useFlowStore()
   const { replayToNode, startBranchRecording } = usePlaywright()
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null)
@@ -260,6 +261,7 @@ function FlowCanvasInner() {
         const hasValue = !!(contextNode?.action.value && VALUE_TYPES.has(contextNode.action.type))
         const multi = selectedNodeIds.size >= 2 && selectedNodeIds.has(contextMenu.nodeId)
         const deleteOnlyLabel = multi ? `刪除選取的 ${selectedNodeIds.size} 個節點` : '刪除此節點'
+        const disconnectLabel = multi ? `斷開選取的 ${selectedNodeIds.size} 個節點連綫` : '斷開此節點連綫'
         return (
           <NodeContextMenu
             nodeId={contextMenu.nodeId}
@@ -300,6 +302,13 @@ function FlowCanvasInner() {
             showExtract={multi}
             selectedCount={selectedNodeIds.size}
             onExtract={handleExtractClick}
+            onDisconnect={async () => {
+              const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId]
+              ids.forEach((id) => disconnectNode(id))
+              const updated = useFlowStore.getState().currentFlow
+              if (updated) await window.electronAPI.saveFlow(updated)
+            }}
+            disconnectLabel={disconnectLabel}
           />
         )
       })()}
@@ -389,7 +398,7 @@ function FlowCanvasInner() {
         edgeTypes={edgeTypes}
         multiSelectionKeyCode="Shift"
         selectionOnDrag={false}
-        deleteKeyCode="Backspace"
+        deleteKeyCode={null}
         fitView
         style={{ background: '#0f172a' }}
       >

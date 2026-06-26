@@ -8,6 +8,8 @@ interface NodeContextMenuProps {
   onReplay: () => void
   onBranchRecord: () => void
   onDelete: () => void
+  onDeleteNodeOnly: () => void
+  deleteOnlyLabel: string
   isRecording: boolean
   isReplaying: boolean
   hasValue: boolean
@@ -17,6 +19,9 @@ interface NodeContextMenuProps {
   isLeaf: boolean
   onInsertCallFlowBefore: () => void
   onAppendCallFlowAfter: () => void
+  showExtract: boolean
+  selectedCount: number
+  onExtract: () => void
 }
 
 export function NodeContextMenu({
@@ -26,6 +31,8 @@ export function NodeContextMenu({
   onReplay,
   onBranchRecord,
   onDelete,
+  onDeleteNodeOnly,
+  deleteOnlyLabel,
   isRecording,
   isReplaying,
   hasValue,
@@ -35,6 +42,9 @@ export function NodeContextMenu({
   isLeaf,
   onInsertCallFlowBefore,
   onAppendCallFlowAfter,
+  showExtract,
+  selectedCount,
+  onExtract,
 }: NodeContextMenuProps) {
   const disabled = isRecording || isReplaying
   const [captureInput, setCaptureInput] = useState<string | null>(null)
@@ -95,6 +105,21 @@ export function NodeContextMenu({
             onBranchRecord()
           }}
         />
+
+        {showExtract && (
+          <>
+            <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+            <MenuItem
+              icon="⧉"
+              label={`將選取的 ${selectedCount} 個節點另存為子流程`}
+              disabled={disabled}
+              onClick={() => {
+                onClose()
+                onExtract()
+              }}
+            />
+          </>
+        )}
 
         <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
         {!isRoot && (
@@ -178,6 +203,16 @@ export function NodeContextMenu({
         )}
 
         <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+        <MenuItem
+          icon="✂"
+          label={deleteOnlyLabel}
+          disabled={disabled}
+          danger
+          onClick={() => {
+            onClose()
+            onDeleteNodeOnly()
+          }}
+        />
         <MenuItem
           icon="🗑"
           label="刪除此節點及其子節點"

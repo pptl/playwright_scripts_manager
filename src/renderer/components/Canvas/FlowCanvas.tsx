@@ -19,7 +19,7 @@ import { useFlowStore } from '../../stores/flowStore'
 import { ActionNode } from './ActionNode'
 import { BranchEdge } from './BranchEdge'
 import { NodeContextMenu } from './NodeContextMenu'
-import { SelectionToolbar } from './SelectionToolbar'
+import { CanvasStatusBar } from './CanvasStatusBar'
 import { ExtractSubflowModal } from './ExtractSubflowModal'
 import type { ActionNodeData } from './ActionNode'
 import { usePlaywright } from '../../hooks/usePlaywright'
@@ -40,6 +40,7 @@ function FlowCanvasInner() {
     isReplaying,
     replaySpeed,
     deleteNode,
+    deleteNodesOnly,
     updateNode,
     insertCallFlowBefore,
     appendCallFlowAfter,
@@ -257,6 +258,8 @@ function FlowCanvasInner() {
         const contextNode = currentFlow?.nodes.find((n) => n.id === contextMenu.nodeId)
         const VALUE_TYPES = new Set(['fill', 'selectOption', 'goto', 'press', 'assertText', 'assertValue'])
         const hasValue = !!(contextNode?.action.value && VALUE_TYPES.has(contextNode.action.type))
+        const multi = selectedNodeIds.size >= 2 && selectedNodeIds.has(contextMenu.nodeId)
+        const deleteOnlyLabel = multi ? `刪除選取的 ${selectedNodeIds.size} 個節點` : '刪除此節點'
         return (
           <NodeContextMenu
             nodeId={contextMenu.nodeId}
@@ -267,6 +270,14 @@ function FlowCanvasInner() {
             onBranchRecord={() => startBranchRecording(contextMenu.nodeId)}
             onDelete={async () => {
               deleteNode(contextMenu.nodeId)
+              const updated = useFlowStore.getState().currentFlow
+              if (updated) await window.electronAPI.saveFlow(updated)
+            }}
+            deleteOnlyLabel={deleteOnlyLabel}
+            onDeleteNodeOnly={async () => {
+              const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId]
+              deleteNodesOnly(ids)
+              setSelectedNodeIds(new Set())
               const updated = useFlowStore.getState().currentFlow
               if (updated) await window.electronAPI.saveFlow(updated)
             }}
@@ -286,6 +297,9 @@ function FlowCanvasInner() {
             isLeaf={(contextNode?.childIds.length ?? 0) === 0}
             onInsertCallFlowBefore={() => setCallFlowModal({ mode: 'insertBefore', targetNodeId: contextMenu.nodeId })}
             onAppendCallFlowAfter={() => setCallFlowModal({ mode: 'appendAfter', targetNodeId: contextMenu.nodeId })}
+            showExtract={multi}
+            selectedCount={selectedNodeIds.size}
+            onExtract={handleExtractClick}
           />
         )
       })()}
@@ -350,13 +364,9 @@ function FlowCanvasInner() {
         </div>
       )}
 
-      {/* Multi-select toolbar */}
+      {/* Multi-select status bar */}
       {selectedNodeIds.size >= 2 && !isRecording && !isReplaying && (
-        <SelectionToolbar
-          selectedCount={selectedNodeIds.size}
-          onExtract={handleExtractClick}
-          onClear={() => setSelectedNodeIds(new Set())}
-        />
+        <CanvasStatusBar selectedCount={selectedNodeIds.size} />
       )}
 
       <ReactFlow

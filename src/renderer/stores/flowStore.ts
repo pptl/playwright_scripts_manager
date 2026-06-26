@@ -31,6 +31,10 @@ interface FlowStore {
   addActionNode: (action: Action, parentId?: string | null, branchLabel?: string) => FlowNode
   updateNode: (nodeId: string, updates: Partial<FlowNode>) => void
   deleteNode: (nodeId: string) => void
+  /** Delete the given nodes WITHOUT deleting their subtrees. Each deleted node's
+   *  surviving children become floating roots (parentId = null, branchLabel cleared),
+   *  consistent with disconnectNodes. Supports multi-node deletion. */
+  deleteNodesOnly: (nodeIds: string[]) => void
   selectNode: (nodeId: string | null) => void
   /** Insert a callFlow node between nodeId's parent and nodeId. Throws if nodeId is root. */
   insertCallFlowBefore: (nodeId: string, callFlowAction: Action) => FlowNode
@@ -283,6 +287,36 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
         ...n,
         childIds: n.childIds.filter((cid) => !toDelete.has(cid)),
       }))
+
+    const newRoot = updatedNodes.find((n) => n.parentId === null)
+    set({
+      currentFlow: {
+        ...flow,
+        nodes: updatedNodes,
+        rootNodeId: newRoot?.id ?? '',
+        updatedAt: new Date().toISOString(),
+      },
+      selectedNodeId: null,
+    })
+  },
+
+  deleteNodesOnly: (nodeIds) => {
+    const flow = get().currentFlow
+    if (!flow) return
+
+    const toDelete = new Set(nodeIds)
+    const updatedNodes = flow.nodes
+      .filter((n) => !toDelete.has(n.id))
+      .map((n) => {
+        // A surviving child of a deleted node becomes a floating root.
+        const orphaned = n.parentId !== null && toDelete.has(n.parentId)
+        return {
+          ...n,
+          parentId: orphaned ? null : n.parentId,
+          branchLabel: orphaned ? undefined : n.branchLabel,
+          childIds: n.childIds.filter((cid) => !toDelete.has(cid)),
+        }
+      })
 
     const newRoot = updatedNodes.find((n) => n.parentId === null)
     set({

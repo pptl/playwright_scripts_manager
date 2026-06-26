@@ -118,6 +118,9 @@ export interface Flow {
   domains?: string[]
   nodes: FlowNode[]
   rootNodeId: string
+  /** When true, node positions have been manually set and treeLayout is not applied on render.
+   *  Flips to true on first manual drag. */
+  positionsFinalized?: boolean
 }
 
 export interface ExportConfig {

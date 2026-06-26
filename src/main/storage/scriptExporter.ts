@@ -8,6 +8,7 @@ import {
   hasVariables,
   valueToCodeExpr,
   sessionAwareValueToCodeExpr,
+  locatorExprToCode,
   emitProfileVarDecls,
   VARIABLE_HELPERS_CODE,
   resolveValue,
@@ -196,7 +197,10 @@ export class ScriptExporter {
       try { return new URL(flow.baseURL).origin } catch { return '' }
     })()
 
-    const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value))
+    const usesVariables = flow.nodes.some((n) =>
+      (n.action.value && hasVariables(n.action.value)) ||
+      (n.action.locatorExpr && hasVariables(n.action.locatorExpr))
+    )
 
     const tests = paths
       .map((path, idx) => {
@@ -271,7 +275,11 @@ export class ScriptExporter {
     //    before the bubble-up fix was applied.
     // 3. Otherwise use locatorExpr, falling back to CSS selector.
     let loc: string
-    const { locatorExpr, selector } = action
+    const { selector } = action
+    // For inlineVars: resolve profile var placeholders in locatorExpr to actual values first
+    const locatorExpr = action.locatorExpr && inlineVars
+      ? action.locatorExpr.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m)
+      : action.locatorExpr
 
     if (selector && /^\[name=/.test(selector)) {
       // Form input with a name attribute — always the most reliable locator
@@ -302,6 +310,11 @@ export class ScriptExporter {
       loc = `page.${locatorExpr}`
     } else {
       loc = `page.locator('${selector}')`
+    }
+
+    // Transform any {{...}} variable placeholders remaining in loc into JS code expressions
+    if (hasVariables(loc)) {
+      loc = locatorExprToCode(loc, profileVarKeys, sessionVarsDefined)
     }
 
     // For sub-flow nodes: pre-resolve profile var placeholders to actual values.

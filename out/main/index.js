@@ -793,6 +793,34 @@ function sessionAwareValueToCodeExpr(value, sessionVarNames, profileVarKeys) {
   });
   return "`" + inner + "`";
 }
+function locatorExprToCode(expr, profileVarKeys, sessionVarNames) {
+  return expr.replace(/'([^']*\{\{[^}]+\}\}[^']*)'|"([^"]*\{\{[^}]+\}\}[^"]*)"/g, (match, sq, dq) => {
+    const inner = sq ?? dq;
+    const singleVar = inner.match(/^\{\{(\w+)\}\}$/);
+    if (singleVar) {
+      const name = singleVar[1];
+      if (sessionVarNames?.has(name)) return name;
+      if (profileVarKeys?.has(name)) return `_ftProf_${name}`;
+      if (name === "randomText") return "_ftRandomText()";
+      if (name === "randomNumber") return "_ftRandomNumber()";
+      if (name === "randomOneText") return "_ftRandomOneLetter()";
+      if (name === "randomOneNumber") return "_ftRandomOneDigit()";
+      if (name === "timestamp") return "_ftTimestamp()";
+      return match;
+    }
+    const templateInner = inner.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{(\w+)\}\}/g, (m, name) => {
+      if (sessionVarNames?.has(name)) return `\${${name}}`;
+      if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`;
+      if (name === "randomText") return "${_ftRandomText()}";
+      if (name === "randomNumber") return "${_ftRandomNumber()}";
+      if (name === "randomOneText") return "${_ftRandomOneLetter()}";
+      if (name === "randomOneNumber") return "${_ftRandomOneDigit()}";
+      if (name === "timestamp") return "${_ftTimestamp()}";
+      return m;
+    });
+    return "`" + templateInner + "`";
+  });
+}
 function emitProfileVarDecls(profileVars) {
   return Object.entries(profileVars).map(([key, value]) => `const _ftProf_${key} = ${JSON.stringify(value)};`).join("\n");
 }
@@ -960,7 +988,8 @@ class Replayer {
   getLocator(action) {
     if (action.locatorExpr) {
       try {
-        const fn = new Function("page", `return page.${action.locatorExpr}`);
+        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars);
+        const fn = new Function("page", `return page.${resolved}`);
         return fn(this.page);
       } catch {
       }
@@ -1261,7 +1290,9 @@ class ScriptExporter {
         return "";
       }
     })();
-    const usesVariables = flow.nodes.some((n) => n.action.value && hasVariables(n.action.value));
+    const usesVariables = flow.nodes.some(
+      (n) => n.action.value && hasVariables(n.action.value) || n.action.locatorExpr && hasVariables(n.action.locatorExpr)
+    );
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
       const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId, config.activeEnvironmentId);
@@ -1303,7 +1334,8 @@ ${emitProfileVarDecls(profileVars)}` : "",
     const { action } = node;
     const profileVarKeys = inlineVars ? /* @__PURE__ */ new Set() : new Set(Object.keys(profileVars));
     let loc;
-    const { locatorExpr, selector } = action;
+    const { selector } = action;
+    const locatorExpr = action.locatorExpr && inlineVars ? action.locatorExpr.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : action.locatorExpr;
     if (selector && /^\[name=/.test(selector)) {
       loc = `page.locator('${selector}')`;
     } else if (selector && /^\[data-id=/.test(selector)) {
@@ -1325,6 +1357,9 @@ ${emitProfileVarDecls(profileVars)}` : "",
       loc = `page.${locatorExpr}`;
     } else {
       loc = `page.locator('${selector}')`;
+    }
+    if (hasVariables(loc)) {
+      loc = locatorExprToCode(loc, profileVarKeys, sessionVarsDefined);
     }
     const resolveProfilePlaceholders = (v) => inlineVars ? v.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : v;
     const captureAs = action.captureAs;

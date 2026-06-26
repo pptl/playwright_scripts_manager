@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useEffect, useState } from 'react'
+import React, { useCallback, useMemo, useEffect, useState, useRef } from 'react'
 import ReactFlow, {
   Background,
   Controls,
@@ -10,79 +10,70 @@ import ReactFlow, {
   NodeMouseHandler,
   NodeChange,
   ReactFlowProvider,
+  Connection,
+  OnSelectionChangeParams,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
+import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
 import { ActionNode } from './ActionNode'
 import { BranchEdge } from './BranchEdge'
 import { NodeContextMenu } from './NodeContextMenu'
+import { SelectionToolbar } from './SelectionToolbar'
+import { ExtractSubflowModal } from './ExtractSubflowModal'
 import type { ActionNodeData } from './ActionNode'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
-import type { FlowNode, NodePosition, Action } from '@shared/types'
+import type { Action } from '@shared/types'
+import { computeTreeLayout } from '../../utils/treeLayout'
+import { validateExtraction, extractSubflow } from '../../utils/subflowExtraction'
 
 const nodeTypes = { actionNode: ActionNode }
 const edgeTypes = { branchEdge: BranchEdge }
 
-const NODE_WIDTH = 200
-const NODE_HEIGHT = 70
-const H_MARGIN = 25
-const V_GAP = 30
-
-function computeTreeLayout(nodes: FlowNode[], rootNodeId: string): Map<string, NodePosition> {
-  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-  const positions = new Map<string, NodePosition>()
-
-  function subtreeWidth(nodeId: string): number {
-    const node = nodeMap.get(nodeId)
-    if (!node || node.childIds.length === 0) return NODE_WIDTH
-    const childWidths = node.childIds.map(subtreeWidth)
-    const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN
-    return Math.max(NODE_WIDTH, total)
-  }
-
-  function place(nodeId: string, centerX: number, y: number) {
-    positions.set(nodeId, { x: centerX - NODE_WIDTH / 2, y })
-    const node = nodeMap.get(nodeId)
-    if (!node || node.childIds.length === 0) return
-    const childWidths = node.childIds.map(subtreeWidth)
-    const totalW = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN
-    let x = centerX - totalW / 2
-    for (let i = 0; i < node.childIds.length; i++) {
-      place(node.childIds[i], x + childWidths[i] / 2, y + NODE_HEIGHT + V_GAP)
-      x += childWidths[i] + H_MARGIN
-    }
-  }
-
-  if (rootNodeId && nodeMap.has(rootNodeId)) {
-    const totalW = subtreeWidth(rootNodeId)
-    place(rootNodeId, totalW / 2, 0)
-  }
-
-  return positions
-}
-
 function FlowCanvasInner() {
-  const { currentFlow, selectNode, selectedNodeId, isRecording, isReplaying, replaySpeed, deleteNode, updateNode, insertCallFlowBefore, appendCallFlowAfter } =
-    useFlowStore()
+  const {
+    currentFlow,
+    selectNode,
+    selectedNodeId,
+    isRecording,
+    isReplaying,
+    replaySpeed,
+    deleteNode,
+    updateNode,
+    insertCallFlowBefore,
+    appendCallFlowAfter,
+    materializeLayout,
+    connectNodes,
+    disconnectNodes,
+  } = useFlowStore()
   const { replayToNode, startBranchRecording } = usePlaywright()
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null)
   const [callFlowModal, setCallFlowModal] = useState<{ mode: 'insertBefore' | 'appendAfter'; targetNodeId: string } | null>(null)
 
-  // Convert FlowNodes to React Flow nodes and edges
-  const rfNodes: Node<ActionNodeData>[] = useMemo(() => {
+  // Multi-select state (local — PropertyPanel/context menu still use Zustand selectedNodeId)
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set())
+  const [extractModal, setExtractModal] = useState(false)
+  const [extractionInfo, setExtractionInfo] = useState<{ entryNodeId: string; exitNodeId: string } | null>(null)
+
+  // Debounced disk save ref
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Latest position per node seen during an in-progress drag (drag-stop events omit position)
+  const dragPosRef = useRef<Map<string, { x: number; y: number }>>(new Map())
+
+  // fn.position is the single source of truth for rendering. When a freshly-loaded flow
+  // has not had its layout finalized yet, materializeLayout (below) writes the tree-layout
+  // positions into the store first, so this never needs to compute layout at render time.
+  const rfNodes = useMemo(() => {
     if (!currentFlow) return []
-    const layout = currentFlow.rootNodeId
-      ? computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId)
-      : new Map<string, NodePosition>()
     return currentFlow.nodes.map((fn) => ({
       id: fn.id,
       type: 'actionNode',
-      position: layout.get(fn.id) ?? fn.position,
+      position: fn.position,
       data: { flowNode: fn },
-      selected: fn.id === selectedNodeId,
+      selected: selectedNodeIds.size <= 1 ? fn.id === selectedNodeId : selectedNodeIds.has(fn.id),
     }))
-  }, [currentFlow, selectedNodeId])
+  }, [currentFlow, selectedNodeId, selectedNodeIds])
 
   const rfEdges: Edge[] = useMemo(() => {
     if (!currentFlow) return []
@@ -105,8 +96,16 @@ function FlowCanvasInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState<ActionNodeData>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
 
-  // Sync Zustand store → ReactFlow internal state
-  // (only recomputes when currentFlow nodes or selectedNodeId changes)
+  // On flow load: if positions were never finalized, materialize the tree layout into the
+  // store (one source of truth) and persist, so render and drag share the same positions.
+  useEffect(() => {
+    if (!currentFlow || currentFlow.positionsFinalized || !currentFlow.rootNodeId) return
+    const layout = computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId)
+    materializeLayout(layout)
+    const updated = useFlowStore.getState().currentFlow
+    if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+  }, [currentFlow?.id, materializeLayout])
+
   useEffect(() => {
     setNodes(rfNodes)
   }, [rfNodes, setNodes])
@@ -117,21 +116,60 @@ function FlowCanvasInner() {
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_, node) => {
-      selectNode(node.id)
+      // Only update property panel target on single-select clicks
+      if (selectedNodeIds.size <= 1) {
+        selectNode(node.id)
+      }
     },
-    [selectNode],
+    [selectNode, selectedNodeIds],
   )
 
   const handleNodesChange = useCallback(
     (changes: NodeChange[]) => {
       onNodesChange(changes)
+
+      // ReactFlow's drag-stop event (dragging:false) does NOT carry a position field —
+      // the final position only appears on the dragging:true events. Track the latest
+      // position per node from those, then persist it when the drag stops.
+      for (const c of changes) {
+        if (c.type === 'position' && (c as any).position) {
+          dragPosRef.current.set((c as any).id, (c as any).position)
+        }
+      }
+
+      const dragStops = changes.filter(
+        (c): c is NodeChange & { type: 'position'; id: string; dragging: false } =>
+          c.type === 'position' && (c as any).dragging === false,
+      )
+
+      if (dragStops.length > 0) {
+        dragStops.forEach((c) => {
+          const pos = dragPosRef.current.get(c.id)
+          if (pos) {
+            updateNode(c.id, { position: pos })
+            dragPosRef.current.delete(c.id)
+          }
+        })
+
+        // Debounce disk save
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = setTimeout(async () => {
+          const updated = useFlowStore.getState().currentFlow
+          if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
+        }, 500)
+      }
     },
-    [onNodesChange],
+    [onNodesChange, updateNode],
   )
+
+  const onSelectionChange = useCallback(({ nodes: selNodes }: OnSelectionChangeParams) => {
+    setSelectedNodeIds(new Set(selNodes.map((n) => n.id)))
+  }, [])
 
   const onPaneClick = useCallback(() => {
     selectNode(null)
     setContextMenu(null)
+    setSelectedNodeIds(new Set())
   }, [selectNode])
 
   const onNodeContextMenu = useCallback(
@@ -141,6 +179,52 @@ function FlowCanvasInner() {
       setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY })
     },
     [selectNode],
+  )
+
+  const onConnect = useCallback(
+    (connection: Connection) => {
+      if (!connection.source || !connection.target) return
+      connectNodes(connection.source, connection.target)
+      const updated = useFlowStore.getState().currentFlow
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+    },
+    [connectNodes],
+  )
+
+  const handleExtractClick = useCallback(() => {
+    if (!currentFlow) return
+    const validation = validateExtraction(currentFlow.nodes, selectedNodeIds)
+    if (!validation.valid) {
+      alert(validation.error)
+      return
+    }
+    setExtractionInfo({ entryNodeId: validation.entryNodeId!, exitNodeId: validation.exitNodeId! })
+    setExtractModal(true)
+  }, [currentFlow, selectedNodeIds])
+
+  const handleExtractConfirm = useCallback(
+    async (subFlowName: string) => {
+      if (!currentFlow || !extractionInfo) return
+      const subFlowId = uuidv4()
+      const callFlowNodeId = uuidv4()
+      const { newSubFlow, updatedParentFlow } = extractSubflow(
+        currentFlow,
+        selectedNodeIds,
+        extractionInfo.entryNodeId,
+        extractionInfo.exitNodeId,
+        subFlowName,
+        subFlowId,
+        callFlowNodeId,
+      )
+      await window.electronAPI.saveFlow(newSubFlow)
+      useFlowStore.getState().setCurrentFlow(updatedParentFlow)
+      await window.electronAPI.saveFlow(updatedParentFlow)
+      const list = await window.electronAPI.listFlows()
+      useFlowStore.getState().setFlows(list)
+      setSelectedNodeIds(new Set())
+      setExtractModal(false)
+    },
+    [currentFlow, extractionInfo, selectedNodeIds],
   )
 
   if (!currentFlow) {
@@ -159,6 +243,13 @@ function FlowCanvasInner() {
       </div>
     )
   }
+
+  const entryNode = extractionInfo
+    ? currentFlow.nodes.find((n) => n.id === extractionInfo.entryNodeId)
+    : null
+  const exitNode = extractionInfo
+    ? currentFlow.nodes.find((n) => n.id === extractionInfo.exitNodeId)
+    : null
 
   return (
     <div style={{ flex: 1, position: 'relative' }}>
@@ -215,6 +306,17 @@ function FlowCanvasInner() {
           }}
         />
       )}
+      {extractModal && (
+        <ExtractSubflowModal
+          selectedCount={selectedNodeIds.size}
+          entryNodeDescription={entryNode?.action.description ?? ''}
+          exitNodeDescription={exitNode?.action.description ?? ''}
+          onConfirm={handleExtractConfirm}
+          onClose={() => setExtractModal(false)}
+        />
+      )}
+
+      {/* Recording indicator */}
       {isRecording && (
         <div
           style={{
@@ -248,6 +350,15 @@ function FlowCanvasInner() {
         </div>
       )}
 
+      {/* Multi-select toolbar */}
+      {selectedNodeIds.size >= 2 && !isRecording && !isReplaying && (
+        <SelectionToolbar
+          selectedCount={selectedNodeIds.size}
+          onExtract={handleExtractClick}
+          onClear={() => setSelectedNodeIds(new Set())}
+        />
+      )}
+
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -256,11 +367,21 @@ function FlowCanvasInner() {
         onNodeClick={onNodeClick}
         onNodeContextMenu={onNodeContextMenu}
         onPaneClick={onPaneClick}
+        onSelectionChange={onSelectionChange}
+        onConnect={onConnect}
+        onNodesDelete={() => { /* no-op: node deletion only via context menu */ }}
+        onEdgesDelete={(edgesToDelete) => {
+          edgesToDelete.forEach((e) => disconnectNodes(e.source, e.target))
+          const updated = useFlowStore.getState().currentFlow
+          if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+        }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        multiSelectionKeyCode="Shift"
+        selectionOnDrag={false}
+        deleteKeyCode="Backspace"
         fitView
         style={{ background: '#0f172a' }}
-        deleteKeyCode={null}
       >
         <Background color="#1e293b" gap={20} />
         <Controls />

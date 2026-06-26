@@ -61,6 +61,7 @@ export function Toolbar() {
     activeEnvironmentId,
     setActiveEnvironment,
     addEnvironmentToProject,
+    relayoutAll,
   } = useFlowStore()
   const { startRecording, stopRecording } = usePlaywright()
   const { newFlow } = useFlowManager()
@@ -159,6 +160,12 @@ export function Toolbar() {
     setNewProjectId('')
   }
 
+  const handleRelayout = () => {
+    relayoutAll()
+    const updated = useFlowStore.getState().currentFlow
+    if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+  }
+
   const handleAssertionPick = async (type: ActionType) => {
     setIsPickingAssertion(true)
     await window.electronAPI.startAssertionPick(type)
@@ -255,6 +262,8 @@ export function Toolbar() {
       {isRecording && isPickingAssertion && (
         <span style={pillStyle('#713f12', '#fde68a')}>⊕ 選取元素中… (Esc 取消)</span>
       )}
+
+      {btn('🧹 整理節點', handleRelayout, !hasNodes || isRecording || isReplaying)}
 
       {btn('匯出腳本', handleExport, !hasNodes || isRecording)}
 

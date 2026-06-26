@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import type { Flow, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
+import { computeAllRootsLayout } from '../utils/treeLayout'
 
 const NODE_VERTICAL_GAP = 80
 const NODE_START_Y = 50
@@ -35,6 +36,18 @@ interface FlowStore {
   insertCallFlowBefore: (nodeId: string, callFlowAction: Action) => FlowNode
   /** Append a callFlow node as the sole child of nodeId. Throws if nodeId already has children. */
   appendCallFlowAfter: (nodeId: string, callFlowAction: Action) => FlowNode
+  /** Flip positionsFinalized on the current flow */
+  setPositionsFinalized: (v: boolean) => void
+  /** Write computed tree-layout positions into every node and mark positions finalized.
+   *  One-shot; no-op if already finalized. Makes fn.position the single source of truth. */
+  materializeLayout: (positions: Map<string, NodePosition>) => void
+  /** Re-layout all nodes: each root tree laid out left-to-right, subtrees centered.
+   *  Unconditional (unlike materializeLayout). Caller persists to disk. */
+  relayoutAll: () => void
+  /** Connect source → target as parent → child. No-op if target already has a parent. */
+  connectNodes: (sourceId: string, targetId: string, branchLabel?: string) => void
+  /** Remove parent-child relationship. Target's parentId becomes null (floating node). */
+  disconnectNodes: (parentId: string, childId: string) => void
 
   // Replay status
   setReplayingNode: (nodeId: string | null) => void
@@ -344,6 +357,74 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
     set({ currentFlow: updatedFlow })
     return callFlowNode
+  },
+
+  setPositionsFinalized: (v) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    set({ currentFlow: { ...flow, positionsFinalized: v, updatedAt: new Date().toISOString() } })
+  },
+
+  materializeLayout: (positions) => {
+    const flow = get().currentFlow
+    if (!flow || flow.positionsFinalized) return
+    set({
+      currentFlow: {
+        ...flow,
+        nodes: flow.nodes.map((n) => {
+          const pos = positions.get(n.id)
+          return pos ? { ...n, position: pos } : n
+        }),
+        positionsFinalized: true,
+        updatedAt: new Date().toISOString(),
+      },
+    })
+  },
+
+  relayoutAll: () => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const positions = computeAllRootsLayout(flow.nodes)
+    set({
+      currentFlow: {
+        ...flow,
+        nodes: flow.nodes.map((n) => {
+          const pos = positions.get(n.id)
+          return pos ? { ...n, position: pos } : n
+        }),
+        positionsFinalized: true,
+        updatedAt: new Date().toISOString(),
+      },
+    })
+  },
+
+  connectNodes: (sourceId, targetId, branchLabel) => {
+    if (sourceId === targetId) return
+    const flow = get().currentFlow
+    if (!flow) return
+    const target = flow.nodes.find((n) => n.id === targetId)
+    if (!target) return
+    if (target.parentId !== null) {
+      console.warn(`connectNodes: target ${targetId} already has parent ${target.parentId}`)
+      return
+    }
+    const updatedNodes = flow.nodes.map((n) => {
+      if (n.id === sourceId) return { ...n, childIds: [...n.childIds, targetId] }
+      if (n.id === targetId) return { ...n, parentId: sourceId, branchLabel }
+      return n
+    })
+    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+  },
+
+  disconnectNodes: (parentId, childId) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const updatedNodes = flow.nodes.map((n) => {
+      if (n.id === parentId) return { ...n, childIds: n.childIds.filter((c) => c !== childId) }
+      if (n.id === childId) return { ...n, parentId: null, branchLabel: undefined }
+      return n
+    })
+    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
   },
 
   setReplayingNode: (nodeId) => set({ replayingNodeId: nodeId }),

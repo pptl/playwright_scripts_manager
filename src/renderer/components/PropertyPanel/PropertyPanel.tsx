@@ -11,6 +11,7 @@ export function PropertyPanel() {
   const [flowName, setFlowName] = useState('')
   const [desc, setDesc] = useState('')
   const [selector, setSelector] = useState('')
+  const [locatorExpr, setLocatorExpr] = useState('')
   const [value, setValue] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -27,6 +28,7 @@ export function PropertyPanel() {
     if (selectedNode) {
       setDesc(selectedNode.action.description)
       setSelector(selectedNode.action.selector)
+      setLocatorExpr(selectedNode.action.locatorExpr ?? '')
       setValue(selectedNode.action.value ?? '')
     }
   }, [selectedNodeId, selectedNode])
@@ -105,6 +107,7 @@ export function PropertyPanel() {
         ...selectedNode.action,
         description: desc,
         selector,
+        locatorExpr: locatorExpr || selectedNode.action.locatorExpr,
         value: value || undefined,
         ...callFlowUpdates,
       },
@@ -149,6 +152,22 @@ export function PropertyPanel() {
                   onChange={(e) => setSelector(e.target.value)}
                   style={inputStyle}
                 />
+              </Field>
+            )}
+
+            {/* Locator Expr — hidden for goto and callFlow */}
+            {selectedNode.action.type !== 'goto' &&
+              selectedNode.action.type !== 'callFlow' &&
+              selectedNode.action.locatorExpr !== undefined && (
+              <Field label="Locator">
+                <input
+                  value={locatorExpr}
+                  onChange={(e) => setLocatorExpr(e.target.value)}
+                  style={{ ...inputStyle, width: 260 }}
+                />
+                <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
+                  可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code>
+                </div>
               </Field>
             )}
 

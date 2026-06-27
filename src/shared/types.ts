@@ -123,6 +123,18 @@ export interface Flow {
   positionsFinalized?: boolean
 }
 
+/** Lightweight flow summary returned by FLOW_LIST. */
+export interface FlowListItem {
+  id: string
+  name: string
+  description?: string
+  updatedAt: string
+  projectId?: string
+  /** How many callFlow nodes across all other flows reference this flow as a sub-flow.
+   *  > 0 means it's used as a reusable sub-flow; 0 means it's a top-level test case. */
+  refCount: number
+}
+
 export interface ExportConfig {
   outputDir: string
   helperFunctions: boolean

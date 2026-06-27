@@ -7457,8 +7457,7 @@ const useFlowStore = create$1((set2, get2) => ({
     if (!flow) throw new Error("No active flow");
     const node = flow.nodes.find((n2) => n2.id === nodeId);
     if (!node) throw new Error(`Node "${nodeId}" not found`);
-    if (node.parentId === null) throw new Error("Cannot insert before root node");
-    const parent = flow.nodes.find((n2) => n2.id === node.parentId);
+    const parent = node.parentId ? flow.nodes.find((n2) => n2.id === node.parentId) : null;
     const callFlowNode = {
       id: callFlowAction.id,
       action: callFlowAction,
@@ -7468,7 +7467,7 @@ const useFlowStore = create$1((set2, get2) => ({
       branchLabel: node.branchLabel
     };
     const updatedNodes = flow.nodes.map((n2) => {
-      if (n2.id === node.parentId) {
+      if (parent && n2.id === parent.id) {
         return {
           ...parent,
           childIds: parent.childIds.map((cid) => cid === nodeId ? callFlowNode.id : cid)
@@ -7480,7 +7479,12 @@ const useFlowStore = create$1((set2, get2) => ({
       return n2;
     });
     updatedNodes.push(callFlowNode);
-    const updatedFlow = { ...flow, nodes: updatedNodes, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    const updatedFlow = {
+      ...flow,
+      nodes: updatedNodes,
+      rootNodeId: node.parentId === null ? callFlowNode.id : flow.rootNodeId,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
     set2({ currentFlow: updatedFlow });
     return callFlowNode;
   },
@@ -7489,11 +7493,14 @@ const useFlowStore = create$1((set2, get2) => ({
     if (!flow) throw new Error("No active flow");
     const node = flow.nodes.find((n2) => n2.id === nodeId);
     if (!node) throw new Error(`Node "${nodeId}" not found`);
-    if (node.childIds.length > 0) throw new Error("Cannot append after a node that already has children");
     const callFlowNode = {
       id: callFlowAction.id,
       action: callFlowAction,
-      position: { x: node.position.x, y: node.position.y + NODE_VERTICAL_GAP },
+      // Offset by existing children so the new branch doesn't overlap them
+      position: {
+        x: node.position.x + node.childIds.length * 220,
+        y: node.position.y + NODE_VERTICAL_GAP
+      },
       parentId: nodeId,
       childIds: []
     };
@@ -7564,6 +7571,20 @@ const useFlowStore = create$1((set2, get2) => ({
     const updatedNodes = flow.nodes.map((n2) => {
       if (n2.id === parentId) return { ...n2, childIds: n2.childIds.filter((c) => c !== childId) };
       if (n2.id === childId) return { ...n2, parentId: null, branchLabel: void 0 };
+      return n2;
+    });
+    set2({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } });
+  },
+  disconnectNode: (nodeId) => {
+    const flow = get2().currentFlow;
+    if (!flow) return;
+    const node = flow.nodes.find((n2) => n2.id === nodeId);
+    if (!node) return;
+    const childIds = new Set(node.childIds);
+    const updatedNodes = flow.nodes.map((n2) => {
+      if (n2.id === nodeId) return { ...n2, parentId: null, branchLabel: void 0, childIds: [] };
+      if (n2.id === node.parentId) return { ...n2, childIds: n2.childIds.filter((c) => c !== nodeId) };
+      if (childIds.has(n2.id)) return { ...n2, parentId: null, branchLabel: void 0 };
       return n2;
     });
     set2({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } });
@@ -8572,365 +8593,6 @@ const closeBtnStyle = {
   cursor: "pointer",
   fontSize: 13
 };
-function getBreadcrumb(node, nodeMap) {
-  const parts = [];
-  let cur = node;
-  while (cur) {
-    parts.unshift(cur.action.description || cur.action.type);
-    cur = cur.parentId ? nodeMap.get(cur.parentId) : void 0;
-  }
-  return parts.join(" → ");
-}
-function CallFlowModal({ mode, onClose, onConfirm }) {
-  const { currentFlow } = useFlowStore();
-  const [step, setStep] = reactExports.useState(1);
-  const [allFlows, setAllFlows] = reactExports.useState([]);
-  const [selectedFlowId, setSelectedFlowId] = reactExports.useState(null);
-  const [subFlow, setSubFlow] = reactExports.useState(null);
-  const [selectedExitNodeId, setSelectedExitNodeId] = reactExports.useState(null);
-  const [actionDescription, setActionDescription] = reactExports.useState("");
-  const [profileMapping, setProfileMapping] = reactExports.useState({});
-  const [cycleError, setCycleError] = reactExports.useState(null);
-  const [loading, setLoading] = reactExports.useState(false);
-  reactExports.useEffect(() => {
-    window.electronAPI.listFlows().then((flows) => {
-      setAllFlows(flows.filter((f2) => f2.id !== currentFlow?.id));
-    });
-  }, [currentFlow?.id]);
-  const handleSelectFlow = async (flowId) => {
-    setCycleError(null);
-    setSelectedFlowId(flowId);
-    setSubFlow(null);
-    setSelectedExitNodeId(null);
-    setProfileMapping({});
-    if (currentFlow?.id) {
-      const hasCycle = await window.electronAPI.checkFlowCycle(currentFlow.id, flowId);
-      if (hasCycle) {
-        setCycleError("此流程會造成循環依賴，無法選取");
-        return;
-      }
-    }
-    setLoading(true);
-    const flow = await window.electronAPI.getFlow(flowId);
-    setLoading(false);
-    if (!flow) return;
-    setSubFlow(flow);
-    setActionDescription(`呼叫子流程: ${flow.name}`);
-    const parentProfiles2 = currentFlow?.profiles ?? [];
-    const subProfiles2 = flow.profiles ?? [];
-    const defaultSubProfileId = subProfiles2.length > 0 ? subProfiles2[0].id : null;
-    const initMapping = {};
-    parentProfiles2.forEach((p2) => {
-      initMapping[p2.id] = defaultSubProfileId;
-    });
-    setProfileMapping(initMapping);
-  };
-  const handleNext = () => {
-    if (step === 1 && selectedFlowId && !cycleError) setStep(2);
-    else if (step === 2 && selectedExitNodeId) {
-      const subProfiles2 = subFlow?.profiles ?? [];
-      if (subProfiles2.length > 1) setStep(3);
-      else handleConfirm();
-    } else if (step === 3) handleConfirm();
-  };
-  const handleConfirm = () => {
-    if (!subFlow || !selectedExitNodeId) return;
-    const parentProfiles2 = currentFlow?.profiles ?? [];
-    const subProfiles2 = subFlow.profiles ?? [];
-    const isSingleParentProfile = parentProfiles2.length <= 1;
-    const singleMappedId = isSingleParentProfile && parentProfiles2.length === 1 ? profileMapping[parentProfiles2[0].id] ?? null : null;
-    const callFlowAction = {
-      id: v4(),
-      type: "callFlow",
-      selector: "",
-      description: actionDescription.trim() || `呼叫子流程: ${subFlow.name}`,
-      timestamp: Date.now(),
-      url: "",
-      isPageNavigation: false,
-      subFlowId: subFlow.id,
-      subFlowExitNodeId: selectedExitNodeId,
-      subFlowProfileMapping: profileMapping,
-      // Legacy fields — only set for single-parent-profile case so the badge shows the name
-      subFlowProfileId: singleMappedId ?? void 0,
-      subFlowProfileName: singleMappedId ? subProfiles2.find((p2) => p2.id === singleMappedId)?.name : void 0
-    };
-    onConfirm(callFlowAction);
-  };
-  const leafNodes = subFlow ? subFlow.nodes.filter((n2) => n2.childIds.length === 0) : [];
-  const subFlowNodeMap = subFlow ? new Map(subFlow.nodes.map((n2) => [n2.id, n2])) : /* @__PURE__ */ new Map();
-  const subProfiles = subFlow?.profiles ?? [];
-  const parentProfiles = currentFlow?.profiles ?? [];
-  const isMultiParentProfile = parentProfiles.length > 1;
-  const canProceed = step === 1 && !!selectedFlowId && !cycleError || step === 2 && !!selectedExitNodeId || step === 3;
-  const modeLabel = mode === "insertBefore" ? "在此節點前插入子流程" : mode === "appendAfter" ? "在此節點後加入子流程" : "加入Flow作為起始節點";
-  const totalSteps = subProfiles.length > 1 ? 3 : 2;
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(0,0,0,0.6)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 2e3
-  }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-    background: "#1e293b",
-    borderRadius: 12,
-    width: 560,
-    maxHeight: "80vh",
-    display: "flex",
-    flexDirection: "column",
-    border: "1px solid #334155",
-    boxShadow: "0 20px 60px rgba(0,0,0,0.5)"
-  }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-      padding: "16px 20px",
-      borderBottom: "1px solid #334155",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between"
-    }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 14, fontWeight: 600, color: "#e2e8f0" }, children: modeLabel }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#64748b", marginTop: 2 }, children: [
-          "步驟 ",
-          step,
-          " / ",
-          totalSteps
-        ] })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, style: {
-        background: "none",
-        border: "none",
-        color: "#64748b",
-        cursor: "pointer",
-        fontSize: 18
-      }, children: "✕" })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, overflowY: "auto", padding: "16px 20px" }, children: [
-      step === 1 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 10 }, children: "選擇要呼叫的子流程" }),
-        allFlows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#64748b", fontSize: 13 }, children: "尚無其他流程可選" }),
-        allFlows.map((f2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "div",
-          {
-            onClick: () => handleSelectFlow(f2.id),
-            style: {
-              padding: "10px 12px",
-              borderRadius: 6,
-              marginBottom: 6,
-              cursor: "pointer",
-              background: selectedFlowId === f2.id ? "#1e3a5f" : "#0f172a",
-              border: `1px solid ${selectedFlowId === f2.id ? "#3b82f6" : "#334155"}`,
-              color: selectedFlowId === f2.id ? "#93c5fd" : "#cbd5e1"
-            },
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, fontWeight: 500 }, children: f2.name }),
-              f2.description && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", marginTop: 2 }, children: f2.description })
-            ]
-          },
-          f2.id
-        )),
-        cycleError && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#ef4444", fontSize: 12, marginTop: 8 }, children: [
-          "⚠ ",
-          cycleError
-        ] }),
-        loading && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#64748b", fontSize: 12, marginTop: 8 }, children: "載入中…" }),
-        selectedFlowId && !cycleError && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 16 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase", marginBottom: 6, letterSpacing: "0.05em" }, children: "描述" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "input",
-            {
-              value: actionDescription,
-              onChange: (e) => setActionDescription(e.target.value),
-              placeholder: "輸入此節點的描述",
-              style: {
-                width: "100%",
-                boxSizing: "border-box",
-                padding: "7px 10px",
-                background: "#0f172a",
-                border: "1px solid #334155",
-                borderRadius: 6,
-                color: "#e2e8f0",
-                fontSize: 13,
-                outline: "none"
-              }
-            }
-          )
-        ] })
-      ] }),
-      step === 2 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 10 }, children: "選擇子流程的出口節點（走到這個節點時視為子流程執行完畢）" }),
-        leafNodes.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#64748b", fontSize: 13 }, children: "此流程沒有葉子節點" }),
-        leafNodes.map((n2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "div",
-          {
-            onClick: () => setSelectedExitNodeId(n2.id),
-            style: {
-              padding: "10px 12px",
-              borderRadius: 6,
-              marginBottom: 6,
-              cursor: "pointer",
-              background: selectedExitNodeId === n2.id ? "#1e3a5f" : "#0f172a",
-              border: `1px solid ${selectedExitNodeId === n2.id ? "#3b82f6" : "#334155"}`,
-              color: selectedExitNodeId === n2.id ? "#93c5fd" : "#cbd5e1"
-            },
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, fontWeight: 500 }, children: n2.action.description || n2.action.type }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: getBreadcrumb(n2, subFlowNodeMap) })
-            ]
-          },
-          n2.id
-        ))
-      ] }),
-      step === 3 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: isMultiParentProfile ? (
-        // Multi-parent-profile: show mapping table
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 12 }, children: [
-            "為每個父流程環境配置，指定子流程 ",
-            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#e2e8f0" }, children: subFlow?.name }),
-            " 要套用的配置"
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 8,
-            marginBottom: 8,
-            padding: "4px 0"
-          }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }, children: "父流程配置" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }, children: "子流程套用配置" })
-          ] }),
-          parentProfiles.map((pp) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "div",
-            {
-              style: {
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 8,
-                alignItems: "center",
-                marginBottom: 8,
-                background: "#0f172a",
-                borderRadius: 6,
-                padding: "8px 12px",
-                border: "1px solid #334155"
-              },
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, color: "#cbd5e1", fontWeight: 500 }, children: pp.name }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "select",
-                  {
-                    value: profileMapping[pp.id] ?? "",
-                    onChange: (e) => setProfileMapping((prev) => ({
-                      ...prev,
-                      [pp.id]: e.target.value || null
-                    })),
-                    style: {
-                      background: "#1e293b",
-                      color: "#e2e8f0",
-                      border: "1px solid #475569",
-                      borderRadius: 4,
-                      padding: "4px 8px",
-                      fontSize: 12,
-                      cursor: "pointer",
-                      width: "100%"
-                    },
-                    children: subProfiles.map((sp) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: sp.id, children: sp.name }, sp.id))
-                  }
-                )
-              ]
-            },
-            pp.id
-          ))
-        ] })
-      ) : (
-        // Single-parent-profile: show original single-selection list
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 10 }, children: "選擇子流程套用的配置（Profile）" }),
-          subProfiles.map((sp) => {
-            const mappedId = parentProfiles.length > 0 ? profileMapping[parentProfiles[0].id] : null;
-            return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-              "div",
-              {
-                onClick: () => {
-                  if (parentProfiles.length > 0) {
-                    setProfileMapping({ [parentProfiles[0].id]: sp.id });
-                  }
-                },
-                style: {
-                  padding: "10px 12px",
-                  borderRadius: 6,
-                  marginBottom: 6,
-                  cursor: "pointer",
-                  background: mappedId === sp.id ? "#1e3a5f" : "#0f172a",
-                  border: `1px solid ${mappedId === sp.id ? "#3b82f6" : "#334155"}`,
-                  color: mappedId === sp.id ? "#93c5fd" : "#cbd5e1"
-                },
-                children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, fontWeight: 500 }, children: sp.name }),
-                  sp.vars.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: [
-                    sp.vars.slice(0, 3).map((v2) => `${v2.key}=${v2.value}`).join(", "),
-                    sp.vars.length > 3 ? " …" : ""
-                  ] })
-                ]
-              },
-              sp.id
-            );
-          })
-        ] })
-      ) })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-      padding: "12px 20px",
-      borderTop: "1px solid #334155",
-      display: "flex",
-      justifyContent: "flex-end",
-      gap: 8
-    }, children: [
-      step > 1 && /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          onClick: () => setStep((s) => s - 1),
-          style: {
-            padding: "6px 16px",
-            borderRadius: 6,
-            border: "1px solid #334155",
-            background: "transparent",
-            color: "#94a3b8",
-            cursor: "pointer",
-            fontSize: 13
-          },
-          children: "上一步"
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, style: {
-        padding: "6px 16px",
-        borderRadius: 6,
-        border: "1px solid #334155",
-        background: "transparent",
-        color: "#94a3b8",
-        cursor: "pointer",
-        fontSize: 13
-      }, children: "取消" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          onClick: handleNext,
-          disabled: !canProceed,
-          style: {
-            padding: "6px 16px",
-            borderRadius: 6,
-            border: "none",
-            background: canProceed ? "#3b82f6" : "#1e3a5f",
-            color: canProceed ? "#fff" : "#475569",
-            cursor: canProceed ? "pointer" : "not-allowed",
-            fontSize: 13
-          },
-          children: step === 2 && subProfiles.length <= 1 ? "確認" : step === 3 ? "確認" : "下一步"
-        }
-      )
-    ] })
-  ] }) });
-}
 const btn = (label, onClick, disabled = false, danger = false) => /* @__PURE__ */ jsxRuntimeExports.jsx(
   "button",
   {
@@ -8968,7 +8630,6 @@ function Toolbar() {
   } = useFlowStore();
   const { startRecording, stopRecording } = usePlaywright();
   const { newFlow } = useFlowManager();
-  const { addActionNode } = useFlowStore();
   const [showNewFlowDialog, setShowNewFlowDialog] = reactExports.useState(false);
   const [newName, setNewName] = reactExports.useState("");
   const [newURL, setNewURL] = reactExports.useState("");
@@ -8981,7 +8642,6 @@ function Toolbar() {
   const hasNodes = (currentFlow?.nodes.length ?? 0) > 0;
   const [showProfileMenu, setShowProfileMenu] = reactExports.useState(false);
   const [showProfileEditor, setShowProfileEditor] = reactExports.useState(false);
-  const [showCallFlowModal, setShowCallFlowModal] = reactExports.useState(false);
   const profileMenuRef = reactExports.useRef(null);
   const [showEnvMenu, setShowEnvMenu] = reactExports.useState(false);
   const [addingEnv, setAddingEnv] = reactExports.useState(false);
@@ -9101,26 +8761,6 @@ ${path}`);
       children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 16, color: "#60a5fa", marginRight: 8 }, children: "FlowTest" }),
         btn("新增流程", () => setShowNewFlowDialog(true)),
-        currentFlow && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            disabled: hasNodes || isRecording || isReplaying,
-            onClick: () => setShowCallFlowModal(true),
-            title: hasNodes ? "只有空流程可以設定起始子流程" : "加入Flow作為起始節點",
-            style: {
-              padding: "6px 14px",
-              borderRadius: 6,
-              border: "1px solid #f59e0b",
-              cursor: hasNodes || isRecording || isReplaying ? "not-allowed" : "pointer",
-              background: "transparent",
-              color: hasNodes || isRecording || isReplaying ? "#475569" : "#f59e0b",
-              fontSize: 13,
-              fontWeight: 500,
-              opacity: hasNodes || isRecording || isReplaying ? 0.5 : 1
-            },
-            children: "⛓ 加入Flow作為起始節點"
-          }
-        ),
         !isRecording ? btn("▶ 開始錄製", () => startRecording(), !currentFlow) : btn("⏹ 停止錄製", () => stopRecording(), false, true),
         btn("🧹 整理節點", handleRelayout, !hasNodes || isRecording || isReplaying),
         btn("匯出腳本", handleExport, !hasNodes || isRecording),
@@ -9560,20 +9200,7 @@ ${path}`);
             onClose: () => setShowTestModal(false)
           }
         ),
-        showProfileEditor && /* @__PURE__ */ jsxRuntimeExports.jsx(ProfileEditorModal, { onClose: () => setShowProfileEditor(false) }),
-        showCallFlowModal && currentFlow && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          CallFlowModal,
-          {
-            mode: "asRoot",
-            onClose: () => setShowCallFlowModal(false),
-            onConfirm: async (callFlowAction) => {
-              addActionNode(callFlowAction, null);
-              const updated = useFlowStore.getState().currentFlow;
-              if (updated) await window.electronAPI.saveFlow(updated).catch(console.error);
-              setShowCallFlowModal(false);
-            }
-          }
-        )
+        showProfileEditor && /* @__PURE__ */ jsxRuntimeExports.jsx(ProfileEditorModal, { onClose: () => setShowProfileEditor(false) })
       ]
     }
   );
@@ -16656,13 +16283,13 @@ function NodeContextMenu({
   hasValue,
   currentCaptureAs,
   onCaptureAsVar,
-  isRoot,
-  isLeaf,
   onInsertCallFlowBefore,
   onAppendCallFlowAfter,
   showExtract,
   selectedCount,
-  onExtract
+  onExtract,
+  onDisconnect,
+  disconnectLabel
 }) {
   const disabled = isRecording || isReplaying;
   const [captureInput, setCaptureInput] = reactExports.useState(null);
@@ -16744,7 +16371,7 @@ function NodeContextMenu({
               )
             ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
-            !isRoot && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
               MenuItem,
               {
                 icon: "⛓",
@@ -16756,7 +16383,7 @@ function NodeContextMenu({
                 }
               }
             ),
-            isLeaf && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
               MenuItem,
               {
                 icon: "⛓",
@@ -16822,6 +16449,19 @@ function NodeContextMenu({
                 )
               ] })
             ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              MenuItem,
+              {
+                icon: "⊘",
+                label: disconnectLabel,
+                disabled,
+                onClick: () => {
+                  onClose();
+                  onDisconnect();
+                }
+              }
+            ),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               MenuItem,
@@ -17048,6 +16688,370 @@ function ExtractSubflowModal({
     }
   );
 }
+function getBreadcrumb(node, nodeMap) {
+  const parts = [];
+  let cur = node;
+  while (cur) {
+    parts.unshift(cur.action.description || cur.action.type);
+    cur = cur.parentId ? nodeMap.get(cur.parentId) : void 0;
+  }
+  return parts.join(" → ");
+}
+function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }) {
+  const { currentFlow } = useFlowStore();
+  const [step, setStep] = reactExports.useState(preselectedFlowId ? 2 : 1);
+  const [allFlows, setAllFlows] = reactExports.useState([]);
+  const [selectedFlowId, setSelectedFlowId] = reactExports.useState(null);
+  const [subFlow, setSubFlow] = reactExports.useState(null);
+  const [selectedExitNodeId, setSelectedExitNodeId] = reactExports.useState(null);
+  const [actionDescription, setActionDescription] = reactExports.useState("");
+  const [profileMapping, setProfileMapping] = reactExports.useState({});
+  const [cycleError, setCycleError] = reactExports.useState(null);
+  const [loading, setLoading] = reactExports.useState(false);
+  reactExports.useEffect(() => {
+    window.electronAPI.listFlows().then((flows) => {
+      setAllFlows(flows.filter((f2) => f2.id !== currentFlow?.id));
+    });
+  }, [currentFlow?.id]);
+  reactExports.useEffect(() => {
+    if (preselectedFlowId) handleSelectFlow(preselectedFlowId);
+  }, []);
+  const handleSelectFlow = async (flowId) => {
+    setCycleError(null);
+    setSelectedFlowId(flowId);
+    setSubFlow(null);
+    setSelectedExitNodeId(null);
+    setProfileMapping({});
+    if (currentFlow?.id) {
+      const hasCycle = await window.electronAPI.checkFlowCycle(currentFlow.id, flowId);
+      if (hasCycle) {
+        setCycleError("此流程會造成循環依賴，無法選取");
+        return;
+      }
+    }
+    setLoading(true);
+    const flow = await window.electronAPI.getFlow(flowId);
+    setLoading(false);
+    if (!flow) return;
+    setSubFlow(flow);
+    setActionDescription(`呼叫子流程: ${flow.name}`);
+    const parentProfiles2 = currentFlow?.profiles ?? [];
+    const subProfiles2 = flow.profiles ?? [];
+    const defaultSubProfileId = subProfiles2.length > 0 ? subProfiles2[0].id : null;
+    const initMapping = {};
+    parentProfiles2.forEach((p2) => {
+      initMapping[p2.id] = defaultSubProfileId;
+    });
+    setProfileMapping(initMapping);
+  };
+  const handleNext = () => {
+    if (step === 1 && selectedFlowId && !cycleError) setStep(2);
+    else if (step === 2 && selectedExitNodeId) {
+      const subProfiles2 = subFlow?.profiles ?? [];
+      if (subProfiles2.length > 1) setStep(3);
+      else handleConfirm();
+    } else if (step === 3) handleConfirm();
+  };
+  const handleConfirm = () => {
+    if (!subFlow || !selectedExitNodeId) return;
+    const parentProfiles2 = currentFlow?.profiles ?? [];
+    const subProfiles2 = subFlow.profiles ?? [];
+    const isSingleParentProfile = parentProfiles2.length <= 1;
+    const singleMappedId = isSingleParentProfile && parentProfiles2.length === 1 ? profileMapping[parentProfiles2[0].id] ?? null : null;
+    const callFlowAction = {
+      id: v4(),
+      type: "callFlow",
+      selector: "",
+      description: actionDescription.trim() || `呼叫子流程: ${subFlow.name}`,
+      timestamp: Date.now(),
+      url: "",
+      isPageNavigation: false,
+      subFlowId: subFlow.id,
+      subFlowExitNodeId: selectedExitNodeId,
+      subFlowProfileMapping: profileMapping,
+      // Legacy fields — only set for single-parent-profile case so the badge shows the name
+      subFlowProfileId: singleMappedId ?? void 0,
+      subFlowProfileName: singleMappedId ? subProfiles2.find((p2) => p2.id === singleMappedId)?.name : void 0
+    };
+    onConfirm(callFlowAction);
+  };
+  const leafNodes = subFlow ? subFlow.nodes.filter((n2) => n2.childIds.length === 0) : [];
+  const subFlowNodeMap = subFlow ? new Map(subFlow.nodes.map((n2) => [n2.id, n2])) : /* @__PURE__ */ new Map();
+  const subProfiles = subFlow?.profiles ?? [];
+  const parentProfiles = currentFlow?.profiles ?? [];
+  const isMultiParentProfile = parentProfiles.length > 1;
+  const canProceed = step === 1 && !!selectedFlowId && !cycleError || step === 2 && !!selectedExitNodeId || step === 3;
+  const modeLabel = mode === "insertBefore" ? "在此節點前插入子流程" : "在此節點後加入子流程";
+  const totalSteps = subProfiles.length > 1 ? 3 : 2;
+  const displayStep = preselectedFlowId ? step - 1 : step;
+  const displayTotal = preselectedFlowId ? totalSteps - 1 : totalSteps;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 2e3
+  }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "#1e293b",
+    borderRadius: 12,
+    width: 560,
+    maxHeight: "80vh",
+    display: "flex",
+    flexDirection: "column",
+    border: "1px solid #334155",
+    boxShadow: "0 20px 60px rgba(0,0,0,0.5)"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      padding: "16px 20px",
+      borderBottom: "1px solid #334155",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 14, fontWeight: 600, color: "#e2e8f0" }, children: modeLabel }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#64748b", marginTop: 2 }, children: [
+          "步驟 ",
+          displayStep,
+          " / ",
+          displayTotal
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, style: {
+        background: "none",
+        border: "none",
+        color: "#64748b",
+        cursor: "pointer",
+        fontSize: 18
+      }, children: "✕" })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, overflowY: "auto", padding: "16px 20px" }, children: [
+      step === 1 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 10 }, children: "選擇要呼叫的子流程" }),
+        allFlows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#64748b", fontSize: 13 }, children: "尚無其他流程可選" }),
+        allFlows.map((f2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            onClick: () => handleSelectFlow(f2.id),
+            style: {
+              padding: "10px 12px",
+              borderRadius: 6,
+              marginBottom: 6,
+              cursor: "pointer",
+              background: selectedFlowId === f2.id ? "#1e3a5f" : "#0f172a",
+              border: `1px solid ${selectedFlowId === f2.id ? "#3b82f6" : "#334155"}`,
+              color: selectedFlowId === f2.id ? "#93c5fd" : "#cbd5e1"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, fontWeight: 500 }, children: f2.name }),
+              f2.description && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", marginTop: 2 }, children: f2.description })
+            ]
+          },
+          f2.id
+        )),
+        cycleError && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#ef4444", fontSize: 12, marginTop: 8 }, children: [
+          "⚠ ",
+          cycleError
+        ] }),
+        loading && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#64748b", fontSize: 12, marginTop: 8 }, children: "載入中…" }),
+        selectedFlowId && !cycleError && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 16 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase", marginBottom: 6, letterSpacing: "0.05em" }, children: "描述" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              value: actionDescription,
+              onChange: (e) => setActionDescription(e.target.value),
+              placeholder: "輸入此節點的描述",
+              style: {
+                width: "100%",
+                boxSizing: "border-box",
+                padding: "7px 10px",
+                background: "#0f172a",
+                border: "1px solid #334155",
+                borderRadius: 6,
+                color: "#e2e8f0",
+                fontSize: 13,
+                outline: "none"
+              }
+            }
+          )
+        ] })
+      ] }),
+      step === 2 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 10 }, children: "選擇子流程的出口節點（走到這個節點時視為子流程執行完畢）" }),
+        leafNodes.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#64748b", fontSize: 13 }, children: "此流程沒有葉子節點" }),
+        leafNodes.map((n2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            onClick: () => setSelectedExitNodeId(n2.id),
+            style: {
+              padding: "10px 12px",
+              borderRadius: 6,
+              marginBottom: 6,
+              cursor: "pointer",
+              background: selectedExitNodeId === n2.id ? "#1e3a5f" : "#0f172a",
+              border: `1px solid ${selectedExitNodeId === n2.id ? "#3b82f6" : "#334155"}`,
+              color: selectedExitNodeId === n2.id ? "#93c5fd" : "#cbd5e1"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, fontWeight: 500 }, children: n2.action.description || n2.action.type }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: getBreadcrumb(n2, subFlowNodeMap) })
+            ]
+          },
+          n2.id
+        ))
+      ] }),
+      step === 3 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: isMultiParentProfile ? (
+        // Multi-parent-profile: show mapping table
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 12 }, children: [
+            "為每個父流程環境配置，指定子流程 ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#e2e8f0" }, children: subFlow?.name }),
+            " 要套用的配置"
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 8,
+            marginBottom: 8,
+            padding: "4px 0"
+          }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }, children: "父流程配置" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }, children: "子流程套用配置" })
+          ] }),
+          parentProfiles.map((pp) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
+            {
+              style: {
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 8,
+                alignItems: "center",
+                marginBottom: 8,
+                background: "#0f172a",
+                borderRadius: 6,
+                padding: "8px 12px",
+                border: "1px solid #334155"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, color: "#cbd5e1", fontWeight: 500 }, children: pp.name }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "select",
+                  {
+                    value: profileMapping[pp.id] ?? "",
+                    onChange: (e) => setProfileMapping((prev) => ({
+                      ...prev,
+                      [pp.id]: e.target.value || null
+                    })),
+                    style: {
+                      background: "#1e293b",
+                      color: "#e2e8f0",
+                      border: "1px solid #475569",
+                      borderRadius: 4,
+                      padding: "4px 8px",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      width: "100%"
+                    },
+                    children: subProfiles.map((sp) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: sp.id, children: sp.name }, sp.id))
+                  }
+                )
+              ]
+            },
+            pp.id
+          ))
+        ] })
+      ) : (
+        // Single-parent-profile: show original single-selection list
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 10 }, children: "選擇子流程套用的配置（Profile）" }),
+          subProfiles.map((sp) => {
+            const mappedId = parentProfiles.length > 0 ? profileMapping[parentProfiles[0].id] : null;
+            return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                onClick: () => {
+                  if (parentProfiles.length > 0) {
+                    setProfileMapping({ [parentProfiles[0].id]: sp.id });
+                  }
+                },
+                style: {
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  marginBottom: 6,
+                  cursor: "pointer",
+                  background: mappedId === sp.id ? "#1e3a5f" : "#0f172a",
+                  border: `1px solid ${mappedId === sp.id ? "#3b82f6" : "#334155"}`,
+                  color: mappedId === sp.id ? "#93c5fd" : "#cbd5e1"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, fontWeight: 500 }, children: sp.name }),
+                  sp.vars.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: [
+                    sp.vars.slice(0, 3).map((v2) => `${v2.key}=${v2.value}`).join(", "),
+                    sp.vars.length > 3 ? " …" : ""
+                  ] })
+                ]
+              },
+              sp.id
+            );
+          })
+        ] })
+      ) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      padding: "12px 20px",
+      borderTop: "1px solid #334155",
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 8
+    }, children: [
+      step > 1 && !preselectedFlowId && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => setStep((s) => s - 1),
+          style: {
+            padding: "6px 16px",
+            borderRadius: 6,
+            border: "1px solid #334155",
+            background: "transparent",
+            color: "#94a3b8",
+            cursor: "pointer",
+            fontSize: 13
+          },
+          children: "上一步"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, style: {
+        padding: "6px 16px",
+        borderRadius: 6,
+        border: "1px solid #334155",
+        background: "transparent",
+        color: "#94a3b8",
+        cursor: "pointer",
+        fontSize: 13
+      }, children: "取消" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: handleNext,
+          disabled: !canProceed,
+          style: {
+            padding: "6px 16px",
+            borderRadius: 6,
+            border: "none",
+            background: canProceed ? "#3b82f6" : "#1e3a5f",
+            color: canProceed ? "#fff" : "#475569",
+            cursor: canProceed ? "pointer" : "not-allowed",
+            fontSize: 13
+          },
+          children: step === 2 && subProfiles.length <= 1 ? "確認" : step === 3 ? "確認" : "下一步"
+        }
+      )
+    ] })
+  ] }) });
+}
 function validateExtraction(allNodes, selectedIds) {
   if (selectedIds.size < 2) {
     return { valid: false, error: "請至少選取 2 個節點" };
@@ -17177,8 +17181,10 @@ function FlowCanvasInner() {
     insertCallFlowBefore,
     appendCallFlowAfter,
     materializeLayout,
+    relayoutAll,
     connectNodes,
-    disconnectNodes
+    disconnectNodes,
+    disconnectNode
   } = useFlowStore();
   const { replayToNode, startBranchRecording } = usePlaywright();
   const [contextMenu, setContextMenu] = reactExports.useState(null);
@@ -17350,6 +17356,7 @@ function FlowCanvasInner() {
       const hasValue = !!(contextNode?.action.value && VALUE_TYPES.has(contextNode.action.type));
       const multi = selectedNodeIds.size >= 2 && selectedNodeIds.has(contextMenu.nodeId);
       const deleteOnlyLabel = multi ? `刪除選取的 ${selectedNodeIds.size} 個節點` : "刪除此節點";
+      const disconnectLabel = multi ? `斷開選取的 ${selectedNodeIds.size} 個節點連綫` : "斷開此節點連綫";
       return /* @__PURE__ */ jsxRuntimeExports.jsx(
         NodeContextMenu,
         {
@@ -17384,13 +17391,18 @@ function FlowCanvasInner() {
             const updated = useFlowStore.getState().currentFlow;
             if (updated) await window.electronAPI.saveFlow(updated);
           },
-          isRoot: contextNode?.parentId === null,
-          isLeaf: (contextNode?.childIds.length ?? 0) === 0,
           onInsertCallFlowBefore: () => setCallFlowModal({ mode: "insertBefore", targetNodeId: contextMenu.nodeId }),
           onAppendCallFlowAfter: () => setCallFlowModal({ mode: "appendAfter", targetNodeId: contextMenu.nodeId }),
           showExtract: multi,
           selectedCount: selectedNodeIds.size,
-          onExtract: handleExtractClick
+          onExtract: handleExtractClick,
+          onDisconnect: async () => {
+            const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId];
+            ids.forEach((id2) => disconnectNode(id2));
+            const updated = useFlowStore.getState().currentFlow;
+            if (updated) await window.electronAPI.saveFlow(updated);
+          },
+          disconnectLabel
         }
       );
     })(),
@@ -17403,6 +17415,7 @@ function FlowCanvasInner() {
         onConfirm: async (callFlowAction) => {
           if (callFlowModal.mode === "insertBefore") {
             insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction);
+            relayoutAll();
           } else {
             appendCallFlowAfter(callFlowModal.targetNodeId, callFlowAction);
           }
@@ -17483,7 +17496,7 @@ function FlowCanvasInner() {
         edgeTypes,
         multiSelectionKeyCode: "Shift",
         selectionOnDrag: false,
-        deleteKeyCode: "Backspace",
+        deleteKeyCode: null,
         fitView: true,
         style: { background: "#0f172a" },
         children: [
@@ -17515,12 +17528,23 @@ function FlowCanvas() {
   return /* @__PURE__ */ jsxRuntimeExports.jsx(ReactFlowProvider, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(FlowCanvasInner, {}) });
 }
 function FlowList() {
-  const { flows, currentFlow, projects, assignFlowToProject, createProject, deleteProject } = useFlowStore();
-  const { refreshFlowList, refreshProjectList, openFlow } = useFlowManager();
+  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameCurrentFlow } = useFlowStore();
+  const { refreshFlowList, refreshProjectList, openFlow, deleteCurrentFlow } = useFlowManager();
   const [contextMenu, setContextMenu] = reactExports.useState(null);
+  const [addSubFlowFlowId, setAddSubFlowFlowId] = reactExports.useState(null);
   const [showNewProjectDialog, setShowNewProjectDialog] = reactExports.useState(false);
   const [newProjectName, setNewProjectName] = reactExports.useState("");
+  const [renameTarget, setRenameTarget] = reactExports.useState(null);
+  const [expandedSubFlows, setExpandedSubFlows] = reactExports.useState(/* @__PURE__ */ new Set());
   const contextMenuRef = reactExports.useRef(null);
+  const toggleSubFlows = (key) => {
+    setExpandedSubFlows((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
   reactExports.useEffect(() => {
     refreshFlowList();
     refreshProjectList();
@@ -17553,6 +17577,31 @@ function FlowList() {
     setNewProjectName("");
     setShowNewProjectDialog(false);
   };
+  const handleRename = async () => {
+    if (!renameTarget) return;
+    const newName = renameTarget.name.trim();
+    if (!newName) return;
+    if (renameTarget.flowId === currentFlow?.id) {
+      await renameCurrentFlow(newName);
+    } else {
+      const flow = await window.electronAPI.loadFlow(renameTarget.flowId);
+      if (flow) {
+        await window.electronAPI.saveFlow({ ...flow, name: newName, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+      }
+    }
+    setRenameTarget(null);
+    await refreshFlowList();
+  };
+  const handleDeleteFlow = async (flowId, flowName) => {
+    if (!window.confirm(`刪除流程「${flowName}」？`)) return;
+    if (flowId === currentFlow?.id) {
+      await deleteCurrentFlow();
+    } else {
+      await window.electronAPI.deleteFlow(flowId);
+      await refreshFlowList();
+    }
+    setContextMenu(null);
+  };
   const knownProjectIds = new Set(projects.map((p2) => p2.id));
   const flowsByProject = /* @__PURE__ */ new Map();
   const unassignedFlows = [];
@@ -17583,20 +17632,43 @@ function FlowList() {
           borderLeft: isActive ? "3px solid #3b82f6" : "3px solid transparent"
         },
         children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "div",
-            {
-              style: {
-                fontSize: 13,
-                color: isActive ? "#93c5fd" : "#cbd5e1",
-                fontWeight: 500,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap"
-              },
-              children: flow.name
-            }
-          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                style: {
+                  fontSize: 13,
+                  color: isActive ? "#93c5fd" : "#cbd5e1",
+                  fontWeight: 500,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  flex: 1,
+                  minWidth: 0
+                },
+                children: flow.name
+              }
+            ),
+            flow.refCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "span",
+              {
+                title: `被 ${flow.refCount} 個流程引用`,
+                style: {
+                  flexShrink: 0,
+                  fontSize: 9,
+                  color: "#a5b4fc",
+                  background: "#312e81",
+                  borderRadius: 4,
+                  padding: "1px 5px",
+                  fontWeight: 600
+                },
+                children: [
+                  "×",
+                  flow.refCount
+                ]
+              }
+            )
+          ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: new Date(flow.updatedAt).toLocaleDateString("zh-TW", {
             month: "short",
             day: "numeric",
@@ -17607,6 +17679,44 @@ function FlowList() {
       },
       flow.id
     );
+  };
+  const renderGroupBody = (groupKey, groupFlows) => {
+    const testCases = groupFlows.filter((f2) => f2.refCount === 0);
+    const subFlows = groupFlows.filter((f2) => f2.refCount > 0).sort((a, b) => b.refCount - a.refCount);
+    const expanded = expandedSubFlows.has(groupKey);
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      testCases.map(renderFlowItem),
+      subFlows.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            onClick: () => toggleSubFlows(groupKey),
+            style: {
+              padding: "5px 14px",
+              fontSize: 10,
+              color: "#818cf8",
+              fontWeight: 600,
+              letterSpacing: "0.04em",
+              background: "#0f172a",
+              borderBottom: "1px solid #1e293b",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              userSelect: "none"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                expanded ? "▾" : "▸",
+                " 子流程"
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#475569" }, children: subFlows.length })
+            ]
+          }
+        ),
+        expanded && subFlows.map(renderFlowItem)
+      ] })
+    ] });
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(
     "div",
@@ -17718,7 +17828,7 @@ function FlowList() {
                   ]
                 }
               ),
-              projFlows.map(renderFlowItem)
+              renderGroupBody(proj.id, projFlows)
             ] }, proj.id);
           }),
           unassignedFlows.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
@@ -17738,7 +17848,7 @@ function FlowList() {
                 children: "未分類"
               }
             ),
-            unassignedFlows.map(renderFlowItem)
+            renderGroupBody("__unassigned__", unassignedFlows)
           ] })
         ] }),
         contextMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs(
@@ -17814,8 +17924,93 @@ function FlowList() {
                   },
                   children: "從專案中移除"
                 }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
+              (() => {
+                const disabled = !currentFlow || contextMenu.flowId === currentFlow.id;
+                return /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "div",
+                  {
+                    onClick: () => {
+                      if (disabled) {
+                        setContextMenu(null);
+                        return;
+                      }
+                      setAddSubFlowFlowId(contextMenu.flowId);
+                      setContextMenu(null);
+                    },
+                    style: {
+                      padding: "7px 12px",
+                      cursor: disabled ? "not-allowed" : "pointer",
+                      color: disabled ? "#475569" : "#a5b4fc",
+                      fontSize: 13
+                    },
+                    onMouseEnter: (e) => {
+                      if (!disabled) e.currentTarget.style.background = "#0f172a";
+                    },
+                    onMouseLeave: (e) => {
+                      e.currentTarget.style.background = "transparent";
+                    },
+                    children: "↳ 加入當前流程中"
+                  }
+                );
+              })(),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "div",
+                {
+                  onClick: () => {
+                    const flow = flows.find((f2) => f2.id === contextMenu.flowId);
+                    setRenameTarget({ flowId: contextMenu.flowId, name: flow?.name ?? "" });
+                    setContextMenu(null);
+                  },
+                  style: { padding: "7px 12px", cursor: "pointer", color: "#cbd5e1", fontSize: 13 },
+                  onMouseEnter: (e) => {
+                    e.currentTarget.style.background = "#0f172a";
+                  },
+                  onMouseLeave: (e) => {
+                    e.currentTarget.style.background = "transparent";
+                  },
+                  children: "✎ 重新命名"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "div",
+                {
+                  onClick: () => {
+                    const flow = flows.find((f2) => f2.id === contextMenu.flowId);
+                    handleDeleteFlow(contextMenu.flowId, flow?.name ?? "");
+                  },
+                  style: { padding: "7px 12px", cursor: "pointer", color: "#cbd5e1", fontSize: 13 },
+                  onMouseEnter: (e) => {
+                    e.currentTarget.style.color = "#f87171";
+                    e.currentTarget.style.background = "#0f172a";
+                  },
+                  onMouseLeave: (e) => {
+                    e.currentTarget.style.color = "#cbd5e1";
+                    e.currentTarget.style.background = "transparent";
+                  },
+                  children: "🗑 刪除流程"
+                }
               )
             ]
+          }
+        ),
+        addSubFlowFlowId && currentFlow && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          CallFlowModal,
+          {
+            mode: "appendAfter",
+            preselectedFlowId: addSubFlowFlowId,
+            onClose: () => setAddSubFlowFlowId(null),
+            onConfirm: async (callFlowAction) => {
+              const xMax = currentFlow.nodes.reduce((mx, n2) => Math.max(mx, n2.position.x), 0);
+              const yMax = currentFlow.nodes.reduce((my, n2) => Math.max(my, n2.position.y), 0);
+              addActionNode(callFlowAction, null);
+              updateNode(callFlowAction.id, { position: { x: xMax + 300, y: yMax } });
+              setAddSubFlowFlowId(null);
+              const updated = useFlowStore.getState().currentFlow;
+              if (updated) await window.electronAPI.saveFlow(updated).catch(console.error);
+            }
           }
         ),
         showNewProjectDialog && /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -17906,6 +18101,99 @@ function FlowList() {
                           fontSize: 12
                         },
                         children: "建立"
+                      }
+                    )
+                  ] })
+                ]
+              }
+            )
+          }
+        ),
+        renameTarget && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 3e3
+            },
+            onClick: (e) => {
+              if (e.target === e.currentTarget) setRenameTarget(null);
+            },
+            children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  background: "#1e293b",
+                  border: "1px solid #334155",
+                  borderRadius: 12,
+                  padding: 24,
+                  minWidth: 300
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: 16, color: "#e2e8f0", marginBottom: 14, margin: "0 0 14px" }, children: "重新命名流程" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      autoFocus: true,
+                      value: renameTarget.name,
+                      onChange: (e) => setRenameTarget({ ...renameTarget, name: e.target.value }),
+                      onKeyDown: (e) => {
+                        if (e.key === "Enter") handleRename();
+                        if (e.key === "Escape") setRenameTarget(null);
+                      },
+                      placeholder: "流程名稱",
+                      style: {
+                        display: "block",
+                        width: "100%",
+                        padding: "8px 10px",
+                        background: "#0f172a",
+                        border: "1px solid #334155",
+                        borderRadius: 6,
+                        color: "#e2e8f0",
+                        fontSize: 13,
+                        outline: "none",
+                        marginBottom: 16,
+                        boxSizing: "border-box"
+                      }
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: () => setRenameTarget(null),
+                        style: {
+                          padding: "6px 16px",
+                          borderRadius: 6,
+                          border: "1px solid #475569",
+                          background: "transparent",
+                          color: "#94a3b8",
+                          cursor: "pointer",
+                          fontSize: 12
+                        },
+                        children: "取消"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: handleRename,
+                        disabled: !renameTarget.name.trim(),
+                        style: {
+                          padding: "6px 16px",
+                          borderRadius: 6,
+                          border: "none",
+                          background: renameTarget.name.trim() ? "#3b82f6" : "#374151",
+                          color: renameTarget.name.trim() ? "#fff" : "#6b7280",
+                          cursor: renameTarget.name.trim() ? "pointer" : "not-allowed",
+                          fontSize: 12
+                        },
+                        children: "儲存"
                       }
                     )
                   ] })
@@ -18026,21 +18314,15 @@ function VariableList() {
   );
 }
 function PropertyPanel() {
-  const { currentFlow, selectedNodeId, updateNode, renameCurrentFlow } = useFlowStore();
-  const { deleteCurrentFlow, refreshFlowList } = useFlowManager();
+  const { currentFlow, selectedNodeId, updateNode } = useFlowStore();
   const selectedNode = currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
-  const [flowName, setFlowName] = reactExports.useState("");
   const [desc, setDesc] = reactExports.useState("");
   const [selector2, setSelector] = reactExports.useState("");
   const [locatorExpr, setLocatorExpr] = reactExports.useState("");
   const [value, setValue] = reactExports.useState("");
-  const [confirmDelete, setConfirmDelete] = reactExports.useState(false);
   const [subFlowProfiles, setSubFlowProfiles] = reactExports.useState([]);
   const [profileMapping, setProfileMapping] = reactExports.useState({});
   const [subFlowLoading, setSubFlowLoading] = reactExports.useState(false);
-  reactExports.useEffect(() => {
-    setFlowName(currentFlow?.name ?? "");
-  }, [currentFlow?.id]);
   reactExports.useEffect(() => {
     if (selectedNode) {
       setDesc(selectedNode.action.description);
@@ -18078,20 +18360,6 @@ function PropertyPanel() {
     });
   }, [selectedNodeId, selectedNode?.action.subFlowId]);
   if (!currentFlow) return null;
-  const saveFlowName = async () => {
-    const trimmed = flowName.trim();
-    if (!trimmed || trimmed === currentFlow.name) return;
-    await renameCurrentFlow(trimmed);
-    await refreshFlowList();
-  };
-  const handleDelete = async () => {
-    if (!confirmDelete) {
-      setConfirmDelete(true);
-      return;
-    }
-    setConfirmDelete(false);
-    await deleteCurrentFlow();
-  };
   const saveNode = () => {
     if (!selectedNode) return;
     const isCallFlow2 = selectedNode.action.type === "callFlow";
@@ -18245,38 +18513,7 @@ function PropertyPanel() {
           ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "flex-end" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: saveNode, style: saveBtnStyle, children: "儲存" }) })
-      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(Field, { label: "流程名稱", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "input",
-            {
-              value: flowName,
-              onChange: (e) => setFlowName(e.target.value),
-              onKeyDown: (e) => e.key === "Enter" && saveFlowName(),
-              style: inputStyle
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: saveFlowName, style: saveBtnStyle, children: "儲存" })
-        ] }) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "flex-end" }, children: confirmDelete ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              onClick: handleDelete,
-              style: { ...deleteBtnStyle, background: "#ef4444" },
-              children: "確認刪除"
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              onClick: () => setConfirmDelete(false),
-              style: { ...deleteBtnStyle, background: "#475569" },
-              children: "取消"
-            }
-          )
-        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleDelete, style: deleteBtnStyle, title: "刪除此流程", children: "刪除流程" }) })
-      ] }) })
+      ] }) : null })
     }
   );
 }
@@ -18302,16 +18539,6 @@ const saveBtnStyle = {
   border: "none",
   background: "#3b82f6",
   color: "#fff",
-  cursor: "pointer",
-  fontSize: 12,
-  fontWeight: 600
-};
-const deleteBtnStyle = {
-  padding: "5px 16px",
-  borderRadius: 5,
-  border: "none",
-  background: "#7f1d1d",
-  color: "#fca5a5",
   cursor: "pointer",
   fontSize: 12,
   fontWeight: 600

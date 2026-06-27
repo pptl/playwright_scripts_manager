@@ -13,7 +13,18 @@ export function FlowList() {
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [renameTarget, setRenameTarget] = useState<{ flowId: string; name: string } | null>(null)
+  // Which groups' "子流程" subsections are expanded (key = projectId or '__unassigned__'); default collapsed
+  const [expandedSubFlows, setExpandedSubFlows] = useState<Set<string>>(new Set())
   const contextMenuRef = useRef<HTMLDivElement>(null)
+
+  const toggleSubFlows = (key: string) => {
+    setExpandedSubFlows((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   useEffect(() => {
     refreshFlowList()
@@ -110,17 +121,37 @@ export function FlowList() {
           borderLeft: isActive ? '3px solid #3b82f6' : '3px solid transparent',
         }}
       >
-        <div
-          style={{
-            fontSize: 13,
-            color: isActive ? '#93c5fd' : '#cbd5e1',
-            fontWeight: 500,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {flow.name}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div
+            style={{
+              fontSize: 13,
+              color: isActive ? '#93c5fd' : '#cbd5e1',
+              fontWeight: 500,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            {flow.name}
+          </div>
+          {flow.refCount > 0 && (
+            <span
+              title={`被 ${flow.refCount} 個流程引用`}
+              style={{
+                flexShrink: 0,
+                fontSize: 9,
+                color: '#a5b4fc',
+                background: '#312e81',
+                borderRadius: 4,
+                padding: '1px 5px',
+                fontWeight: 600,
+              }}
+            >
+              ×{flow.refCount}
+            </span>
+          )}
         </div>
         <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
           {new Date(flow.updatedAt).toLocaleDateString('zh-TW', {
@@ -131,6 +162,45 @@ export function FlowList() {
           })}
         </div>
       </div>
+    )
+  }
+
+  // Render a group's flows: top-level test cases first, then a collapsible "子流程" subsection
+  const renderGroupBody = (groupKey: string, groupFlows: typeof flows) => {
+    const testCases = groupFlows.filter((f) => f.refCount === 0)
+    const subFlows = groupFlows
+      .filter((f) => f.refCount > 0)
+      .sort((a, b) => b.refCount - a.refCount)
+    const expanded = expandedSubFlows.has(groupKey)
+    return (
+      <>
+        {testCases.map(renderFlowItem)}
+        {subFlows.length > 0 && (
+          <>
+            <div
+              onClick={() => toggleSubFlows(groupKey)}
+              style={{
+                padding: '5px 14px',
+                fontSize: 10,
+                color: '#818cf8',
+                fontWeight: 600,
+                letterSpacing: '0.04em',
+                background: '#0f172a',
+                borderBottom: '1px solid #1e293b',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                userSelect: 'none',
+              }}
+            >
+              <span>{expanded ? '▾' : '▸'} 子流程</span>
+              <span style={{ color: '#475569' }}>{subFlows.length}</span>
+            </div>
+            {expanded && subFlows.map(renderFlowItem)}
+          </>
+        )}
+      </>
     )
   }
 
@@ -227,7 +297,7 @@ export function FlowList() {
                   </button>
                 </div>
               </div>
-              {projFlows.map(renderFlowItem)}
+              {renderGroupBody(proj.id, projFlows)}
             </div>
           )
         })}
@@ -251,7 +321,7 @@ export function FlowList() {
                 未分類
               </div>
             )}
-            {unassignedFlows.map(renderFlowItem)}
+            {renderGroupBody('__unassigned__', unassignedFlows)}
           </div>
         )}
       </div>

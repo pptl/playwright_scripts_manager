@@ -1103,23 +1103,30 @@ class FlowStorage {
   static async list() {
     await FlowStorage.ensureDir();
     const files = await fs.promises.readdir(flowsDir());
-    const results = [];
+    const summaries = [];
+    const usage = /* @__PURE__ */ new Map();
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       try {
         const raw = await fs.promises.readFile(path.join(flowsDir(), file), "utf-8");
         const flow = JSON.parse(raw);
-        results.push({
+        summaries.push({
           id: flow.id,
           name: flow.name,
           description: flow.description,
           updatedAt: flow.updatedAt,
           projectId: flow.projectId
         });
+        for (const node of flow.nodes ?? []) {
+          if (isCallFlowAction(node.action)) {
+            const subId = node.action.subFlowId;
+            usage.set(subId, (usage.get(subId) ?? 0) + 1);
+          }
+        }
       } catch {
       }
     }
-    return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return summaries.map((s) => ({ ...s, refCount: usage.get(s.id) ?? 0 })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
   static async delete(flowId) {
     try {

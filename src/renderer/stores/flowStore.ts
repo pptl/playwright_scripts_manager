@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import type { Flow, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
+import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
 import { computeAllRootsLayout } from '../utils/treeLayout'
 
 const NODE_VERTICAL_GAP = 80
@@ -9,7 +9,7 @@ const NODE_START_X = 300
 
 interface FlowStore {
   // State
-  flows: Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt' | 'projectId'>[]
+  flows: FlowListItem[]
   currentFlow: Flow | null
   selectedNodeId: string | null
   replayingNodeId: string | null

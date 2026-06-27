@@ -1,4 +1,4 @@
-import type { Action, ActionType, Flow, FlowNode, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload, Project, LocatorPickPayload } from '../../shared/types'
+import type { Action, ActionType, Flow, FlowNode, FlowListItem, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload, Project, LocatorPickPayload } from '../../shared/types'
 
 export interface ElectronAPI {
   launchBrowser: () => Promise<void>
@@ -9,7 +9,7 @@ export interface ElectronAPI {
   stopReplay: () => Promise<void>
   saveFlow: (flow: Flow) => Promise<void>
   loadFlow: (flowId: string) => Promise<Flow | null>
-  listFlows: () => Promise<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt' | 'projectId'>[]>
+  listFlows: () => Promise<FlowListItem[]>
   deleteFlow: (flowId: string) => Promise<void>
   exportScripts: (flow: Flow, config: ExportConfig) => Promise<string>
   runTests: (flow: Flow, config: ExportConfig) => Promise<void>

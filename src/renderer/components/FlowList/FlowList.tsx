@@ -5,13 +5,14 @@ import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import type { Action } from '@shared/types'
 
 export function FlowList() {
-  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject } = useFlowStore()
-  const { refreshFlowList, refreshProjectList, openFlow } = useFlowManager()
+  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameCurrentFlow } = useFlowStore()
+  const { refreshFlowList, refreshProjectList, openFlow, deleteCurrentFlow } = useFlowManager()
 
   const [contextMenu, setContextMenu] = useState<{ flowId: string; x: number; y: number } | null>(null)
   const [addSubFlowFlowId, setAddSubFlowFlowId] = useState<string | null>(null)
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
+  const [renameTarget, setRenameTarget] = useState<{ flowId: string; name: string } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -48,6 +49,33 @@ export function FlowList() {
     await createProject(name)
     setNewProjectName('')
     setShowNewProjectDialog(false)
+  }
+
+  const handleRename = async () => {
+    if (!renameTarget) return
+    const newName = renameTarget.name.trim()
+    if (!newName) return
+    if (renameTarget.flowId === currentFlow?.id) {
+      await renameCurrentFlow(newName)
+    } else {
+      const flow = await window.electronAPI.loadFlow(renameTarget.flowId)
+      if (flow) {
+        await window.electronAPI.saveFlow({ ...flow, name: newName, updatedAt: new Date().toISOString() })
+      }
+    }
+    setRenameTarget(null)
+    await refreshFlowList()
+  }
+
+  const handleDeleteFlow = async (flowId: string, flowName: string) => {
+    if (!window.confirm(`刪除流程「${flowName}」？`)) return
+    if (flowId === currentFlow?.id) {
+      await deleteCurrentFlow()
+    } else {
+      await window.electronAPI.deleteFlow(flowId)
+      await refreshFlowList()
+    }
+    setContextMenu(null)
   }
 
   // Group flows by projectId; treat flows whose project no longer exists as unassigned
@@ -314,6 +342,31 @@ export function FlowList() {
               </div>
             )
           })()}
+
+          <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+          <div
+            onClick={() => {
+              const flow = flows.find((f) => f.id === contextMenu.flowId)
+              setRenameTarget({ flowId: contextMenu.flowId, name: flow?.name ?? '' })
+              setContextMenu(null)
+            }}
+            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+          >
+            ✎ 重新命名
+          </div>
+          <div
+            onClick={() => {
+              const flow = flows.find((f) => f.id === contextMenu.flowId)
+              handleDeleteFlow(contextMenu.flowId, flow?.name ?? '')
+            }}
+            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#f87171'; (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#cbd5e1'; (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+          >
+            🗑 刪除流程
+          </div>
         </div>
       )}
 
@@ -413,6 +466,90 @@ export function FlowList() {
                 }}
               >
                 建立
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rename flow dialog */}
+      {renameTarget && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 3000,
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setRenameTarget(null) }}
+        >
+          <div
+            style={{
+              background: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: 12,
+              padding: 24,
+              minWidth: 300,
+            }}
+          >
+            <h2 style={{ fontSize: 16, color: '#e2e8f0', marginBottom: 14, margin: '0 0 14px' }}>
+              重新命名流程
+            </h2>
+            <input
+              autoFocus
+              value={renameTarget.name}
+              onChange={(e) => setRenameTarget({ ...renameTarget, name: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleRename()
+                if (e.key === 'Escape') setRenameTarget(null)
+              }}
+              placeholder="流程名稱"
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '8px 10px',
+                background: '#0f172a',
+                border: '1px solid #334155',
+                borderRadius: 6,
+                color: '#e2e8f0',
+                fontSize: 13,
+                outline: 'none',
+                marginBottom: 16,
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setRenameTarget(null)}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  border: '1px solid #475569',
+                  background: 'transparent',
+                  color: '#94a3b8',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                }}
+              >
+                取消
+              </button>
+              <button
+                onClick={handleRename}
+                disabled={!renameTarget.name.trim()}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  border: 'none',
+                  background: renameTarget.name.trim() ? '#3b82f6' : '#374151',
+                  color: renameTarget.name.trim() ? '#fff' : '#6b7280',
+                  cursor: renameTarget.name.trim() ? 'pointer' : 'not-allowed',
+                  fontSize: 12,
+                }}
+              >
+                儲存
               </button>
             </div>
           </div>

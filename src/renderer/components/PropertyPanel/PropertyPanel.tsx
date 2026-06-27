@@ -1,28 +1,20 @@
 import React, { useState, useEffect } from 'react'
 import type { FlowProfile } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
-import { useFlowManager } from '../../hooks/useFlowStore'
 
 export function PropertyPanel() {
-  const { currentFlow, selectedNodeId, updateNode, renameCurrentFlow } = useFlowStore()
-  const { deleteCurrentFlow, refreshFlowList } = useFlowManager()
+  const { currentFlow, selectedNodeId, updateNode } = useFlowStore()
   const selectedNode = currentFlow?.nodes.find((n) => n.id === selectedNodeId)
 
-  const [flowName, setFlowName] = useState('')
   const [desc, setDesc] = useState('')
   const [selector, setSelector] = useState('')
   const [locatorExpr, setLocatorExpr] = useState('')
   const [value, setValue] = useState('')
-  const [confirmDelete, setConfirmDelete] = useState(false)
 
   // callFlow-specific state
   const [subFlowProfiles, setSubFlowProfiles] = useState<FlowProfile[]>([])
   const [profileMapping, setProfileMapping] = useState<Record<string, string | null>>({})
   const [subFlowLoading, setSubFlowLoading] = useState(false)
-
-  useEffect(() => {
-    setFlowName(currentFlow?.name ?? '')
-  }, [currentFlow?.id])
 
   useEffect(() => {
     if (selectedNode) {
@@ -67,22 +59,6 @@ export function PropertyPanel() {
   }, [selectedNodeId, selectedNode?.action.subFlowId])
 
   if (!currentFlow) return null
-
-  const saveFlowName = async () => {
-    const trimmed = flowName.trim()
-    if (!trimmed || trimmed === currentFlow.name) return
-    await renameCurrentFlow(trimmed)
-    await refreshFlowList()
-  }
-
-  const handleDelete = async () => {
-    if (!confirmDelete) {
-      setConfirmDelete(true)
-      return
-    }
-    setConfirmDelete(false)
-    await deleteCurrentFlow()
-  }
 
   const saveNode = () => {
     if (!selectedNode) return
@@ -251,48 +227,7 @@ export function PropertyPanel() {
               </button>
             </div>
           </>
-        ) : (
-          <>
-            {/* Flow name */}
-            <Field label="流程名稱">
-              <div style={{ display: 'flex', gap: 6 }}>
-                <input
-                  value={flowName}
-                  onChange={(e) => setFlowName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && saveFlowName()}
-                  style={inputStyle}
-                />
-                <button onClick={saveFlowName} style={saveBtnStyle}>
-                  儲存
-                </button>
-              </div>
-            </Field>
-
-            {/* Delete flow */}
-            <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-              {confirmDelete ? (
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button
-                    onClick={handleDelete}
-                    style={{ ...deleteBtnStyle, background: '#ef4444' }}
-                  >
-                    確認刪除
-                  </button>
-                  <button
-                    onClick={() => setConfirmDelete(false)}
-                    style={{ ...deleteBtnStyle, background: '#475569' }}
-                  >
-                    取消
-                  </button>
-                </div>
-              ) : (
-                <button onClick={handleDelete} style={deleteBtnStyle} title="刪除此流程">
-                  刪除流程
-                </button>
-              )}
-            </div>
-          </>
-        )}
+        ) : null}
       </div>
     </div>
   )
@@ -326,17 +261,6 @@ const saveBtnStyle: React.CSSProperties = {
   border: 'none',
   background: '#3b82f6',
   color: '#fff',
-  cursor: 'pointer',
-  fontSize: 12,
-  fontWeight: 600,
-}
-
-const deleteBtnStyle: React.CSSProperties = {
-  padding: '5px 16px',
-  borderRadius: 5,
-  border: 'none',
-  background: '#7f1d1d',
-  color: '#fca5a5',
   cursor: 'pointer',
   fontSize: 12,
   fontWeight: 600,

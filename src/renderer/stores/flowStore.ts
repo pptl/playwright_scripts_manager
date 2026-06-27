@@ -339,9 +339,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     if (!flow) throw new Error('No active flow')
     const node = flow.nodes.find((n) => n.id === nodeId)
     if (!node) throw new Error(`Node "${nodeId}" not found`)
-    if (node.parentId === null) throw new Error('Cannot insert before root node')
 
-    const parent = flow.nodes.find((n) => n.id === node.parentId)!
+    // node.parentId is null when node is the root; then the callFlow node becomes the new root.
+    const parent = node.parentId ? flow.nodes.find((n) => n.id === node.parentId) : null
     const callFlowNode: FlowNode = {
       id: callFlowAction.id,
       action: callFlowAction,
@@ -352,7 +352,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
 
     const updatedNodes = flow.nodes.map((n) => {
-      if (n.id === node.parentId) {
+      if (parent && n.id === parent.id) {
         return {
           ...parent,
           childIds: parent.childIds.map((cid) => (cid === nodeId ? callFlowNode.id : cid)),
@@ -365,7 +365,12 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     })
     updatedNodes.push(callFlowNode)
 
-    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
+    const updatedFlow: Flow = {
+      ...flow,
+      nodes: updatedNodes,
+      rootNodeId: node.parentId === null ? callFlowNode.id : flow.rootNodeId,
+      updatedAt: new Date().toISOString(),
+    }
     set({ currentFlow: updatedFlow })
     return callFlowNode
   },
@@ -375,12 +380,15 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     if (!flow) throw new Error('No active flow')
     const node = flow.nodes.find((n) => n.id === nodeId)
     if (!node) throw new Error(`Node "${nodeId}" not found`)
-    if (node.childIds.length > 0) throw new Error('Cannot append after a node that already has children')
 
     const callFlowNode: FlowNode = {
       id: callFlowAction.id,
       action: callFlowAction,
-      position: { x: node.position.x, y: node.position.y + NODE_VERTICAL_GAP },
+      // Offset by existing children so the new branch doesn't overlap them
+      position: {
+        x: node.position.x + node.childIds.length * 220,
+        y: node.position.y + NODE_VERTICAL_GAP,
+      },
       parentId: nodeId,
       childIds: [],
     }

@@ -45,6 +45,7 @@ function FlowCanvasInner() {
     insertCallFlowBefore,
     appendCallFlowAfter,
     materializeLayout,
+    relayoutAll,
     connectNodes,
     disconnectNodes,
     disconnectNode,
@@ -295,8 +296,6 @@ function FlowCanvasInner() {
               const updated = useFlowStore.getState().currentFlow
               if (updated) await window.electronAPI.saveFlow(updated)
             }}
-            isRoot={contextNode?.parentId === null}
-            isLeaf={(contextNode?.childIds.length ?? 0) === 0}
             onInsertCallFlowBefore={() => setCallFlowModal({ mode: 'insertBefore', targetNodeId: contextMenu.nodeId })}
             onAppendCallFlowAfter={() => setCallFlowModal({ mode: 'appendAfter', targetNodeId: contextMenu.nodeId })}
             showExtract={multi}
@@ -320,6 +319,9 @@ function FlowCanvasInner() {
           onConfirm={async (callFlowAction: Action) => {
             if (callFlowModal.mode === 'insertBefore') {
               insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction)
+              // Inserting (esp. before the root) shifts the tree; re-layout so the
+              // new node and its subtree don't overlap other flows on the canvas.
+              relayoutAll()
             } else {
               appendCallFlowAfter(callFlowModal.targetNodeId, callFlowAction)
             }

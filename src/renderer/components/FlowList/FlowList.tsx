@@ -1,12 +1,15 @@
 import React, { useEffect, useState, useRef } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 import { useFlowManager } from '../../hooks/useFlowStore'
+import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
+import type { Action } from '@shared/types'
 
 export function FlowList() {
-  const { flows, currentFlow, projects, assignFlowToProject, createProject, deleteProject } = useFlowStore()
+  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject } = useFlowStore()
   const { refreshFlowList, refreshProjectList, openFlow } = useFlowManager()
 
   const [contextMenu, setContextMenu] = useState<{ flowId: string; x: number; y: number } | null>(null)
+  const [addSubFlowFlowId, setAddSubFlowFlowId] = useState<string | null>(null)
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -286,7 +289,50 @@ export function FlowList() {
               從專案中移除
             </div>
           )}
+          <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+          {(() => {
+            const disabled = !currentFlow || contextMenu.flowId === currentFlow.id
+            return (
+              <div
+                onClick={() => {
+                  if (disabled) { setContextMenu(null); return }
+                  setAddSubFlowFlowId(contextMenu.flowId)
+                  setContextMenu(null)
+                }}
+                style={{
+                  padding: '7px 12px',
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                  color: disabled ? '#475569' : '#a5b4fc',
+                  fontSize: 13,
+                }}
+                onMouseEnter={(e) => {
+                  if (!disabled) (e.currentTarget as HTMLDivElement).style.background = '#0f172a'
+                }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+              >
+                ↳ 加入當前流程中
+              </div>
+            )
+          })()}
         </div>
+      )}
+
+      {/* Add sub-flow modal */}
+      {addSubFlowFlowId && currentFlow && (
+        <CallFlowModal
+          mode="appendAfter"
+          preselectedFlowId={addSubFlowFlowId}
+          onClose={() => setAddSubFlowFlowId(null)}
+          onConfirm={async (callFlowAction: Action) => {
+            const xMax = currentFlow.nodes.reduce((mx, n) => Math.max(mx, n.position.x), 0)
+            const yMax = currentFlow.nodes.reduce((my, n) => Math.max(my, n.position.y), 0)
+            addActionNode(callFlowAction, null)
+            updateNode(callFlowAction.id, { position: { x: xMax + 300, y: yMax } })
+            setAddSubFlowFlowId(null)
+            const updated = useFlowStore.getState().currentFlow
+            if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
+          }}
+        />
       )}
 
       {/* New project dialog */}

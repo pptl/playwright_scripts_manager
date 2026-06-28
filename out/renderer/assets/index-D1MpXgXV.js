@@ -7196,25 +7196,28 @@ const NODE_WIDTH = 200;
 const NODE_HEIGHT = 70;
 const H_MARGIN = 25;
 const V_GAP = 30;
-function computeTreeLayout(nodes, rootNodeId) {
+const defaultSizeOf = () => ({ width: NODE_WIDTH, height: NODE_HEIGHT });
+function computeTreeLayout(nodes, rootNodeId, sizeOf = defaultSizeOf) {
   const nodeMap = new Map(nodes.map((n2) => [n2.id, n2]));
   const positions = /* @__PURE__ */ new Map();
   function subtreeWidth(nodeId) {
     const node = nodeMap.get(nodeId);
-    if (!node || node.childIds.length === 0) return NODE_WIDTH;
+    const w2 = sizeOf(nodeId).width;
+    if (!node || node.childIds.length === 0) return w2;
     const childWidths = node.childIds.map(subtreeWidth);
     const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
-    return Math.max(NODE_WIDTH, total);
+    return Math.max(w2, total);
   }
   function place(nodeId, centerX, y2) {
-    positions.set(nodeId, { x: centerX - NODE_WIDTH / 2, y: y2 });
+    const { width, height } = sizeOf(nodeId);
+    positions.set(nodeId, { x: centerX - width / 2, y: y2 });
     const node = nodeMap.get(nodeId);
     if (!node || node.childIds.length === 0) return;
     const childWidths = node.childIds.map(subtreeWidth);
     const totalW = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
     let x2 = centerX - totalW / 2;
     for (let i = 0; i < node.childIds.length; i++) {
-      place(node.childIds[i], x2 + childWidths[i] / 2, y2 + NODE_HEIGHT + V_GAP);
+      place(node.childIds[i], x2 + childWidths[i] / 2, y2 + height + V_GAP);
       x2 += childWidths[i] + H_MARGIN;
     }
   }
@@ -7225,26 +7228,165 @@ function computeTreeLayout(nodes, rootNodeId) {
   return positions;
 }
 const TREE_H_GAP = 80;
-function computeAllRootsLayout(nodes) {
+function computeAllRootsLayout(nodes, sizeOf = defaultSizeOf) {
   const result = /* @__PURE__ */ new Map();
   const roots = nodes.filter((n2) => n2.parentId === null).sort((a, b) => a.position.x - b.position.x);
   let xCursor = 0;
   const placeTree = (rootId) => {
-    const treePos = computeTreeLayout(nodes, rootId);
+    const treePos = computeTreeLayout(nodes, rootId, sizeOf);
     if (treePos.size === 0) return;
     let minX = Infinity;
-    let maxX = -Infinity;
-    treePos.forEach((p2) => {
+    let maxRight = -Infinity;
+    treePos.forEach((p2, id2) => {
       if (p2.x < minX) minX = p2.x;
-      if (p2.x > maxX) maxX = p2.x;
+      const right = p2.x + sizeOf(id2).width;
+      if (right > maxRight) maxRight = right;
     });
     const shift = xCursor - minX;
     treePos.forEach((p2, id2) => result.set(id2, { x: p2.x + shift, y: p2.y }));
-    xCursor += maxX - minX + NODE_WIDTH + TREE_H_GAP;
+    xCursor += maxRight - minX + TREE_H_GAP;
   };
   for (const root2 of roots) placeTree(root2.id);
   for (const n2 of nodes) {
     if (!result.has(n2.id)) placeTree(n2.id);
+  }
+  return result;
+}
+const GROUP_BOX_HEADER = 26;
+const GROUP_PAD_X = 18;
+const GROUP_HEADER_GAP = 10;
+const GROUP_PAD_BOTTOM = 18;
+function getGroupBoundary(nodes, groupId) {
+  const members = nodes.filter((n2) => n2.groupId === groupId);
+  if (members.length === 0) return null;
+  const memberIds = new Set(members.map((m2) => m2.id));
+  const entry = members.find((m2) => m2.parentId === null || !memberIds.has(m2.parentId));
+  const exit = members.find((m2) => m2.childIds.every((c) => !memberIds.has(c)));
+  if (!entry || !exit) return null;
+  return { memberIds, entryId: entry.id, exitId: exit.id };
+}
+function layoutMembers(members, boundary) {
+  const memberNodes = members.map((m2) => ({
+    ...m2,
+    parentId: m2.id === boundary.entryId ? null : m2.parentId,
+    childIds: m2.childIds.filter((c) => boundary.memberIds.has(c))
+  }));
+  const positions = computeTreeLayout(memberNodes, boundary.entryId);
+  if (positions.size === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  positions.forEach((p2) => {
+    minX = Math.min(minX, p2.x);
+    minY = Math.min(minY, p2.y);
+    maxX = Math.max(maxX, p2.x + NODE_WIDTH);
+    maxY = Math.max(maxY, p2.y + NODE_HEIGHT);
+  });
+  return { positions, minX, minY, width: maxX - minX, height: maxY - minY };
+}
+function groupBoxRect(members) {
+  if (members.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const m2 of members) {
+    minX = Math.min(minX, m2.position.x);
+    minY = Math.min(minY, m2.position.y);
+    maxX = Math.max(maxX, m2.position.x + NODE_WIDTH);
+    maxY = Math.max(maxY, m2.position.y + NODE_HEIGHT);
+  }
+  const x2 = minX - GROUP_PAD_X;
+  const y2 = minY - GROUP_BOX_HEADER - GROUP_HEADER_GAP;
+  return {
+    x: x2,
+    y: y2,
+    width: maxX + GROUP_PAD_X - x2,
+    height: maxY + GROUP_PAD_BOTTOM - y2
+  };
+}
+function computeGroupAwareLayout(nodes, groups) {
+  if (groups.length === 0) return computeAllRootsLayout(nodes);
+  const groupById = new Map(groups.map((g) => [g.id, g]));
+  const nodeById = new Map(nodes.map((n2) => [n2.id, n2]));
+  const groupOf = (n2) => n2 && n2.groupId && groupById.has(n2.groupId) ? groupById.get(n2.groupId) : void 0;
+  const reprOf = (id2) => {
+    if (id2 == null) return null;
+    const g = groupOf(nodeById.get(id2));
+    return g ? `group:${g.id}` : id2;
+  };
+  const boundaries = /* @__PURE__ */ new Map();
+  const internals = /* @__PURE__ */ new Map();
+  for (const g of groups) {
+    const b = getGroupBoundary(nodes, g.id);
+    if (!b) continue;
+    boundaries.set(g.id, b);
+    const members = nodes.filter((n2) => n2.groupId === g.id);
+    const laid = layoutMembers(members, b);
+    if (laid) internals.set(g.id, laid);
+  }
+  const view = [];
+  for (const g of groups) {
+    const b = boundaries.get(g.id);
+    if (!b) continue;
+    const entry = nodeById.get(b.entryId);
+    const exit = nodeById.get(b.exitId);
+    const childIds = Array.from(
+      new Set(exit.childIds.filter((c) => !b.memberIds.has(c)).map((c) => reprOf(c)).filter(Boolean))
+    );
+    view.push({
+      id: `group:${g.id}`,
+      action: { type: "callFlow" },
+      position: entry.position,
+      parentId: reprOf(entry.parentId),
+      childIds,
+      branchLabel: entry.branchLabel
+    });
+  }
+  for (const n2 of nodes) {
+    if (groupOf(n2)) continue;
+    view.push({
+      ...n2,
+      parentId: reprOf(n2.parentId),
+      childIds: Array.from(new Set(n2.childIds.map((c) => reprOf(c)).filter(Boolean)))
+    });
+  }
+  const sizeOf = (id2) => {
+    if (id2.startsWith("group:")) {
+      const gid = id2.slice("group:".length);
+      const g = groupById.get(gid);
+      const f2 = internals.get(gid);
+      if (g && !g.collapsed && f2) {
+        return {
+          width: f2.width + 2 * GROUP_PAD_X,
+          height: GROUP_BOX_HEADER + GROUP_HEADER_GAP + f2.height + GROUP_PAD_BOTTOM
+        };
+      }
+    }
+    return { width: NODE_WIDTH, height: NODE_HEIGHT };
+  };
+  const viewPos = computeAllRootsLayout(view, sizeOf);
+  const result = /* @__PURE__ */ new Map();
+  for (const n2 of nodes) {
+    if (groupOf(n2)) continue;
+    const p2 = viewPos.get(n2.id);
+    if (p2) result.set(n2.id, p2);
+  }
+  for (const g of groups) {
+    const b = boundaries.get(g.id);
+    if (!b) continue;
+    const gp = viewPos.get(`group:${g.id}`);
+    if (!gp) continue;
+    if (g.collapsed) {
+      result.set(b.entryId, gp);
+      continue;
+    }
+    const f2 = internals.get(g.id);
+    if (!f2) continue;
+    const dx = gp.x + GROUP_PAD_X - f2.minX;
+    const dy = gp.y + GROUP_BOX_HEADER + GROUP_HEADER_GAP - f2.minY;
+    f2.positions.forEach((p2, id2) => result.set(id2, { x: p2.x + dx, y: p2.y + dy }));
   }
   return result;
 }
@@ -7535,7 +7677,7 @@ const useFlowStore = create$1((set2, get2) => ({
   relayoutAll: () => {
     const flow = get2().currentFlow;
     if (!flow) return;
-    const positions = computeAllRootsLayout(flow.nodes);
+    const positions = computeGroupAwareLayout(flow.nodes, flow.groups ?? []);
     set2({
       currentFlow: {
         ...flow,
@@ -7588,6 +7730,49 @@ const useFlowStore = create$1((set2, get2) => ({
       return n2;
     });
     set2({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } });
+  },
+  createGroup: (memberIds, name) => {
+    const flow = get2().currentFlow;
+    if (!flow || memberIds.length === 0) return null;
+    const groupId = v4();
+    const idSet = new Set(memberIds);
+    const taggedNodes = flow.nodes.map((n2) => idSet.has(n2.id) ? { ...n2, groupId } : n2);
+    const groups = [...flow.groups ?? [], { id: groupId, name, collapsed: true }];
+    const positions = computeGroupAwareLayout(taggedNodes, groups);
+    const nodes = taggedNodes.map((n2) => {
+      const pos = positions.get(n2.id);
+      return pos ? { ...n2, position: pos } : n2;
+    });
+    set2({
+      currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString() },
+      selectedNodeId: null
+    });
+    return groupId;
+  },
+  toggleGroupCollapsed: (groupId) => {
+    const flow = get2().currentFlow;
+    if (!flow) return;
+    const groups = (flow.groups ?? []).map((g) => g.id === groupId ? { ...g, collapsed: !g.collapsed } : g);
+    const positions = computeGroupAwareLayout(flow.nodes, groups);
+    const nodes = flow.nodes.map((n2) => {
+      const pos = positions.get(n2.id);
+      return pos ? { ...n2, position: pos } : n2;
+    });
+    set2({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } });
+  },
+  ungroupGroup: (groupId) => {
+    const flow = get2().currentFlow;
+    if (!flow) return;
+    const clearedNodes = flow.nodes.map(
+      (n2) => n2.groupId === groupId ? { ...n2, groupId: void 0 } : n2
+    );
+    const groups = (flow.groups ?? []).filter((g) => g.id !== groupId);
+    const positions = computeGroupAwareLayout(clearedNodes, groups);
+    const nodes = clearedNodes.map((n2) => {
+      const pos = positions.get(n2.id);
+      return pos ? { ...n2, position: pos } : n2;
+    });
+    set2({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } });
   },
   setReplayingNode: (nodeId) => set2({ replayingNodeId: nodeId }),
   setReplayStatus: (nodeId, status) => set2((state) => ({ replayStatus: { ...state.replayStatus, [nodeId]: status } })),
@@ -12997,8 +13182,8 @@ const OutputNode = ({ data, isConnectable, targetPosition = Position.Top }) => R
 );
 OutputNode.displayName = "OutputNode";
 var OutputNode$1 = reactExports.memo(OutputNode);
-const GroupNode = () => null;
-GroupNode.displayName = "GroupNode";
+const GroupNode$1 = () => null;
+GroupNode$1.displayName = "GroupNode";
 const selector$e = (s) => ({
   selectedNodes: s.getNodes().filter((n2) => n2.selected),
   selectedEdges: s.edges.filter((e) => e.selected).map((e) => ({ ...e }))
@@ -14797,7 +14982,7 @@ function createNodeTypes(nodeTypes2) {
     input: wrapNode(nodeTypes2.input || InputNode$1),
     default: wrapNode(nodeTypes2.default || DefaultNode$1),
     output: wrapNode(nodeTypes2.output || OutputNode$1),
-    group: wrapNode(nodeTypes2.group || GroupNode)
+    group: wrapNode(nodeTypes2.group || GroupNode$1)
   };
   const wrappedTypes = {};
   const specialTypes = Object.keys(nodeTypes2).filter((k2) => !["input", "default", "output", "group"].includes(k2)).reduce((res, key) => {
@@ -15703,7 +15888,7 @@ const defaultNodeTypes = {
   input: InputNode$1,
   default: DefaultNode$1,
   output: OutputNode$1,
-  group: GroupNode
+  group: GroupNode$1
 };
 const defaultEdgeTypes = {
   default: BezierEdge,
@@ -16288,6 +16473,7 @@ function NodeContextMenu({
   showExtract,
   selectedCount,
   onExtract,
+  onGroup,
   onDisconnect,
   disconnectLabel
 }) {
@@ -16357,6 +16543,18 @@ function NodeContextMenu({
             ),
             showExtract && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                MenuItem,
+                {
+                  icon: "⊞",
+                  label: `將選取的 ${selectedCount} 個節點組成群組`,
+                  disabled,
+                  onClick: () => {
+                    onClose();
+                    onGroup();
+                  }
+                }
+              ),
               /* @__PURE__ */ jsxRuntimeExports.jsx(
                 MenuItem,
                 {
@@ -16688,6 +16886,248 @@ function ExtractSubflowModal({
     }
   );
 }
+function GroupNameModal({ selectedCount, onConfirm, onClose }) {
+  const [name, setName] = reactExports.useState("群組");
+  const confirm = () => {
+    onConfirm(name.trim() || "群組");
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 3e3
+      },
+      onClick: (e) => {
+        if (e.target === e.currentTarget) onClose();
+      },
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "#1e293b", border: "1px solid #334155", borderRadius: 12, padding: 24, minWidth: 320 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: 16, color: "#e2e8f0", margin: "0 0 6px" }, children: "組成群組" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, color: "#64748b", marginBottom: 14 }, children: [
+          "將選取的 ",
+          selectedCount,
+          " 個節點折疊為一個群組"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "input",
+          {
+            autoFocus: true,
+            value: name,
+            onChange: (e) => setName(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "Enter") confirm();
+              if (e.key === "Escape") onClose();
+            },
+            placeholder: "群組名稱",
+            style: {
+              display: "block",
+              width: "100%",
+              padding: "8px 10px",
+              background: "#0f172a",
+              border: "1px solid #334155",
+              borderRadius: 6,
+              color: "#e2e8f0",
+              fontSize: 13,
+              outline: "none",
+              marginBottom: 16,
+              boxSizing: "border-box"
+            }
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: onClose,
+              style: {
+                padding: "6px 16px",
+                borderRadius: 6,
+                border: "1px solid #475569",
+                background: "transparent",
+                color: "#94a3b8",
+                cursor: "pointer",
+                fontSize: 12
+              },
+              children: "取消"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: confirm,
+              style: {
+                padding: "6px 16px",
+                borderRadius: 6,
+                border: "none",
+                background: "#6366f1",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 12
+              },
+              children: "建立"
+            }
+          )
+        ] })
+      ] })
+    }
+  );
+}
+const ACCENT$1 = "#818cf8";
+function GroupNodeComponent({ data }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      onClick: () => data.onToggle(data.groupId),
+      title: "點擊展開群組",
+      style: {
+        background: "#1e1b4b",
+        border: `2px solid ${ACCENT$1}`,
+        borderRadius: 8,
+        padding: "8px 12px",
+        minWidth: 180,
+        maxWidth: 220,
+        cursor: "pointer",
+        position: "relative"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Handle$1, { type: "target", position: Position.Top, style: { background: "#555", width: 8, height: 8 } }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 15 }, children: "⊞" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "span",
+            {
+              style: {
+                fontSize: 11,
+                color: ACCENT$1,
+                fontWeight: 700,
+                textTransform: "uppercase",
+                letterSpacing: "0.05em"
+              },
+              children: "群組"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "#6366f1", marginLeft: "auto" }, children: [
+            data.count,
+            " 個節點"
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "span",
+            {
+              role: "button",
+              title: "解散群組",
+              onClick: (e) => {
+                e.stopPropagation();
+                data.onUngroup(data.groupId);
+              },
+              style: { fontSize: 11, color: "#475569", cursor: "pointer", padding: "0 2px" },
+              children: "✕"
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              fontSize: 12,
+              color: "#cbd5e1",
+              marginTop: 4,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap"
+            },
+            title: data.name,
+            children: data.name
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Handle$1, { type: "source", position: Position.Bottom, style: { background: "#555", width: 8, height: 8 } })
+      ]
+    }
+  );
+}
+const GroupNode = reactExports.memo(GroupNodeComponent);
+const ACCENT = "#818cf8";
+function GroupBoxComponent({ data }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        width: data.width,
+        height: data.height,
+        background: "rgba(129, 140, 248, 0.06)",
+        border: `1.5px dashed ${ACCENT}`,
+        borderRadius: 12,
+        position: "relative",
+        pointerEvents: "none"
+      },
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: GROUP_BOX_HEADER,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "0 10px",
+            background: "rgba(49, 46, 129, 0.55)",
+            borderTopLeftRadius: 11,
+            borderTopRightRadius: 11,
+            pointerEvents: "all"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12 }, children: "⊟" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                style: {
+                  fontSize: 11,
+                  color: "#c7d2fe",
+                  fontWeight: 600,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  flex: 1,
+                  minWidth: 0
+                },
+                title: data.name,
+                children: data.name
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                role: "button",
+                title: "收合群組",
+                onClick: () => data.onToggle(data.groupId),
+                style: { fontSize: 10, color: ACCENT, cursor: "pointer", fontWeight: 600 },
+                children: "收合"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                role: "button",
+                title: "解散群組",
+                onClick: () => data.onUngroup(data.groupId),
+                style: { fontSize: 11, color: "#64748b", cursor: "pointer" },
+                children: "✕"
+              }
+            )
+          ]
+        }
+      )
+    }
+  );
+}
+const GroupBox = reactExports.memo(GroupBoxComponent);
 function getBreadcrumb(node, nodeMap) {
   const parts = [];
   let cur = node;
@@ -17165,7 +17605,7 @@ function extractSubflow(parentFlow, selectedIds, entryNodeId, exitNodeId, subFlo
   };
   return { newSubFlow, updatedParentFlow };
 }
-const nodeTypes = { actionNode: ActionNode };
+const nodeTypes = { actionNode: ActionNode, groupNode: GroupNode, groupBox: GroupBox };
 const edgeTypes = { branchEdge: BranchEdge };
 function FlowCanvasInner() {
   const {
@@ -17184,7 +17624,10 @@ function FlowCanvasInner() {
     relayoutAll,
     connectNodes,
     disconnectNodes,
-    disconnectNode
+    disconnectNode,
+    createGroup,
+    toggleGroupCollapsed,
+    ungroupGroup
   } = useFlowStore();
   const { replayToNode, startBranchRecording } = usePlaywright();
   const [contextMenu, setContextMenu] = reactExports.useState(null);
@@ -17192,31 +17635,95 @@ function FlowCanvasInner() {
   const [selectedNodeIds, setSelectedNodeIds] = reactExports.useState(/* @__PURE__ */ new Set());
   const [extractModal, setExtractModal] = reactExports.useState(false);
   const [extractionInfo, setExtractionInfo] = reactExports.useState(null);
+  const [groupModal, setGroupModal] = reactExports.useState(false);
   const saveTimerRef = reactExports.useRef(null);
   const dragPosRef = reactExports.useRef(/* @__PURE__ */ new Map());
+  const onToggleGroup = reactExports.useCallback(
+    (groupId) => {
+      toggleGroupCollapsed(groupId);
+      const updated = useFlowStore.getState().currentFlow;
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
+    },
+    [toggleGroupCollapsed]
+  );
+  const onUngroup = reactExports.useCallback(
+    (groupId) => {
+      ungroupGroup(groupId);
+      const updated = useFlowStore.getState().currentFlow;
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
+    },
+    [ungroupGroup]
+  );
   const rfNodes = reactExports.useMemo(() => {
     if (!currentFlow) return [];
-    return currentFlow.nodes.map((fn) => ({
-      id: fn.id,
-      type: "actionNode",
-      position: fn.position,
-      data: { flowNode: fn },
-      selected: selectedNodeIds.size <= 1 ? fn.id === selectedNodeId : selectedNodeIds.has(fn.id)
-    }));
-  }, [currentFlow, selectedNodeId, selectedNodeIds]);
+    const groups = currentFlow.groups ?? [];
+    const groupById = new Map(groups.map((g) => [g.id, g]));
+    const nodeById = new Map(currentFlow.nodes.map((n2) => [n2.id, n2]));
+    const out = [];
+    for (const g of groups) {
+      if (g.collapsed) continue;
+      const members = currentFlow.nodes.filter((n2) => n2.groupId === g.id);
+      const rect = groupBoxRect(members);
+      if (!rect) continue;
+      out.push({
+        id: `groupbox:${g.id}`,
+        type: "groupBox",
+        position: { x: rect.x, y: rect.y },
+        data: { groupId: g.id, name: g.name, width: rect.width, height: rect.height, onToggle: onToggleGroup, onUngroup },
+        draggable: false,
+        selectable: false,
+        zIndex: 0
+      });
+    }
+    for (const fn of currentFlow.nodes) {
+      const g = fn.groupId ? groupById.get(fn.groupId) : void 0;
+      if (g && g.collapsed) continue;
+      out.push({
+        id: fn.id,
+        type: "actionNode",
+        position: fn.position,
+        data: { flowNode: fn },
+        selected: selectedNodeIds.size <= 1 ? fn.id === selectedNodeId : selectedNodeIds.has(fn.id),
+        zIndex: g ? 1 : void 0
+      });
+    }
+    for (const g of groups) {
+      if (!g.collapsed) continue;
+      const b = getGroupBoundary(currentFlow.nodes, g.id);
+      if (!b) continue;
+      const entry = nodeById.get(b.entryId);
+      out.push({
+        id: `group:${g.id}`,
+        type: "groupNode",
+        position: entry.position,
+        data: { groupId: g.id, name: g.name, count: b.memberIds.size, onToggle: onToggleGroup, onUngroup },
+        zIndex: 1
+      });
+    }
+    return out;
+  }, [currentFlow, selectedNodeId, selectedNodeIds, onToggleGroup, onUngroup]);
   const rfEdges = reactExports.useMemo(() => {
     if (!currentFlow) return [];
+    const groups = currentFlow.groups ?? [];
+    const collapsedIds = new Set(groups.filter((g) => g.collapsed).map((g) => g.id));
+    const nodeById = new Map(currentFlow.nodes.map((n2) => [n2.id, n2]));
+    const repr = (id2) => {
+      const n2 = nodeById.get(id2);
+      if (n2 && n2.groupId && collapsedIds.has(n2.groupId)) return `group:${n2.groupId}`;
+      return id2;
+    };
     const edges2 = [];
+    const seen = /* @__PURE__ */ new Set();
     for (const node of currentFlow.nodes) {
       for (const childId of node.childIds) {
-        const child = currentFlow.nodes.find((n2) => n2.id === childId);
-        edges2.push({
-          id: `${node.id}->${childId}`,
-          source: node.id,
-          target: childId,
-          type: "branchEdge",
-          data: { label: child?.branchLabel }
-        });
+        const s = repr(node.id);
+        const t2 = repr(childId);
+        if (s === t2) continue;
+        const id2 = `${s}->${t2}`;
+        if (seen.has(id2)) continue;
+        seen.add(id2);
+        const child = nodeById.get(childId);
+        edges2.push({ id: id2, source: s, target: t2, type: "branchEdge", data: { label: child?.branchLabel } });
       }
     }
     return edges2;
@@ -17238,6 +17745,7 @@ function FlowCanvasInner() {
   }, [rfEdges, setEdges]);
   const onNodeClick = reactExports.useCallback(
     (_, node) => {
+      if (node.id.startsWith("group:") || node.id.startsWith("groupbox:")) return;
       if (selectedNodeIds.size <= 1) {
         selectNode(node.id);
       }
@@ -17259,7 +17767,18 @@ function FlowCanvasInner() {
         dragStops.forEach((c) => {
           const pos = dragPosRef.current.get(c.id);
           if (pos) {
-            updateNode(c.id, { position: pos });
+            let targetId = c.id;
+            if (c.id.startsWith("group:")) {
+              const gid = c.id.slice("group:".length);
+              const cf2 = useFlowStore.getState().currentFlow;
+              const entryId = cf2 ? getGroupBoundary(cf2.nodes, gid)?.entryId : void 0;
+              if (!entryId) {
+                dragPosRef.current.delete(c.id);
+                return;
+              }
+              targetId = entryId;
+            }
+            updateNode(targetId, { position: pos });
             dragPosRef.current.delete(c.id);
           }
         });
@@ -17273,7 +17792,7 @@ function FlowCanvasInner() {
     [onNodesChange, updateNode]
   );
   const onSelectionChange = reactExports.useCallback(({ nodes: selNodes }) => {
-    setSelectedNodeIds(new Set(selNodes.map((n2) => n2.id)));
+    setSelectedNodeIds(new Set(selNodes.map((n2) => n2.id).filter((id2) => !id2.startsWith("group"))));
   }, []);
   const onPaneClick = reactExports.useCallback(() => {
     selectNode(null);
@@ -17283,6 +17802,7 @@ function FlowCanvasInner() {
   const onNodeContextMenu = reactExports.useCallback(
     (event, node) => {
       event.preventDefault();
+      if (node.id.startsWith("group:") || node.id.startsWith("groupbox:")) return;
       selectNode(node.id);
       setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
     },
@@ -17307,6 +17827,25 @@ function FlowCanvasInner() {
     setExtractionInfo({ entryNodeId: validation.entryNodeId, exitNodeId: validation.exitNodeId });
     setExtractModal(true);
   }, [currentFlow, selectedNodeIds]);
+  const handleGroupClick = reactExports.useCallback(() => {
+    if (!currentFlow) return;
+    const validation = validateExtraction(currentFlow.nodes, selectedNodeIds);
+    if (!validation.valid) {
+      alert(validation.error);
+      return;
+    }
+    setGroupModal(true);
+  }, [currentFlow, selectedNodeIds]);
+  const handleGroupConfirm = reactExports.useCallback(
+    (name) => {
+      createGroup(Array.from(selectedNodeIds), name);
+      setSelectedNodeIds(/* @__PURE__ */ new Set());
+      setGroupModal(false);
+      const updated = useFlowStore.getState().currentFlow;
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
+    },
+    [selectedNodeIds, createGroup]
+  );
   const handleExtractConfirm = reactExports.useCallback(
     async (subFlowName) => {
       if (!currentFlow || !extractionInfo) return;
@@ -17396,6 +17935,7 @@ function FlowCanvasInner() {
           showExtract: multi,
           selectedCount: selectedNodeIds.size,
           onExtract: handleExtractClick,
+          onGroup: handleGroupClick,
           onDisconnect: async () => {
             const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId];
             ids.forEach((id2) => disconnectNode(id2));
@@ -17433,6 +17973,14 @@ function FlowCanvasInner() {
         exitNodeDescription: exitNode?.action.description ?? "",
         onConfirm: handleExtractConfirm,
         onClose: () => setExtractModal(false)
+      }
+    ),
+    groupModal && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      GroupNameModal,
+      {
+        selectedCount: selectedNodeIds.size,
+        onConfirm: handleGroupConfirm,
+        onClose: () => setGroupModal(false)
       }
     ),
     isRecording && /* @__PURE__ */ jsxRuntimeExports.jsxs(

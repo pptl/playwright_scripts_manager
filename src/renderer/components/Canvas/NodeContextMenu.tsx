@@ -20,6 +20,7 @@ interface NodeContextMenuProps {
   showExtract: boolean
   selectedCount: number
   onExtract: () => void
+  onGroup: () => void
   onDisconnect: () => void
   disconnectLabel: string
 }
@@ -43,6 +44,7 @@ export function NodeContextMenu({
   showExtract,
   selectedCount,
   onExtract,
+  onGroup,
   onDisconnect,
   disconnectLabel,
 }: NodeContextMenuProps) {
@@ -109,6 +111,15 @@ export function NodeContextMenu({
         {showExtract && (
           <>
             <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+            <MenuItem
+              icon="⊞"
+              label={`將選取的 ${selectedCount} 個節點組成群組`}
+              disabled={disabled}
+              onClick={() => {
+                onClose()
+                onGroup()
+              }}
+            />
             <MenuItem
               icon="⧉"
               label={`將選取的 ${selectedCount} 個節點另存為子流程`}

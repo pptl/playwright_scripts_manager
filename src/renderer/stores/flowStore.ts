@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
-import { computeAllRootsLayout } from '../utils/treeLayout'
+import { computeGroupAwareLayout } from '../utils/groups'
 
 const NODE_VERTICAL_GAP = 80
 const NODE_START_Y = 50
@@ -54,6 +54,14 @@ interface FlowStore {
   disconnectNodes: (parentId: string, childId: string) => void
   /** Detach nodeId from its parent AND all its children; node and each child become floating roots. */
   disconnectNode: (nodeId: string) => void
+
+  // In-place visual groups (canvas display only — no separate Flow, never enters flow list)
+  /** Tag the given nodes as a new collapsed group and re-layout. Returns the new group id. */
+  createGroup: (memberIds: string[], name: string) => string | null
+  /** Flip a group's collapsed flag and re-layout the canvas group-aware. */
+  toggleGroupCollapsed: (groupId: string) => void
+  /** Remove a group: clear groupId from its members, drop the FlowGroup, re-layout. */
+  ungroupGroup: (groupId: string) => void
 
   // Replay status
   setReplayingNode: (nodeId: string | null) => void
@@ -428,7 +436,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   relayoutAll: () => {
     const flow = get().currentFlow
     if (!flow) return
-    const positions = computeAllRootsLayout(flow.nodes)
+    const positions = computeGroupAwareLayout(flow.nodes, flow.groups ?? [])
     set({
       currentFlow: {
         ...flow,
@@ -487,6 +495,52 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       return n
     })
     set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+  },
+
+  createGroup: (memberIds, name) => {
+    const flow = get().currentFlow
+    if (!flow || memberIds.length === 0) return null
+    const groupId = uuidv4()
+    const idSet = new Set(memberIds)
+    const taggedNodes = flow.nodes.map((n) => (idSet.has(n.id) ? { ...n, groupId } : n))
+    const groups = [...(flow.groups ?? []), { id: groupId, name, collapsed: true }]
+    const positions = computeGroupAwareLayout(taggedNodes, groups)
+    const nodes = taggedNodes.map((n) => {
+      const pos = positions.get(n.id)
+      return pos ? { ...n, position: pos } : n
+    })
+    set({
+      currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() },
+      selectedNodeId: null,
+    })
+    return groupId
+  },
+
+  toggleGroupCollapsed: (groupId) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const groups = (flow.groups ?? []).map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g))
+    const positions = computeGroupAwareLayout(flow.nodes, groups)
+    const nodes = flow.nodes.map((n) => {
+      const pos = positions.get(n.id)
+      return pos ? { ...n, position: pos } : n
+    })
+    set({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() } })
+  },
+
+  ungroupGroup: (groupId) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const clearedNodes = flow.nodes.map((n) =>
+      n.groupId === groupId ? { ...n, groupId: undefined } : n,
+    )
+    const groups = (flow.groups ?? []).filter((g) => g.id !== groupId)
+    const positions = computeGroupAwareLayout(clearedNodes, groups)
+    const nodes = clearedNodes.map((n) => {
+      const pos = positions.get(n.id)
+      return pos ? { ...n, position: pos } : n
+    })
+    set({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() } })
   },
 
   setReplayingNode: (nodeId) => set({ replayingNodeId: nodeId }),

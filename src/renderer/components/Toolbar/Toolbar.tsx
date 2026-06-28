@@ -41,6 +41,10 @@ export function Toolbar() {
     setActiveEnvironment,
     addEnvironmentToProject,
     relayoutAll,
+    past,
+    future,
+    undo,
+    redo,
   } = useFlowStore()
   const { startRecording, stopRecording } = usePlaywright()
   const { newFlow } = useFlowManager()
@@ -196,6 +200,9 @@ export function Toolbar() {
       </span>
 
       {btn('新增流程', () => setShowNewFlowDialog(true))}
+
+      {btn('↶ 復原', undo, past.length === 0 || isRecording || isReplaying)}
+      {btn('↷ 重做', redo, future.length === 0 || isRecording || isReplaying)}
 
       {!isRecording
         ? btn('▶ 開始錄製', () => startRecording(), !currentFlow)

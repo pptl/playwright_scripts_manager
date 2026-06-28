@@ -7393,6 +7393,8 @@ function computeGroupAwareLayout(nodes, groups) {
 const NODE_VERTICAL_GAP = 80;
 const NODE_START_Y = 50;
 const NODE_START_X = 300;
+let isTimeTraveling = false;
+let suppressHistory = false;
 function migrateCallFlowProfiles(flow) {
   const profiles = flow.profiles ?? [];
   const needsMigration = flow.nodes.some(
@@ -7434,6 +7436,8 @@ const useFlowStore = create$1((set2, get2) => ({
   isReplaying: false,
   recordingHeadId: null,
   replaySpeed: 500,
+  past: [],
+  future: [],
   isPickingAssertion: false,
   pendingLocatorPick: null,
   activeProfileId: null,
@@ -7477,7 +7481,9 @@ const useFlowStore = create$1((set2, get2) => ({
         recordingHeadId: null,
         activeProfileId: null,
         currentProject: null,
-        activeEnvironmentId: null
+        activeEnvironmentId: null,
+        past: [],
+        future: []
       });
       return;
     }
@@ -7492,10 +7498,48 @@ const useFlowStore = create$1((set2, get2) => ({
       replayStatus: {},
       recordingHeadId: null,
       activeProfileId: profiles[0]?.id ?? null,
+      past: [],
+      future: [],
       ...changingProject ? { currentProject: null, activeEnvironmentId: null } : {}
     });
   },
   setRecordingHead: (id2) => set2({ recordingHeadId: id2 }),
+  undo: () => {
+    const { past, future, currentFlow } = get2();
+    if (past.length === 0 || !currentFlow) return;
+    const previous = past[past.length - 1];
+    isTimeTraveling = true;
+    set2({
+      past: past.slice(0, -1),
+      future: [currentFlow, ...future],
+      currentFlow: previous,
+      selectedNodeId: null
+    });
+    isTimeTraveling = false;
+    window.electronAPI.saveFlow(previous).catch(console.error);
+  },
+  redo: () => {
+    const { past, future, currentFlow } = get2();
+    if (future.length === 0 || !currentFlow) return;
+    const next = future[0];
+    isTimeTraveling = true;
+    set2({
+      past: [...past, currentFlow].slice(-50),
+      future: future.slice(1),
+      currentFlow: next,
+      selectedNodeId: null
+    });
+    isTimeTraveling = false;
+    window.electronAPI.saveFlow(next).catch(console.error);
+  },
+  runWithoutHistory: (fn) => {
+    suppressHistory = true;
+    try {
+      fn();
+    } finally {
+      suppressHistory = false;
+    }
+  },
   renameCurrentFlow: async (name) => {
     const flow = get2().currentFlow;
     if (!flow) return;
@@ -7963,6 +8007,18 @@ const useFlowStore = create$1((set2, get2) => ({
     }
   }
 }));
+useFlowStore.subscribe((state, prev) => {
+  if (isTimeTraveling || suppressHistory) return;
+  const curr = state.currentFlow;
+  const before = prev.currentFlow;
+  if (!curr || !before || curr === before) return;
+  if (curr.id !== before.id) return;
+  if (state.isRecording || state.isReplaying) return;
+  useFlowStore.setState((s) => ({
+    past: [...s.past, before].slice(-50),
+    future: []
+  }));
+});
 function buildProfileVars(flow, activeProfileId, activeEnvironmentId) {
   const profile = flow?.profiles?.find((p2) => p2.id === activeProfileId);
   if (!profile) return void 0;
@@ -8811,7 +8867,11 @@ function Toolbar() {
     activeEnvironmentId,
     setActiveEnvironment,
     addEnvironmentToProject,
-    relayoutAll
+    relayoutAll,
+    past,
+    future,
+    undo,
+    redo
   } = useFlowStore();
   const { startRecording, stopRecording } = usePlaywright();
   const { newFlow } = useFlowManager();
@@ -8946,6 +9006,8 @@ ${path}`);
       children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 16, color: "#60a5fa", marginRight: 8 }, children: "FlowTest" }),
         btn("新增流程", () => setShowNewFlowDialog(true)),
+        btn("↶ 復原", undo, past.length === 0 || isRecording || isReplaying),
+        btn("↷ 重做", redo, future.length === 0 || isRecording || isReplaying),
         !isRecording ? btn("▶ 開始錄製", () => startRecording(), !currentFlow) : btn("⏹ 停止錄製", () => stopRecording(), false, true),
         btn("🧹 整理節點", handleRelayout, !hasNodes || isRecording || isReplaying),
         btn("匯出腳本", handleExport, !hasNodes || isRecording),
@@ -17618,6 +17680,7 @@ function FlowCanvasInner() {
     deleteNode,
     deleteNodesOnly,
     updateNode,
+    runWithoutHistory,
     insertCallFlowBefore,
     appendCallFlowAfter,
     materializeLayout,
@@ -17733,10 +17796,10 @@ function FlowCanvasInner() {
   reactExports.useEffect(() => {
     if (!currentFlow || currentFlow.positionsFinalized || !currentFlow.rootNodeId) return;
     const layout = computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId);
-    materializeLayout(layout);
+    runWithoutHistory(() => materializeLayout(layout));
     const updated = useFlowStore.getState().currentFlow;
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
-  }, [currentFlow?.id, materializeLayout]);
+  }, [currentFlow?.id, materializeLayout, runWithoutHistory]);
   reactExports.useEffect(() => {
     setNodes(rfNodes);
   }, [rfNodes, setNodes]);
@@ -17764,23 +17827,25 @@ function FlowCanvasInner() {
         (c) => c.type === "position" && c.dragging === false
       );
       if (dragStops.length > 0) {
-        dragStops.forEach((c) => {
-          const pos = dragPosRef.current.get(c.id);
-          if (pos) {
-            let targetId = c.id;
-            if (c.id.startsWith("group:")) {
-              const gid = c.id.slice("group:".length);
-              const cf2 = useFlowStore.getState().currentFlow;
-              const entryId = cf2 ? getGroupBoundary(cf2.nodes, gid)?.entryId : void 0;
-              if (!entryId) {
-                dragPosRef.current.delete(c.id);
-                return;
+        runWithoutHistory(() => {
+          dragStops.forEach((c) => {
+            const pos = dragPosRef.current.get(c.id);
+            if (pos) {
+              let targetId = c.id;
+              if (c.id.startsWith("group:")) {
+                const gid = c.id.slice("group:".length);
+                const cf2 = useFlowStore.getState().currentFlow;
+                const entryId = cf2 ? getGroupBoundary(cf2.nodes, gid)?.entryId : void 0;
+                if (!entryId) {
+                  dragPosRef.current.delete(c.id);
+                  return;
+                }
+                targetId = entryId;
               }
-              targetId = entryId;
+              updateNode(targetId, { position: pos });
+              dragPosRef.current.delete(c.id);
             }
-            updateNode(targetId, { position: pos });
-            dragPosRef.current.delete(c.id);
-          }
+          });
         });
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
         saveTimerRef.current = setTimeout(async () => {
@@ -17789,7 +17854,7 @@ function FlowCanvasInner() {
         }, 500);
       }
     },
-    [onNodesChange, updateNode]
+    [onNodesChange, updateNode, runWithoutHistory]
   );
   const onSelectionChange = reactExports.useCallback(({ nodes: selNodes }) => {
     setSelectedNodeIds(new Set(selNodes.map((n2) => n2.id).filter((id2) => !id2.startsWith("group"))));
@@ -19518,8 +19583,28 @@ function usePlaywrightEvents() {
     };
   }, []);
 }
+function useUndoRedo() {
+  reactExports.useEffect(() => {
+    const handler = (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key.toLowerCase() !== "z") return;
+      const target = e.target;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      const { isRecording, isReplaying, undo, redo } = useFlowStore.getState();
+      if (isRecording || isReplaying) return;
+      e.preventDefault();
+      if (e.shiftKey) redo();
+      else undo();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+}
 function App() {
   usePlaywrightEvents();
+  useUndoRedo();
   const { selectedNodeId, currentFlow } = useFlowStore();
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", height: "100vh" }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx(Toolbar, {}),

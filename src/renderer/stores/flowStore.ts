@@ -7,6 +7,14 @@ const NODE_VERTICAL_GAP = 80
 const NODE_START_Y = 50
 const NODE_START_X = 300
 
+/** Max number of undo snapshots kept per flow editing session. */
+const HISTORY_LIMIT = 50
+/** Guards the history subscription so undo/redo restores don't get re-recorded. */
+let isTimeTraveling = false
+/** When true, currentFlow mutations are not pushed onto the undo stack
+ *  (e.g. node-drag position updates, which would otherwise flood history). */
+let suppressHistory = false
+
 interface FlowStore {
   // State
   flows: FlowListItem[]
@@ -19,6 +27,16 @@ interface FlowStore {
   /** The node ID that new recorded actions should be appended to */
   recordingHeadId: string | null
   replaySpeed: number
+
+  // Undo/redo history (snapshots of currentFlow; cleared on flow switch)
+  past: Flow[]
+  future: Flow[]
+  /** Restore the previous flow snapshot. No-op if nothing to undo. */
+  undo: () => void
+  /** Re-apply the most recently undone flow snapshot. No-op if nothing to redo. */
+  redo: () => void
+  /** Run flow mutations without recording an undo snapshot (e.g. node drag). */
+  runWithoutHistory: (fn: () => void) => void
 
   // Flow management
   setFlows: (flows: FlowStore['flows']) => void
@@ -156,6 +174,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   isReplaying: false,
   recordingHeadId: null,
   replaySpeed: 500,
+  past: [],
+  future: [],
   isPickingAssertion: false,
   pendingLocatorPick: null,
   activeProfileId: null,
@@ -192,6 +212,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       set({
         currentFlow: null, selectedNodeId: null, replayStatus: {}, recordingHeadId: null,
         activeProfileId: null, currentProject: null, activeEnvironmentId: null,
+        past: [], future: [],
       })
       return
     }
@@ -210,11 +231,52 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       replayStatus: {},
       recordingHeadId: null,
       activeProfileId: profiles[0]?.id ?? null,
+      past: [],
+      future: [],
       ...(changingProject ? { currentProject: null, activeEnvironmentId: null } : {}),
     })
   },
 
   setRecordingHead: (id) => set({ recordingHeadId: id }),
+
+  undo: () => {
+    const { past, future, currentFlow } = get()
+    if (past.length === 0 || !currentFlow) return
+    const previous = past[past.length - 1]
+    isTimeTraveling = true
+    set({
+      past: past.slice(0, -1),
+      future: [currentFlow, ...future],
+      currentFlow: previous,
+      selectedNodeId: null,
+    })
+    isTimeTraveling = false
+    window.electronAPI.saveFlow(previous).catch(console.error)
+  },
+
+  redo: () => {
+    const { past, future, currentFlow } = get()
+    if (future.length === 0 || !currentFlow) return
+    const next = future[0]
+    isTimeTraveling = true
+    set({
+      past: [...past, currentFlow].slice(-HISTORY_LIMIT),
+      future: future.slice(1),
+      currentFlow: next,
+      selectedNodeId: null,
+    })
+    isTimeTraveling = false
+    window.electronAPI.saveFlow(next).catch(console.error)
+  },
+
+  runWithoutHistory: (fn) => {
+    suppressHistory = true
+    try {
+      fn()
+    } finally {
+      suppressHistory = false
+    }
+  },
 
   renameCurrentFlow: async (name) => {
     const flow = get().currentFlow
@@ -757,3 +819,18 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
   },
 }))
+
+// Record undo history whenever an edit replaces currentFlow with a new object.
+// One subscription covers every mutator, since all edits update currentFlow immutably.
+useFlowStore.subscribe((state, prev) => {
+  if (isTimeTraveling || suppressHistory) return
+  const curr = state.currentFlow
+  const before = prev.currentFlow
+  if (!curr || !before || curr === before) return // no flow change
+  if (curr.id !== before.id) return // switched flows, not an edit
+  if (state.isRecording || state.isReplaying) return // skip live capture
+  useFlowStore.setState((s) => ({
+    past: [...s.past, before].slice(-HISTORY_LIMIT),
+    future: [],
+  }))
+})

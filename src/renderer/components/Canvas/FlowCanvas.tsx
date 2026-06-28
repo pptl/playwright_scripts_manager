@@ -46,6 +46,7 @@ function FlowCanvasInner() {
     deleteNode,
     deleteNodesOnly,
     updateNode,
+    runWithoutHistory,
     insertCallFlowBefore,
     appendCallFlowAfter,
     materializeLayout,
@@ -184,10 +185,11 @@ function FlowCanvasInner() {
   useEffect(() => {
     if (!currentFlow || currentFlow.positionsFinalized || !currentFlow.rootNodeId) return
     const layout = computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId)
-    materializeLayout(layout)
+    // Automatic one-time layout on load — position-only, keep it out of undo history.
+    runWithoutHistory(() => materializeLayout(layout))
     const updated = useFlowStore.getState().currentFlow
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
-  }, [currentFlow?.id, materializeLayout])
+  }, [currentFlow?.id, materializeLayout, runWithoutHistory])
 
   useEffect(() => {
     setNodes(rfNodes)
@@ -228,25 +230,29 @@ function FlowCanvasInner() {
       )
 
       if (dragStops.length > 0) {
-        dragStops.forEach((c) => {
-          const pos = dragPosRef.current.get(c.id)
-          if (pos) {
-            // A collapsed group node is rendered at its entry node's slot — persist the drag
-            // onto the entry node so it stays put. Group boxes are not draggable.
-            let targetId = c.id
-            if (c.id.startsWith('group:')) {
-              const gid = c.id.slice('group:'.length)
-              const cf = useFlowStore.getState().currentFlow
-              const entryId = cf ? getGroupBoundary(cf.nodes, gid)?.entryId : undefined
-              if (!entryId) {
-                dragPosRef.current.delete(c.id)
-                return
+        // Position-only drag updates must not pollute the undo stack — otherwise
+        // every small reposition would flood history. Persist them silently.
+        runWithoutHistory(() => {
+          dragStops.forEach((c) => {
+            const pos = dragPosRef.current.get(c.id)
+            if (pos) {
+              // A collapsed group node is rendered at its entry node's slot — persist the drag
+              // onto the entry node so it stays put. Group boxes are not draggable.
+              let targetId = c.id
+              if (c.id.startsWith('group:')) {
+                const gid = c.id.slice('group:'.length)
+                const cf = useFlowStore.getState().currentFlow
+                const entryId = cf ? getGroupBoundary(cf.nodes, gid)?.entryId : undefined
+                if (!entryId) {
+                  dragPosRef.current.delete(c.id)
+                  return
+                }
+                targetId = entryId
               }
-              targetId = entryId
+              updateNode(targetId, { position: pos })
+              dragPosRef.current.delete(c.id)
             }
-            updateNode(targetId, { position: pos })
-            dragPosRef.current.delete(c.id)
-          }
+          })
         })
 
         // Debounce disk save
@@ -257,7 +263,7 @@ function FlowCanvasInner() {
         }, 500)
       }
     },
-    [onNodesChange, updateNode],
+    [onNodesChange, updateNode, runWithoutHistory],
   )
 
   const onSelectionChange = useCallback(({ nodes: selNodes }: OnSelectionChangeParams) => {

@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
+import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
 import { useFlowManager } from '../../hooks/useFlowStore'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
@@ -76,6 +77,22 @@ export function FlowList() {
     }
     setRenameTarget(null)
     await refreshFlowList()
+  }
+
+  const handleDuplicateFlow = async (flowId: string) => {
+    const flow = await window.electronAPI.loadFlow(flowId)
+    if (!flow) return
+    const now = new Date().toISOString()
+    const copy = {
+      ...flow,
+      id: uuidv4(),
+      name: `${flow.name}-副本`,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await window.electronAPI.saveFlow(copy)
+    await refreshFlowList()
+    setContextMenu(null)
   }
 
   const handleDeleteFlow = async (flowId: string, flowName: string) => {
@@ -425,6 +442,14 @@ export function FlowList() {
             onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
           >
             ✎ 重新命名
+          </div>
+          <div
+            onClick={() => handleDuplicateFlow(contextMenu.flowId)}
+            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+          >
+            ⧉ 建立副本
           </div>
           <div
             onClick={() => {

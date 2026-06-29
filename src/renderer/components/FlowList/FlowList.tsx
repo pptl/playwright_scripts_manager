@@ -16,10 +16,21 @@ export function FlowList() {
   const [renameTarget, setRenameTarget] = useState<{ flowId: string; name: string } | null>(null)
   // Which groups' "子流程" subsections are expanded (key = projectId or '__unassigned__'); default collapsed
   const [expandedSubFlows, setExpandedSubFlows] = useState<Set<string>>(new Set())
+  // Which project folders are collapsed (key = projectId or '__unassigned__'); default expanded (empty set)
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set())
   const contextMenuRef = useRef<HTMLDivElement>(null)
 
   const toggleSubFlows = (key: string) => {
     setExpandedSubFlows((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const toggleProject = (key: string) => {
+    setCollapsedProjects((prev) => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
@@ -120,7 +131,7 @@ export function FlowList() {
     }
   })
 
-  const renderFlowItem = (flow: typeof flows[0]) => {
+  const renderFlowItem = (flow: typeof flows[0], indent = 14) => {
     const isActive = currentFlow?.id === flow.id
     return (
       <div
@@ -131,13 +142,18 @@ export function FlowList() {
           setContextMenu({ flowId: flow.id, x: e.clientX, y: e.clientY })
         }}
         style={{
-          padding: '10px 14px',
+          padding: '7px 14px 7px 0',
+          paddingLeft: indent,
           cursor: 'pointer',
           background: isActive ? '#1e3a5f' : 'transparent',
-          borderBottom: '1px solid #0f172a',
-          borderLeft: isActive ? '3px solid #3b82f6' : '3px solid transparent',
+          borderRight: isActive ? '3px solid #3b82f6' : '3px solid transparent',
         }}
+        onMouseEnter={(e) => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = '#243449' }}
+        onMouseLeave={(e) => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
       >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ flexShrink: 0, color: '#475569', fontSize: 11, lineHeight: 1 }}>📄</span>
+          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <div
             style={{
@@ -178,12 +194,15 @@ export function FlowList() {
             minute: '2-digit',
           })}
         </div>
+          </div>
+        </div>
       </div>
     )
   }
 
-  // Render a group's flows: top-level test cases first, then a collapsible "子流程" subsection
-  const renderGroupBody = (groupKey: string, groupFlows: typeof flows) => {
+  // Render a group's flows: top-level test cases first, then a collapsible "子流程" subsection.
+  // `indent` is the paddingLeft (px) for flow items at this level; the 子流程 folder nests one level deeper.
+  const renderGroupBody = (groupKey: string, groupFlows: typeof flows, indent = 30) => {
     const testCases = groupFlows.filter((f) => f.refCount === 0)
     const subFlows = groupFlows
       .filter((f) => f.refCount > 0)
@@ -191,30 +210,34 @@ export function FlowList() {
     const expanded = expandedSubFlows.has(groupKey)
     return (
       <>
-        {testCases.map(renderFlowItem)}
+        {testCases.map((f) => renderFlowItem(f, indent))}
         {subFlows.length > 0 && (
           <>
             <div
               onClick={() => toggleSubFlows(groupKey)}
               style={{
-                padding: '5px 14px',
-                fontSize: 10,
+                padding: '5px 14px 5px 0',
+                paddingLeft: indent,
+                fontSize: 11,
                 color: '#818cf8',
                 fontWeight: 600,
-                letterSpacing: '0.04em',
-                background: '#0f172a',
-                borderBottom: '1px solid #1e293b',
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'space-between',
+                gap: 5,
                 userSelect: 'none',
               }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#243449' }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
             >
-              <span>{expanded ? '▾' : '▸'} 子流程</span>
-              <span style={{ color: '#475569' }}>{subFlows.length}</span>
+              <span style={{ width: 10, flexShrink: 0, color: '#64748b' }}>{expanded ? '▾' : '▸'}</span>
+              <span style={{ flexShrink: 0 }}>📁</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                子流程
+              </span>
+              <span style={{ color: '#475569', fontWeight: 500 }}>({subFlows.length})</span>
             </div>
-            {expanded && subFlows.map(renderFlowItem)}
+            {expanded && subFlows.map((f) => renderFlowItem(f, indent + 16))}
           </>
         )}
       </>
@@ -275,71 +298,104 @@ export function FlowList() {
         {/* Projects */}
         {projects.map((proj) => {
           const projFlows = flowsByProject.get(proj.id) ?? []
+          const collapsed = collapsedProjects.has(proj.id)
           return (
             <div key={proj.id}>
               <div
+                onClick={() => toggleProject(proj.id)}
                 style={{
-                  padding: '5px 14px',
-                  fontSize: 10,
-                  color: '#64748b',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  background: '#0f172a',
-                  borderBottom: '1px solid #1e293b',
+                  padding: '6px 12px 6px 8px',
+                  fontSize: 12,
+                  color: '#cbd5e1',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  userSelect: 'none',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'space-between',
+                  gap: 5,
                 }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#243449' }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
               >
-                <span>📁 {proj.name}</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ color: '#334155', fontSize: 10 }}>{projFlows.length}</span>
-                  <button
-                    onClick={() => handleDeleteProject(proj.id, proj.name)}
-                    title="刪除專案"
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: '#475569',
-                      cursor: 'pointer',
-                      fontSize: 12,
-                      lineHeight: 1,
-                      padding: '0 2px',
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#f87171' }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#475569' }}
-                  >
-                    ✕
-                  </button>
-                </div>
+                <span style={{ width: 10, flexShrink: 0, color: '#64748b' }}>{collapsed ? '▸' : '▾'}</span>
+                <span style={{ flexShrink: 0 }}>📁</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {proj.name}
+                </span>
+                <span style={{ color: '#475569', fontSize: 11, fontWeight: 500 }}>({projFlows.length})</span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleDeleteProject(proj.id, proj.name) }}
+                  title="刪除專案"
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#475569',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    lineHeight: 1,
+                    padding: '0 2px',
+                    flexShrink: 0,
+                  }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#f87171' }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#475569' }}
+                >
+                  ✕
+                </button>
               </div>
-              {renderGroupBody(proj.id, projFlows)}
+              {!collapsed && (
+                <div style={{ marginLeft: 13 }}>
+                  {projFlows.length === 0 ? (
+                    <div style={{ padding: '6px 14px 6px 18px', fontSize: 11, color: '#475569' }}>（空）</div>
+                  ) : (
+                    renderGroupBody(proj.id, projFlows, 18)
+                  )}
+                </div>
+              )}
             </div>
           )
         })}
 
         {/* Unassigned flows */}
         {unassignedFlows.length > 0 && (
-          <div>
-            {projects.length > 0 && (
-              <div
-                style={{
-                  padding: '5px 14px',
-                  fontSize: 10,
-                  color: '#475569',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  background: '#0f172a',
-                  borderBottom: '1px solid #1e293b',
-                }}
-              >
-                未分類
+          (() => {
+            // When there are no projects, show unassigned flows flat (no 未分類 folder).
+            if (projects.length === 0) {
+              return <div>{renderGroupBody('__unassigned__', unassignedFlows, 18)}</div>
+            }
+            const collapsed = collapsedProjects.has('__unassigned__')
+            return (
+              <div>
+                <div
+                  onClick={() => toggleProject('__unassigned__')}
+                  style={{
+                    padding: '6px 12px 6px 8px',
+                    fontSize: 12,
+                    color: '#94a3b8',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    userSelect: 'none',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                  }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#243449' }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+                >
+                  <span style={{ width: 10, flexShrink: 0, color: '#64748b' }}>{collapsed ? '▸' : '▾'}</span>
+                  <span style={{ flexShrink: 0 }}>📁</span>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    未分類
+                  </span>
+                  <span style={{ color: '#475569', fontSize: 11, fontWeight: 500 }}>({unassignedFlows.length})</span>
+                </div>
+                {!collapsed && (
+                  <div style={{ marginLeft: 13 }}>
+                    {renderGroupBody('__unassigned__', unassignedFlows, 18)}
+                  </div>
+                )}
               </div>
-            )}
-            {renderGroupBody('__unassigned__', unassignedFlows)}
-          </div>
+            )
+          })()
         )}
       </div>
 

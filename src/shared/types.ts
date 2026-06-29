@@ -72,6 +72,19 @@ export interface FlowNode {
   parentId: string | null
   childIds: string[]
   branchLabel?: string
+  /** If set, this node belongs to the in-place visual group with this id (see Flow.groups).
+   *  Groups are pure canvas-layer organization — they create no separate Flow and do not
+   *  alter parentId/childIds wiring. */
+  groupId?: string
+}
+
+/** An in-place collapsible group of contiguous nodes (single entry, single exit).
+ *  Purely a canvas-display construct — never produces a separate Flow and never enters
+ *  the flow list. Membership is recorded via FlowNode.groupId. */
+export interface FlowGroup {
+  id: string
+  name: string
+  collapsed: boolean
 }
 
 export interface ProfileVariable {
@@ -118,6 +131,23 @@ export interface Flow {
   domains?: string[]
   nodes: FlowNode[]
   rootNodeId: string
+  /** In-place collapsible visual groups over contiguous node ranges (canvas display only). */
+  groups?: FlowGroup[]
+  /** When true, node positions have been manually set and treeLayout is not applied on render.
+   *  Flips to true on first manual drag. */
+  positionsFinalized?: boolean
+}
+
+/** Lightweight flow summary returned by FLOW_LIST. */
+export interface FlowListItem {
+  id: string
+  name: string
+  description?: string
+  updatedAt: string
+  projectId?: string
+  /** How many callFlow nodes across all other flows reference this flow as a sub-flow.
+   *  > 0 means it's used as a reusable sub-flow; 0 means it's a top-level test case. */
+  refCount: number
 }
 
 export interface ExportConfig {

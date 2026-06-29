@@ -1,6 +1,6 @@
 import { BrowserContext } from 'playwright-core'
 import { v4 as uuidv4 } from 'uuid'
-import type { Action } from '../../shared/types'
+import type { Action, LocatorOption } from '../../shared/types'
 import {
   type ActionCallback,
   type RawEvent,
@@ -13,6 +13,8 @@ import {
   buildAction,
   shouldSuppressNav,
   getAssertionPickScript,
+  getAssertionToolbarScript,
+  getLocatorPickerScript,
   generateAssertDescription,
 } from './captureShared'
 
@@ -23,10 +25,9 @@ export class CodegenCapture {
   private paused = false
   private lastGotoUrl = ''
   private lastInteraction: LastInteraction | null = null
-  private assertFunctionsExposed = false
-  private assertReportCb: ((data: AssertPickResult) => void) | null = null
   private assertCancelCb: (() => void) | null = null
   private pendingInputClick: Action | null = null
+  private pendingLocatorPick: { action: Action; alternatives: LocatorOption[] } | null = null
 
   constructor(context: BrowserContext, onAction: ActionCallback) {
     this.context = context
@@ -63,6 +64,47 @@ export class CodegenCapture {
     await page.addInitScript(cursorScript)
     await page.evaluate(cursorScript).catch(() => {})
 
+    // Step 3b — Assertion functions + right-edge assertion dock.
+    // The browser is relaunched fresh on every recording start, so exposeFunction
+    // is safe to call unconditionally here (no double-registration risk).
+    await page.exposeFunction('__flowtest_assert_report', (data: AssertPickResult) => {
+      const action: Action = {
+        id: uuidv4(),
+        type: data.type,
+        selector: data.selector,
+        locatorExpr: data.locatorExpr,
+        value: data.value,
+        description: generateAssertDescription(data),
+        timestamp: Date.now(),
+        url: data.url,
+        isPageNavigation: false,
+      }
+      this.onAction(action)
+    })
+    await page.exposeFunction('__flowtest_assert_cancel', () => {
+      // Dock restores its own UI in-page; nothing to do on the Node side.
+      this.assertCancelCb?.()
+    })
+
+    // Resolves the in-browser "選擇 Locator 方式" picker (Cell vs Row).
+    await page.exposeFunction('__flowtest_locator_resolved', (index: number) => {
+      const pending = this.pendingLocatorPick
+      this.pendingLocatorPick = null
+      this.resume()
+      if (!pending) return
+      const chosen = pending.alternatives[index] ?? pending.alternatives[0]
+      const finalAction: Action = {
+        ...pending.action,
+        locatorExpr: chosen.expr,
+        description: index === 0 ? pending.action.description : deriveRowDescription(chosen.expr),
+      }
+      this.onAction(finalAction)
+    })
+
+    const toolbarScript = getAssertionToolbarScript()
+    await page.addInitScript(toolbarScript)
+    await page.evaluate(toolbarScript).catch(() => {})
+
     // Step 4 — Expose report channel to browser
     await page.exposeFunction('__flowtest_report', (raw: RawEvent) => {
       if (!this.active || this.paused) return
@@ -87,7 +129,12 @@ export class CodegenCapture {
       }
 
       this.lastInteraction = { time: Date.now(), type: action.type }
-      this.onAction(action, raw.alternativeLocators)
+      if (raw.alternativeLocators?.length) {
+        // Repeated table/list item → let the user pick Cell vs Row in-browser.
+        this.showLocatorPicker(action, raw.alternativeLocators)
+      } else {
+        this.onAction(action)
+      }
     })
 
     // Step 5 — Navigation
@@ -133,39 +180,51 @@ export class CodegenCapture {
     this.pendingInputClick = null
     this.active = false
     this.paused = false
+
+    this.pendingLocatorPick = null
+
+    // Remove the in-page assertion dock + any leftover picker overlay/dialog.
+    const page = this.context.pages()[0]
+    if (page) {
+      await page
+        .evaluate(() => {
+          ;['__ft_assert_toolbar', '__ft_pick_overlay', '__ft_pick_tooltip', '__ft_locator_picker'].forEach(
+            (id) => {
+              document.getElementById(id)?.remove()
+            },
+          )
+        })
+        .catch(() => {})
+    }
   }
 
-  async startAssertionPick(assertionType: AssertPickType, onCancel: () => void): Promise<void> {
-    const pages = this.context.pages()
-    const page = pages[0]
-    if (!page) return
-
-    if (!this.assertFunctionsExposed) {
-      this.assertFunctionsExposed = true
-      await page.exposeFunction('__flowtest_assert_report', (data: AssertPickResult) => {
-        this.assertReportCb?.(data)
-      })
-      await page.exposeFunction('__flowtest_assert_cancel', () => {
-        this.assertCancelCb?.()
-      })
-    }
-
-    this.assertReportCb = (data) => {
-      const action: Action = {
-        id: uuidv4(),
-        type: data.type,
-        selector: data.selector,
-        locatorExpr: data.locatorExpr,
-        value: data.value,
-        description: generateAssertDescription(data),
-        timestamp: Date.now(),
-        url: data.url,
-        isPageNavigation: false,
-      }
+  // Shows the in-browser "選擇 Locator 方式" dialog and pauses recording until the
+  // user confirms (resolved via the exposed __flowtest_locator_resolved function).
+  private showLocatorPicker(action: Action, alternatives: LocatorOption[]): void {
+    const page = this.context.pages()[0]
+    if (!page) {
+      // No page to render the dialog — fall back to the default (Cell) locator.
       this.onAction(action)
+      return
     }
-    this.assertCancelCb = onCancel
-
-    await page.evaluate(getAssertionPickScript(assertionType))
+    this.pendingLocatorPick = { action, alternatives }
+    this.pause()
+    page.evaluate(getLocatorPickerScript(alternatives)).catch(() => {})
   }
+
+  // Backward-compat entry point. The assertion dock now drives picking in-page;
+  // this re-triggers the same in-page overlay for the legacy IPC path.
+  async startAssertionPick(assertionType: AssertPickType, onCancel: () => void): Promise<void> {
+    const page = this.context.pages()[0]
+    if (!page) return
+    this.assertCancelCb = onCancel
+    await page.evaluate(getAssertionPickScript(assertionType)).catch(() => {})
+  }
+}
+
+/** Mirrors LocatorPickerModal's deriveDescription: `點擊第 N 列 (row)`. */
+function deriveRowDescription(expr: string): string {
+  const m = expr.match(/\.nth\((\d+)\)/)
+  const rowNum = m ? parseInt(m[1], 10) + 1 : 1
+  return `點擊第 ${rowNum} 列 (row)`
 }

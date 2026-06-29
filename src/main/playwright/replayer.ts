@@ -120,10 +120,10 @@ export class Replayer {
   private getLocator(action: Action): Locator {
     if (action.locatorExpr) {
       try {
-        // Evaluate the locator expression against the page object
-        // e.g. locatorExpr = "getByRole('button', { name: 'Login' })"
+        // Resolve {{...}} variables before evaluating the locator expression
+        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars)
         // eslint-disable-next-line @typescript-eslint/no-implied-eval
-        const fn = new Function('page', `return page.${action.locatorExpr}`)
+        const fn = new Function('page', `return page.${resolved}`)
         return fn(this.page) as Locator
       } catch {
         // fall through to CSS selector

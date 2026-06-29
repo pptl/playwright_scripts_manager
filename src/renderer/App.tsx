@@ -6,13 +6,15 @@ import { VariableList } from './components/VariableList/VariableList'
 import { PropertyPanel } from './components/PropertyPanel/PropertyPanel'
 import { SessionVarList } from './components/SessionVarList/SessionVarList'
 import { ProfileVarList } from './components/ProfileVarList/ProfileVarList'
-import { LocatorPickerModal } from './components/LocatorPickerModal/LocatorPickerModal'
 import { usePlaywrightEvents } from './hooks/usePlaywrightEvents'
+import { useUndoRedo } from './hooks/useUndoRedo'
 import { useFlowStore } from './stores/flowStore'
 
 export default function App() {
   // Register IPC event listeners exactly once here
   usePlaywrightEvents()
+  // Register Ctrl+Z / Ctrl+Shift+Z undo/redo shortcuts
+  useUndoRedo()
 
   const { selectedNodeId, currentFlow } = useFlowStore()
 
@@ -35,7 +37,6 @@ export default function App() {
           </div>
         )}
       </div>
-      <LocatorPickerModal />
     </div>
   )
 }

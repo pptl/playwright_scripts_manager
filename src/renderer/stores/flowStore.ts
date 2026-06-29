@@ -1,14 +1,23 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import type { Flow, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
+import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
+import { computeGroupAwareLayout } from '../utils/groups'
 
 const NODE_VERTICAL_GAP = 80
 const NODE_START_Y = 50
 const NODE_START_X = 300
 
+/** Max number of undo snapshots kept per flow editing session. */
+const HISTORY_LIMIT = 50
+/** Guards the history subscription so undo/redo restores don't get re-recorded. */
+let isTimeTraveling = false
+/** When true, currentFlow mutations are not pushed onto the undo stack
+ *  (e.g. node-drag position updates, which would otherwise flood history). */
+let suppressHistory = false
+
 interface FlowStore {
   // State
-  flows: Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt' | 'projectId'>[]
+  flows: FlowListItem[]
   currentFlow: Flow | null
   selectedNodeId: string | null
   replayingNodeId: string | null
@@ -18,6 +27,16 @@ interface FlowStore {
   /** The node ID that new recorded actions should be appended to */
   recordingHeadId: string | null
   replaySpeed: number
+
+  // Undo/redo history (snapshots of currentFlow; cleared on flow switch)
+  past: Flow[]
+  future: Flow[]
+  /** Restore the previous flow snapshot. No-op if nothing to undo. */
+  undo: () => void
+  /** Re-apply the most recently undone flow snapshot. No-op if nothing to redo. */
+  redo: () => void
+  /** Run flow mutations without recording an undo snapshot (e.g. node drag). */
+  runWithoutHistory: (fn: () => void) => void
 
   // Flow management
   setFlows: (flows: FlowStore['flows']) => void
@@ -30,11 +49,37 @@ interface FlowStore {
   addActionNode: (action: Action, parentId?: string | null, branchLabel?: string) => FlowNode
   updateNode: (nodeId: string, updates: Partial<FlowNode>) => void
   deleteNode: (nodeId: string) => void
+  /** Delete the given nodes WITHOUT deleting their subtrees. Each deleted node's
+   *  surviving children become floating roots (parentId = null, branchLabel cleared),
+   *  consistent with disconnectNodes. Supports multi-node deletion. */
+  deleteNodesOnly: (nodeIds: string[]) => void
   selectNode: (nodeId: string | null) => void
   /** Insert a callFlow node between nodeId's parent and nodeId. Throws if nodeId is root. */
   insertCallFlowBefore: (nodeId: string, callFlowAction: Action) => FlowNode
   /** Append a callFlow node as the sole child of nodeId. Throws if nodeId already has children. */
   appendCallFlowAfter: (nodeId: string, callFlowAction: Action) => FlowNode
+  /** Flip positionsFinalized on the current flow */
+  setPositionsFinalized: (v: boolean) => void
+  /** Write computed tree-layout positions into every node and mark positions finalized.
+   *  One-shot; no-op if already finalized. Makes fn.position the single source of truth. */
+  materializeLayout: (positions: Map<string, NodePosition>) => void
+  /** Re-layout all nodes: each root tree laid out left-to-right, subtrees centered.
+   *  Unconditional (unlike materializeLayout). Caller persists to disk. */
+  relayoutAll: () => void
+  /** Connect source → target as parent → child. No-op if target already has a parent. */
+  connectNodes: (sourceId: string, targetId: string, branchLabel?: string) => void
+  /** Remove parent-child relationship. Target's parentId becomes null (floating node). */
+  disconnectNodes: (parentId: string, childId: string) => void
+  /** Detach nodeId from its parent AND all its children; node and each child become floating roots. */
+  disconnectNode: (nodeId: string) => void
+
+  // In-place visual groups (canvas display only — no separate Flow, never enters flow list)
+  /** Tag the given nodes as a new collapsed group and re-layout. Returns the new group id. */
+  createGroup: (memberIds: string[], name: string) => string | null
+  /** Flip a group's collapsed flag and re-layout the canvas group-aware. */
+  toggleGroupCollapsed: (groupId: string) => void
+  /** Remove a group: clear groupId from its members, drop the FlowGroup, re-layout. */
+  ungroupGroup: (groupId: string) => void
 
   // Replay status
   setReplayingNode: (nodeId: string | null) => void
@@ -129,6 +174,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   isReplaying: false,
   recordingHeadId: null,
   replaySpeed: 500,
+  past: [],
+  future: [],
   isPickingAssertion: false,
   pendingLocatorPick: null,
   activeProfileId: null,
@@ -165,6 +212,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       set({
         currentFlow: null, selectedNodeId: null, replayStatus: {}, recordingHeadId: null,
         activeProfileId: null, currentProject: null, activeEnvironmentId: null,
+        past: [], future: [],
       })
       return
     }
@@ -183,11 +231,52 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       replayStatus: {},
       recordingHeadId: null,
       activeProfileId: profiles[0]?.id ?? null,
+      past: [],
+      future: [],
       ...(changingProject ? { currentProject: null, activeEnvironmentId: null } : {}),
     })
   },
 
   setRecordingHead: (id) => set({ recordingHeadId: id }),
+
+  undo: () => {
+    const { past, future, currentFlow } = get()
+    if (past.length === 0 || !currentFlow) return
+    const previous = past[past.length - 1]
+    isTimeTraveling = true
+    set({
+      past: past.slice(0, -1),
+      future: [currentFlow, ...future],
+      currentFlow: previous,
+      selectedNodeId: null,
+    })
+    isTimeTraveling = false
+    window.electronAPI.saveFlow(previous).catch(console.error)
+  },
+
+  redo: () => {
+    const { past, future, currentFlow } = get()
+    if (future.length === 0 || !currentFlow) return
+    const next = future[0]
+    isTimeTraveling = true
+    set({
+      past: [...past, currentFlow].slice(-HISTORY_LIMIT),
+      future: future.slice(1),
+      currentFlow: next,
+      selectedNodeId: null,
+    })
+    isTimeTraveling = false
+    window.electronAPI.saveFlow(next).catch(console.error)
+  },
+
+  runWithoutHistory: (fn) => {
+    suppressHistory = true
+    try {
+      fn()
+    } finally {
+      suppressHistory = false
+    }
+  },
 
   renameCurrentFlow: async (name) => {
     const flow = get().currentFlow
@@ -283,6 +372,36 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     })
   },
 
+  deleteNodesOnly: (nodeIds) => {
+    const flow = get().currentFlow
+    if (!flow) return
+
+    const toDelete = new Set(nodeIds)
+    const updatedNodes = flow.nodes
+      .filter((n) => !toDelete.has(n.id))
+      .map((n) => {
+        // A surviving child of a deleted node becomes a floating root.
+        const orphaned = n.parentId !== null && toDelete.has(n.parentId)
+        return {
+          ...n,
+          parentId: orphaned ? null : n.parentId,
+          branchLabel: orphaned ? undefined : n.branchLabel,
+          childIds: n.childIds.filter((cid) => !toDelete.has(cid)),
+        }
+      })
+
+    const newRoot = updatedNodes.find((n) => n.parentId === null)
+    set({
+      currentFlow: {
+        ...flow,
+        nodes: updatedNodes,
+        rootNodeId: newRoot?.id ?? '',
+        updatedAt: new Date().toISOString(),
+      },
+      selectedNodeId: null,
+    })
+  },
+
   selectNode: (nodeId) => set({ selectedNodeId: nodeId }),
 
   insertCallFlowBefore: (nodeId, callFlowAction) => {
@@ -290,9 +409,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     if (!flow) throw new Error('No active flow')
     const node = flow.nodes.find((n) => n.id === nodeId)
     if (!node) throw new Error(`Node "${nodeId}" not found`)
-    if (node.parentId === null) throw new Error('Cannot insert before root node')
 
-    const parent = flow.nodes.find((n) => n.id === node.parentId)!
+    // node.parentId is null when node is the root; then the callFlow node becomes the new root.
+    const parent = node.parentId ? flow.nodes.find((n) => n.id === node.parentId) : null
     const callFlowNode: FlowNode = {
       id: callFlowAction.id,
       action: callFlowAction,
@@ -303,7 +422,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
 
     const updatedNodes = flow.nodes.map((n) => {
-      if (n.id === node.parentId) {
+      if (parent && n.id === parent.id) {
         return {
           ...parent,
           childIds: parent.childIds.map((cid) => (cid === nodeId ? callFlowNode.id : cid)),
@@ -316,7 +435,12 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     })
     updatedNodes.push(callFlowNode)
 
-    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
+    const updatedFlow: Flow = {
+      ...flow,
+      nodes: updatedNodes,
+      rootNodeId: node.parentId === null ? callFlowNode.id : flow.rootNodeId,
+      updatedAt: new Date().toISOString(),
+    }
     set({ currentFlow: updatedFlow })
     return callFlowNode
   },
@@ -326,12 +450,15 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     if (!flow) throw new Error('No active flow')
     const node = flow.nodes.find((n) => n.id === nodeId)
     if (!node) throw new Error(`Node "${nodeId}" not found`)
-    if (node.childIds.length > 0) throw new Error('Cannot append after a node that already has children')
 
     const callFlowNode: FlowNode = {
       id: callFlowAction.id,
       action: callFlowAction,
-      position: { x: node.position.x, y: node.position.y + NODE_VERTICAL_GAP },
+      // Offset by existing children so the new branch doesn't overlap them
+      position: {
+        x: node.position.x + node.childIds.length * 220,
+        y: node.position.y + NODE_VERTICAL_GAP,
+      },
       parentId: nodeId,
       childIds: [],
     }
@@ -344,6 +471,138 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
     set({ currentFlow: updatedFlow })
     return callFlowNode
+  },
+
+  setPositionsFinalized: (v) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    set({ currentFlow: { ...flow, positionsFinalized: v, updatedAt: new Date().toISOString() } })
+  },
+
+  materializeLayout: (positions) => {
+    const flow = get().currentFlow
+    if (!flow || flow.positionsFinalized) return
+    set({
+      currentFlow: {
+        ...flow,
+        nodes: flow.nodes.map((n) => {
+          const pos = positions.get(n.id)
+          return pos ? { ...n, position: pos } : n
+        }),
+        positionsFinalized: true,
+        updatedAt: new Date().toISOString(),
+      },
+    })
+  },
+
+  relayoutAll: () => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const positions = computeGroupAwareLayout(flow.nodes, flow.groups ?? [])
+    set({
+      currentFlow: {
+        ...flow,
+        nodes: flow.nodes.map((n) => {
+          const pos = positions.get(n.id)
+          return pos ? { ...n, position: pos } : n
+        }),
+        positionsFinalized: true,
+        updatedAt: new Date().toISOString(),
+      },
+    })
+  },
+
+  connectNodes: (sourceId, targetId, branchLabel) => {
+    if (sourceId === targetId) return
+    const flow = get().currentFlow
+    if (!flow) return
+    const target = flow.nodes.find((n) => n.id === targetId)
+    if (!target) return
+    if (target.parentId !== null) {
+      console.warn(`connectNodes: target ${targetId} already has parent ${target.parentId}`)
+      return
+    }
+    const updatedNodes = flow.nodes.map((n) => {
+      if (n.id === sourceId) return { ...n, childIds: [...n.childIds, targetId] }
+      if (n.id === targetId) return { ...n, parentId: sourceId, branchLabel }
+      return n
+    })
+    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+  },
+
+  disconnectNodes: (parentId, childId) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const updatedNodes = flow.nodes.map((n) => {
+      if (n.id === parentId) return { ...n, childIds: n.childIds.filter((c) => c !== childId) }
+      if (n.id === childId) return { ...n, parentId: null, branchLabel: undefined }
+      return n
+    })
+    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+  },
+
+  disconnectNode: (nodeId) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const node = flow.nodes.find((n) => n.id === nodeId)
+    if (!node) return
+    const childIds = new Set(node.childIds)
+    const updatedNodes = flow.nodes.map((n) => {
+      // The node itself: detach from parent and drop all children
+      if (n.id === nodeId) return { ...n, parentId: null, branchLabel: undefined, childIds: [] }
+      // The parent: remove the node from its childIds
+      if (n.id === node.parentId) return { ...n, childIds: n.childIds.filter((c) => c !== nodeId) }
+      // Each child: becomes a floating root
+      if (childIds.has(n.id)) return { ...n, parentId: null, branchLabel: undefined }
+      return n
+    })
+    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+  },
+
+  createGroup: (memberIds, name) => {
+    const flow = get().currentFlow
+    if (!flow || memberIds.length === 0) return null
+    const groupId = uuidv4()
+    const idSet = new Set(memberIds)
+    const taggedNodes = flow.nodes.map((n) => (idSet.has(n.id) ? { ...n, groupId } : n))
+    const groups = [...(flow.groups ?? []), { id: groupId, name, collapsed: true }]
+    const positions = computeGroupAwareLayout(taggedNodes, groups)
+    const nodes = taggedNodes.map((n) => {
+      const pos = positions.get(n.id)
+      return pos ? { ...n, position: pos } : n
+    })
+    set({
+      currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() },
+      selectedNodeId: null,
+    })
+    return groupId
+  },
+
+  toggleGroupCollapsed: (groupId) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const groups = (flow.groups ?? []).map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g))
+    const positions = computeGroupAwareLayout(flow.nodes, groups)
+    const nodes = flow.nodes.map((n) => {
+      const pos = positions.get(n.id)
+      return pos ? { ...n, position: pos } : n
+    })
+    set({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() } })
+  },
+
+  ungroupGroup: (groupId) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const clearedNodes = flow.nodes.map((n) =>
+      n.groupId === groupId ? { ...n, groupId: undefined } : n,
+    )
+    const groups = (flow.groups ?? []).filter((g) => g.id !== groupId)
+    const positions = computeGroupAwareLayout(clearedNodes, groups)
+    const nodes = clearedNodes.map((n) => {
+      const pos = positions.get(n.id)
+      return pos ? { ...n, position: pos } : n
+    })
+    set({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() } })
   },
 
   setReplayingNode: (nodeId) => set({ replayingNodeId: nodeId }),
@@ -560,3 +819,18 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
   },
 }))
+
+// Record undo history whenever an edit replaces currentFlow with a new object.
+// One subscription covers every mutator, since all edits update currentFlow immutably.
+useFlowStore.subscribe((state, prev) => {
+  if (isTimeTraveling || suppressHistory) return
+  const curr = state.currentFlow
+  const before = prev.currentFlow
+  if (!curr || !before || curr === before) return // no flow change
+  if (curr.id !== before.id) return // switched flows, not an edit
+  if (state.isRecording || state.isReplaying) return // skip live capture
+  useFlowStore.setState((s) => ({
+    past: [...s.past, before].slice(-HISTORY_LIMIT),
+    future: [],
+  }))
+})

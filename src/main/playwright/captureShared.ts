@@ -230,8 +230,11 @@ export function getDOMCaptureScript(): () => void {
       const tag = el.tagName.toLowerCase()
       const type = ((el as HTMLInputElement).type || '').toLowerCase()
 
-      // Skip FlowTest-injected overlay elements (assertion picker, cursor highlight, etc.)
+      // Skip FlowTest-injected UI (assertion dock, picker overlay, cursor highlight).
+      // Check the element itself AND any ancestor, since the dock's buttons have no
+      // id of their own — they live inside #__ft_assert_toolbar.
       if ((el as HTMLElement).id?.startsWith('__ft_')) return
+      if ((el as HTMLElement).closest?.('[id^="__ft_"]')) return
 
       // Playwright blacklist
       if (tag === 'select' || tag === 'option') return
@@ -419,115 +422,324 @@ export function generateAssertDescription(data: AssertPickResult): string {
   }
 }
 
+// Backward-compat entry point for the Main-process `startAssertionPick` path.
+// The overlay logic now lives in `window.__ft_startAssertPick`, defined by
+// getAssertionToolbarScript() (always injected during recording). This just invokes it.
 export function getAssertionPickScript(assertionType: AssertPickType): string {
+  return `(function(){ try { if (window.__ft_startAssertPick) window.__ft_startAssertPick(${JSON.stringify(assertionType)}); } catch(e){} })();`
+}
+
+// ── In-page assertion toolbar dock ──────────────────────────────────────────────
+//
+// Injected during recording. Renders a fixed dock stuck to the right edge of the
+// recorded browser with three buttons (👁 可見 / T 文字 / = 值), and defines
+// window.__ft_startAssertPick(type) which runs the element-picker overlay in-page.
+// On pick/cancel it reports via the exposed __flowtest_assert_report /
+// __flowtest_assert_cancel functions (set up by CodegenCapture at start()).
+//
+// The dock id starts with '__ft_', so getDOMCaptureScript()'s click blacklist
+// never records dock clicks as actions.
+export function getAssertionToolbarScript(): string {
   return `(function(){
-  var assertionType = ${JSON.stringify(assertionType)};
-  var existing = document.getElementById('__ft_pick_overlay');
+  // ── Picker overlay (runs in-page; replaces the old IPC round-trip) ──────────
+  window.__ft_startAssertPick = function(assertionType) {
+    var existing = document.getElementById('__ft_pick_overlay');
+    if (existing) existing.remove();
+    var existingTip = document.getElementById('__ft_pick_tooltip');
+    if (existingTip) existingTip.remove();
+
+    if (window.__ft_setDockPicking) window.__ft_setDockPicking(true);
+
+    var highlighted = null;
+    var prevOutline = '';
+    var prevOutlineOffset = '';
+
+    function generateCSSSelector(el) {
+      var testId = el.getAttribute('data-testid');
+      if (testId) return '[data-testid="' + testId + '"]';
+      if (el.id) return '#' + el.id;
+      var aria = el.getAttribute('aria-label');
+      if (aria) return '[aria-label="' + aria.replace(/"/g, '\\\\"') + '"]';
+      var name = el.getAttribute('name');
+      if (name) return '[name="' + name.replace(/"/g, '\\\\"') + '"]';
+      var tag = el.tagName.toLowerCase();
+      var type = (el.type || '').toLowerCase();
+      return (type && !['text', ''].includes(type)) ? tag + '[type="' + type + '"]' : tag;
+    }
+
+    function getLocatorExpr(el) {
+      try {
+        var loc = window.__ftGetLocator && window.__ftGetLocator(el);
+        if (loc) return loc;
+      } catch(e) {}
+      return 'locator(' + JSON.stringify(generateCSSSelector(el)) + ')';
+    }
+
+    function clearHighlight() {
+      if (highlighted) {
+        highlighted.style.outline = prevOutline;
+        highlighted.style.outlineOffset = prevOutlineOffset;
+        highlighted = null;
+      }
+    }
+
+    function setHighlight(el) {
+      if (el === highlighted) return;
+      clearHighlight();
+      highlighted = el;
+      prevOutline = el.style.outline || '';
+      prevOutlineOffset = el.style.outlineOffset || '';
+      el.style.outline = '2px solid #22c55e';
+      el.style.outlineOffset = '2px';
+    }
+
+    function finish() {
+      if (window.__ft_setDockPicking) window.__ft_setDockPicking(false);
+    }
+
+    var overlay = document.createElement('div');
+    overlay.id = '__ft_pick_overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:transparent;';
+    document.documentElement.appendChild(overlay);
+
+    var tooltip = document.createElement('div');
+    tooltip.id = '__ft_pick_tooltip';
+    tooltip.style.cssText = 'position:fixed;z-index:2147483647;padding:4px 8px;background:#0f172a;color:#22c55e;border:1px solid #22c55e;border-radius:4px;font-size:11px;font-family:monospace;pointer-events:none;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none;';
+    document.documentElement.appendChild(tooltip);
+
+    overlay.addEventListener('mousemove', function(e) {
+      overlay.style.display = 'none';
+      var el = document.elementFromPoint(e.clientX, e.clientY);
+      overlay.style.display = '';
+      if (!el || el === overlay || el === tooltip) return;
+      setHighlight(el);
+      tooltip.textContent = getLocatorExpr(el);
+      var tx = Math.min(e.clientX + 14, window.innerWidth - 370);
+      var ty = e.clientY + 22;
+      if (ty + 30 > window.innerHeight) ty = e.clientY - 32;
+      tooltip.style.left = tx + 'px';
+      tooltip.style.top = ty + 'px';
+      tooltip.style.display = 'block';
+    });
+
+    overlay.addEventListener('mouseleave', function() {
+      tooltip.style.display = 'none';
+    });
+
+    overlay.addEventListener('click', function(e) {
+      overlay.style.display = 'none';
+      var el = document.elementFromPoint(e.clientX, e.clientY);
+      overlay.remove();
+      tooltip.remove();
+      clearHighlight();
+      finish();
+      if (!el) return;
+      var selector = generateCSSSelector(el);
+      var locatorExpr = getLocatorExpr(el);
+      var value;
+      if (assertionType === 'assertText') {
+        value = (el.textContent || '').trim().slice(0, 500);
+      } else if (assertionType === 'assertValue') {
+        value = el.value !== undefined ? String(el.value) : '';
+      }
+      try {
+        window.__flowtest_assert_report({ type: assertionType, selector: selector, locatorExpr: locatorExpr, value: value, url: window.location.href });
+      } catch(e) {}
+    });
+
+    document.addEventListener('keydown', function escHandler(e) {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      overlay.remove();
+      tooltip.remove();
+      clearHighlight();
+      finish();
+      document.removeEventListener('keydown', escHandler, true);
+      try { window.__flowtest_assert_cancel(); } catch(e) {}
+    }, true);
+  };
+
+  // ── Dock UI ────────────────────────────────────────────────────────────────
+  if (document.getElementById('__ft_assert_toolbar')) return;
+
+  function install() {
+    if (document.getElementById('__ft_assert_toolbar')) return;
+    var root = document.body || document.documentElement;
+    if (!root) return;
+
+    var dock = document.createElement('div');
+    dock.id = '__ft_assert_toolbar';
+    dock.style.cssText = 'position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483640;' +
+      'display:flex;flex-direction:column;gap:6px;padding:8px;' +
+      'background:rgba(15,23,42,0.92);border:1px solid #22c55e;border-right:none;' +
+      'border-radius:8px 0 0 8px;box-shadow:-2px 0 12px rgba(0,0,0,0.35);' +
+      'font-family:system-ui,-apple-system,sans-serif;';
+
+    var title = document.createElement('div');
+    title.textContent = '驗證';
+    title.style.cssText = 'font-size:10px;color:#64748b;text-align:center;letter-spacing:1px;';
+    dock.appendChild(title);
+
+    var btnWrap = document.createElement('div');
+    btnWrap.id = '__ft_assert_btns';
+    btnWrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
+    dock.appendChild(btnWrap);
+
+    var defs = [
+      ['👁 可見', 'assertVisible'],
+      ['T 文字', 'assertText'],
+      ['= 值', 'assertValue']
+    ];
+    defs.forEach(function(d) {
+      var b = document.createElement('button');
+      b.textContent = d[0];
+      b.style.cssText = 'padding:6px 12px;border-radius:6px;border:1px solid #22c55e;' +
+        'cursor:pointer;background:transparent;color:#22c55e;font-size:12px;font-weight:500;white-space:nowrap;';
+      b.addEventListener('mouseenter', function(){ b.style.background = 'rgba(34,197,94,0.15)'; });
+      b.addEventListener('mouseleave', function(){ b.style.background = 'transparent'; });
+      b.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.__ft_startAssertPick(d[1]);
+      });
+      btnWrap.appendChild(b);
+    });
+
+    var status = document.createElement('div');
+    status.id = '__ft_assert_status';
+    status.textContent = '選取元素中… (Esc 取消)';
+    status.style.cssText = 'display:none;font-size:11px;color:#fde68a;max-width:120px;text-align:center;';
+    dock.appendChild(status);
+
+    root.appendChild(dock);
+  }
+
+  window.__ft_setDockPicking = function(picking) {
+    var dock = document.getElementById('__ft_assert_toolbar');
+    if (!dock) return;
+    var btns = document.getElementById('__ft_assert_btns');
+    var status = document.getElementById('__ft_assert_status');
+    if (picking) {
+      dock.style.pointerEvents = 'none';
+      if (btns) btns.style.display = 'none';
+      if (status) status.style.display = 'block';
+    } else {
+      dock.style.pointerEvents = 'auto';
+      if (btns) btns.style.display = 'flex';
+      if (status) status.style.display = 'none';
+    }
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install);
+  } else {
+    install();
+  }
+})();`
+}
+
+// ── In-page "選擇 Locator 方式" picker ───────────────────────────────────────────
+//
+// Shown when a recorded click lands on a repeated table/list item that has
+// alternative locators (Cell vs Row). Rendered as a modal inside the recorded
+// browser; on confirm it reports the chosen index via the exposed
+// __flowtest_locator_resolved function (set up by CodegenCapture at start()).
+//
+// The backdrop id starts with '__ft_', so getDOMCaptureScript()'s blacklist never
+// records clicks on it; the recorder is also paused while it is open.
+export function getLocatorPickerScript(alternatives: LocatorOption[]): string {
+  return `(function(){
+  var alternatives = ${JSON.stringify(alternatives)};
+  var existing = document.getElementById('__ft_locator_picker');
   if (existing) existing.remove();
-  var existingTip = document.getElementById('__ft_pick_tooltip');
-  if (existingTip) existingTip.remove();
 
-  var highlighted = null;
-  var prevOutline = '';
-  var prevOutlineOffset = '';
-
-  function generateCSSSelector(el) {
-    var testId = el.getAttribute('data-testid');
-    if (testId) return '[data-testid="' + testId + '"]';
-    if (el.id) return '#' + el.id;
-    var aria = el.getAttribute('aria-label');
-    if (aria) return '[aria-label="' + aria.replace(/"/g, '\\\\"') + '"]';
-    var name = el.getAttribute('name');
-    if (name) return '[name="' + name.replace(/"/g, '\\\\"') + '"]';
-    var tag = el.tagName.toLowerCase();
-    var type = (el.type || '').toLowerCase();
-    return (type && !['text', ''].includes(type)) ? tag + '[type="' + type + '"]' : tag;
+  function extractRowNum(expr) {
+    var m = expr.match(/\\.nth\\((\\d+)\\)/);
+    return m ? parseInt(m[1], 10) + 1 : 1;
   }
 
-  function getLocatorExpr(el) {
-    try {
-      var loc = window.__ftGetLocator && window.__ftGetLocator(el);
-      if (loc) return loc;
-    } catch(e) {}
-    return 'locator(' + JSON.stringify(generateCSSSelector(el)) + ')';
+  var selectedIndex = 0;
+
+  var backdrop = document.createElement('div');
+  backdrop.id = '__ft_locator_picker';
+  backdrop.style.cssText = 'position:fixed;inset:0;z-index:2147483645;background:rgba(0,0,0,0.7);' +
+    'display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif;';
+
+  var card = document.createElement('div');
+  card.style.cssText = 'background:#0f172a;border:1px solid #334155;border-radius:12px;width:520px;max-width:90vw;' +
+    'display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,0.6);';
+  backdrop.appendChild(card);
+
+  var header = document.createElement('div');
+  header.textContent = '選擇 Locator 方式';
+  header.style.cssText = 'padding:12px 16px;border-bottom:1px solid #1e293b;font-size:14px;font-weight:600;color:#e2e8f0;';
+  card.appendChild(header);
+
+  var body = document.createElement('div');
+  body.style.cssText = 'padding:12px 16px;display:flex;flex-direction:column;gap:8px;';
+  card.appendChild(body);
+
+  var hint = document.createElement('div');
+  hint.textContent = '點擊的元素位於 Table 中，請選擇要記錄的定位方式：';
+  hint.style.cssText = 'font-size:11px;color:#64748b;margin-bottom:4px;';
+  body.appendChild(hint);
+
+  var optionEls = [];
+  function refresh() {
+    optionEls.forEach(function(opt, i) {
+      var sel = i === selectedIndex;
+      opt.row.style.border = '1px solid ' + (sel ? '#3b82f6' : '#334155');
+      opt.row.style.background = sel ? '#1e3a5f' : '#1e293b';
+      opt.radio.checked = sel;
+    });
   }
 
-  function clearHighlight() {
-    if (highlighted) {
-      highlighted.style.outline = prevOutline;
-      highlighted.style.outlineOffset = prevOutlineOffset;
-      highlighted = null;
-    }
-  }
+  alternatives.forEach(function(alt, i) {
+    var row = document.createElement('label');
+    row.style.cssText = 'display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;';
+    row.addEventListener('click', function(){ selectedIndex = i; refresh(); });
 
-  function setHighlight(el) {
-    if (el === highlighted) return;
-    clearHighlight();
-    highlighted = el;
-    prevOutline = el.style.outline || '';
-    prevOutlineOffset = el.style.outlineOffset || '';
-    el.style.outline = '2px solid #22c55e';
-    el.style.outlineOffset = '2px';
-  }
+    var radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.style.cssText = 'margin-top:2px;accent-color:#3b82f6;flex-shrink:0;';
 
-  var overlay = document.createElement('div');
-  overlay.id = '__ft_pick_overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:transparent;';
-  document.documentElement.appendChild(overlay);
+    var col = document.createElement('div');
+    col.style.cssText = 'min-width:0;';
 
-  var tooltip = document.createElement('div');
-  tooltip.id = '__ft_pick_tooltip';
-  tooltip.style.cssText = 'position:fixed;z-index:2147483647;padding:4px 8px;background:#0f172a;color:#22c55e;border:1px solid #22c55e;border-radius:4px;font-size:11px;font-family:monospace;pointer-events:none;max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none;';
-  document.documentElement.appendChild(tooltip);
+    var titleEl = document.createElement('div');
+    titleEl.textContent = i === 0 ? 'Cell（依內容）' : ('Row（依位置，第 ' + extractRowNum(alt.expr) + ' 列）');
+    titleEl.style.cssText = 'font-size:12px;color:#e2e8f0;font-weight:500;margin-bottom:3px;';
 
-  overlay.addEventListener('mousemove', function(e) {
-    overlay.style.display = 'none';
-    var el = document.elementFromPoint(e.clientX, e.clientY);
-    overlay.style.display = '';
-    if (!el || el === overlay || el === tooltip) return;
-    setHighlight(el);
-    tooltip.textContent = getLocatorExpr(el);
-    var tx = Math.min(e.clientX + 14, window.innerWidth - 370);
-    var ty = e.clientY + 22;
-    if (ty + 30 > window.innerHeight) ty = e.clientY - 32;
-    tooltip.style.left = tx + 'px';
-    tooltip.style.top = ty + 'px';
-    tooltip.style.display = 'block';
+    var exprEl = document.createElement('div');
+    exprEl.textContent = alt.expr;
+    exprEl.style.cssText = 'font-size:11px;color:#94a3b8;font-family:monospace;word-break:break-all;';
+
+    col.appendChild(titleEl);
+    col.appendChild(exprEl);
+    row.appendChild(radio);
+    row.appendChild(col);
+    body.appendChild(row);
+    optionEls.push({ row: row, radio: radio });
   });
 
-  overlay.addEventListener('mouseleave', function() {
-    tooltip.style.display = 'none';
-  });
+  var footer = document.createElement('div');
+  footer.style.cssText = 'padding:10px 16px;border-top:1px solid #1e293b;display:flex;justify-content:flex-end;';
+  card.appendChild(footer);
 
-  overlay.addEventListener('click', function(e) {
-    overlay.style.display = 'none';
-    var el = document.elementFromPoint(e.clientX, e.clientY);
-    overlay.remove();
-    tooltip.remove();
-    clearHighlight();
-    if (!el) return;
-    var selector = generateCSSSelector(el);
-    var locatorExpr = getLocatorExpr(el);
-    var value;
-    if (assertionType === 'assertText') {
-      value = (el.textContent || '').trim().slice(0, 500);
-    } else if (assertionType === 'assertValue') {
-      value = el.value !== undefined ? String(el.value) : '';
-    }
-    try {
-      window.__flowtest_assert_report({ type: assertionType, selector: selector, locatorExpr: locatorExpr, value: value, url: window.location.href });
-    } catch(e) {}
-  });
-
-  document.addEventListener('keydown', function escHandler(e) {
-    if (e.key !== 'Escape') return;
+  var confirm = document.createElement('button');
+  confirm.textContent = '確認';
+  confirm.style.cssText = 'padding:6px 20px;border-radius:6px;border:1px solid #1d4ed8;background:#1e40af;' +
+    'color:#bfdbfe;font-size:13px;font-weight:600;cursor:pointer;';
+  confirm.addEventListener('click', function(e){
+    e.preventDefault();
     e.stopPropagation();
-    overlay.remove();
-    tooltip.remove();
-    clearHighlight();
-    document.removeEventListener('keydown', escHandler, true);
-    try { window.__flowtest_assert_cancel(); } catch(e) {}
-  }, true);
+    backdrop.remove();
+    try { window.__flowtest_locator_resolved(selectedIndex); } catch(err) {}
+  });
+  footer.appendChild(confirm);
+
+  refresh();
+  (document.body || document.documentElement).appendChild(backdrop);
 })();`
 }
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useEffect, useState } from 'react'
+import React, { useCallback, useMemo, useEffect, useState, useRef } from 'react'
 import ReactFlow, {
   Background,
   Controls,
@@ -10,93 +10,168 @@ import ReactFlow, {
   NodeMouseHandler,
   NodeChange,
   ReactFlowProvider,
+  Connection,
+  OnSelectionChangeParams,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
+import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
 import { ActionNode } from './ActionNode'
 import { BranchEdge } from './BranchEdge'
 import { NodeContextMenu } from './NodeContextMenu'
+import { CanvasStatusBar } from './CanvasStatusBar'
+import { ExtractSubflowModal } from './ExtractSubflowModal'
+import { GroupNameModal } from './GroupNameModal'
 import type { ActionNodeData } from './ActionNode'
+import { GroupNode } from './GroupNode'
+import { GroupBox } from './GroupBox'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
-import type { FlowNode, NodePosition, Action } from '@shared/types'
+import type { Action } from '@shared/types'
+import { computeTreeLayout } from '../../utils/treeLayout'
+import { validateExtraction, extractSubflow } from '../../utils/subflowExtraction'
+import { getGroupBoundary, groupBoxRect } from '../../utils/groups'
 
-const nodeTypes = { actionNode: ActionNode }
+const nodeTypes = { actionNode: ActionNode, groupNode: GroupNode, groupBox: GroupBox }
 const edgeTypes = { branchEdge: BranchEdge }
 
-const NODE_WIDTH = 200
-const NODE_HEIGHT = 70
-const H_MARGIN = 25
-const V_GAP = 30
-
-function computeTreeLayout(nodes: FlowNode[], rootNodeId: string): Map<string, NodePosition> {
-  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-  const positions = new Map<string, NodePosition>()
-
-  function subtreeWidth(nodeId: string): number {
-    const node = nodeMap.get(nodeId)
-    if (!node || node.childIds.length === 0) return NODE_WIDTH
-    const childWidths = node.childIds.map(subtreeWidth)
-    const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN
-    return Math.max(NODE_WIDTH, total)
-  }
-
-  function place(nodeId: string, centerX: number, y: number) {
-    positions.set(nodeId, { x: centerX - NODE_WIDTH / 2, y })
-    const node = nodeMap.get(nodeId)
-    if (!node || node.childIds.length === 0) return
-    const childWidths = node.childIds.map(subtreeWidth)
-    const totalW = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN
-    let x = centerX - totalW / 2
-    for (let i = 0; i < node.childIds.length; i++) {
-      place(node.childIds[i], x + childWidths[i] / 2, y + NODE_HEIGHT + V_GAP)
-      x += childWidths[i] + H_MARGIN
-    }
-  }
-
-  if (rootNodeId && nodeMap.has(rootNodeId)) {
-    const totalW = subtreeWidth(rootNodeId)
-    place(rootNodeId, totalW / 2, 0)
-  }
-
-  return positions
-}
-
 function FlowCanvasInner() {
-  const { currentFlow, selectNode, selectedNodeId, isRecording, isReplaying, replaySpeed, deleteNode, updateNode, insertCallFlowBefore, appendCallFlowAfter } =
-    useFlowStore()
+  const {
+    currentFlow,
+    selectNode,
+    selectedNodeId,
+    isRecording,
+    isReplaying,
+    replaySpeed,
+    deleteNode,
+    deleteNodesOnly,
+    updateNode,
+    runWithoutHistory,
+    insertCallFlowBefore,
+    appendCallFlowAfter,
+    materializeLayout,
+    relayoutAll,
+    connectNodes,
+    disconnectNodes,
+    disconnectNode,
+    createGroup,
+    toggleGroupCollapsed,
+    ungroupGroup,
+  } = useFlowStore()
   const { replayToNode, startBranchRecording } = usePlaywright()
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null)
   const [callFlowModal, setCallFlowModal] = useState<{ mode: 'insertBefore' | 'appendAfter'; targetNodeId: string } | null>(null)
 
-  // Convert FlowNodes to React Flow nodes and edges
-  const rfNodes: Node<ActionNodeData>[] = useMemo(() => {
+  // Multi-select state (local — PropertyPanel/context menu still use Zustand selectedNodeId)
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set())
+  const [extractModal, setExtractModal] = useState(false)
+  const [extractionInfo, setExtractionInfo] = useState<{ entryNodeId: string; exitNodeId: string } | null>(null)
+  const [groupModal, setGroupModal] = useState(false)
+
+  // Debounced disk save ref
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Latest position per node seen during an in-progress drag (drag-stop events omit position)
+  const dragPosRef = useRef<Map<string, { x: number; y: number }>>(new Map())
+
+  // Flip a group's collapsed state / dissolve a group, then persist.
+  const onToggleGroup = useCallback(
+    (groupId: string) => {
+      toggleGroupCollapsed(groupId)
+      const updated = useFlowStore.getState().currentFlow
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+    },
+    [toggleGroupCollapsed],
+  )
+  const onUngroup = useCallback(
+    (groupId: string) => {
+      ungroupGroup(groupId)
+      const updated = useFlowStore.getState().currentFlow
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+    },
+    [ungroupGroup],
+  )
+
+  // fn.position is the single source of truth for rendering. Collapsed groups hide their
+  // members and render a single group node in the entry's slot; expanded groups render a
+  // background box framing their member nodes.
+  const rfNodes = useMemo(() => {
     if (!currentFlow) return []
-    const layout = currentFlow.rootNodeId
-      ? computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId)
-      : new Map<string, NodePosition>()
-    return currentFlow.nodes.map((fn) => ({
-      id: fn.id,
-      type: 'actionNode',
-      position: layout.get(fn.id) ?? fn.position,
-      data: { flowNode: fn },
-      selected: fn.id === selectedNodeId,
-    }))
-  }, [currentFlow, selectedNodeId])
+    const groups = currentFlow.groups ?? []
+    const groupById = new Map(groups.map((g) => [g.id, g]))
+    const nodeById = new Map(currentFlow.nodes.map((n) => [n.id, n]))
+    const out: Node[] = []
+
+    // Expanded-group background boxes first → render behind member nodes
+    for (const g of groups) {
+      if (g.collapsed) continue
+      const members = currentFlow.nodes.filter((n) => n.groupId === g.id)
+      const rect = groupBoxRect(members)
+      if (!rect) continue
+      out.push({
+        id: `groupbox:${g.id}`,
+        type: 'groupBox',
+        position: { x: rect.x, y: rect.y },
+        data: { groupId: g.id, name: g.name, width: rect.width, height: rect.height, onToggle: onToggleGroup, onUngroup },
+        draggable: false,
+        selectable: false,
+        zIndex: 0,
+      })
+    }
+
+    // Visible action nodes (collapsed-group members are hidden)
+    for (const fn of currentFlow.nodes) {
+      const g = fn.groupId ? groupById.get(fn.groupId) : undefined
+      if (g && g.collapsed) continue
+      out.push({
+        id: fn.id,
+        type: 'actionNode',
+        position: fn.position,
+        data: { flowNode: fn },
+        selected: selectedNodeIds.size <= 1 ? fn.id === selectedNodeId : selectedNodeIds.has(fn.id),
+        zIndex: g ? 1 : undefined,
+      })
+    }
+
+    // Collapsed group nodes, placed at their entry node's slot
+    for (const g of groups) {
+      if (!g.collapsed) continue
+      const b = getGroupBoundary(currentFlow.nodes, g.id)
+      if (!b) continue
+      const entry = nodeById.get(b.entryId)!
+      out.push({
+        id: `group:${g.id}`,
+        type: 'groupNode',
+        position: entry.position,
+        data: { groupId: g.id, name: g.name, count: b.memberIds.size, onToggle: onToggleGroup, onUngroup },
+        zIndex: 1,
+      })
+    }
+    return out
+  }, [currentFlow, selectedNodeId, selectedNodeIds, onToggleGroup, onUngroup])
 
   const rfEdges: Edge[] = useMemo(() => {
     if (!currentFlow) return []
+    const groups = currentFlow.groups ?? []
+    const collapsedIds = new Set(groups.filter((g) => g.collapsed).map((g) => g.id))
+    const nodeById = new Map(currentFlow.nodes.map((n) => [n.id, n]))
+    // Route an endpoint through its collapsed group node, if any
+    const repr = (id: string) => {
+      const n = nodeById.get(id)
+      if (n && n.groupId && collapsedIds.has(n.groupId)) return `group:${n.groupId}`
+      return id
+    }
     const edges: Edge[] = []
+    const seen = new Set<string>()
     for (const node of currentFlow.nodes) {
       for (const childId of node.childIds) {
-        const child = currentFlow.nodes.find((n) => n.id === childId)
-        edges.push({
-          id: `${node.id}->${childId}`,
-          source: node.id,
-          target: childId,
-          type: 'branchEdge',
-          data: { label: child?.branchLabel },
-        })
+        const s = repr(node.id)
+        const t = repr(childId)
+        if (s === t) continue // internal edge of a collapsed group
+        const id = `${s}->${t}`
+        if (seen.has(id)) continue
+        seen.add(id)
+        const child = nodeById.get(childId)
+        edges.push({ id, source: s, target: t, type: 'branchEdge', data: { label: child?.branchLabel } })
       }
     }
     return edges
@@ -105,8 +180,17 @@ function FlowCanvasInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState<ActionNodeData>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
 
-  // Sync Zustand store → ReactFlow internal state
-  // (only recomputes when currentFlow nodes or selectedNodeId changes)
+  // On flow load: if positions were never finalized, materialize the tree layout into the
+  // store (one source of truth) and persist, so render and drag share the same positions.
+  useEffect(() => {
+    if (!currentFlow || currentFlow.positionsFinalized || !currentFlow.rootNodeId) return
+    const layout = computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId)
+    // Automatic one-time layout on load — position-only, keep it out of undo history.
+    runWithoutHistory(() => materializeLayout(layout))
+    const updated = useFlowStore.getState().currentFlow
+    if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+  }, [currentFlow?.id, materializeLayout, runWithoutHistory])
+
   useEffect(() => {
     setNodes(rfNodes)
   }, [rfNodes, setNodes])
@@ -117,30 +201,160 @@ function FlowCanvasInner() {
 
   const onNodeClick: NodeMouseHandler = useCallback(
     (_, node) => {
-      selectNode(node.id)
+      // Group nodes/boxes handle their own clicks (expand/collapse); ignore here
+      if (node.id.startsWith('group:') || node.id.startsWith('groupbox:')) return
+      // Only update property panel target on single-select clicks
+      if (selectedNodeIds.size <= 1) {
+        selectNode(node.id)
+      }
     },
-    [selectNode],
+    [selectNode, selectedNodeIds],
   )
 
   const handleNodesChange = useCallback(
     (changes: NodeChange[]) => {
       onNodesChange(changes)
+
+      // ReactFlow's drag-stop event (dragging:false) does NOT carry a position field —
+      // the final position only appears on the dragging:true events. Track the latest
+      // position per node from those, then persist it when the drag stops.
+      for (const c of changes) {
+        if (c.type === 'position' && (c as any).position) {
+          dragPosRef.current.set((c as any).id, (c as any).position)
+        }
+      }
+
+      const dragStops = changes.filter(
+        (c): c is NodeChange & { type: 'position'; id: string; dragging: false } =>
+          c.type === 'position' && (c as any).dragging === false,
+      )
+
+      if (dragStops.length > 0) {
+        // Position-only drag updates must not pollute the undo stack — otherwise
+        // every small reposition would flood history. Persist them silently.
+        runWithoutHistory(() => {
+          dragStops.forEach((c) => {
+            const pos = dragPosRef.current.get(c.id)
+            if (pos) {
+              // A collapsed group node is rendered at its entry node's slot — persist the drag
+              // onto the entry node so it stays put. Group boxes are not draggable.
+              let targetId = c.id
+              if (c.id.startsWith('group:')) {
+                const gid = c.id.slice('group:'.length)
+                const cf = useFlowStore.getState().currentFlow
+                const entryId = cf ? getGroupBoundary(cf.nodes, gid)?.entryId : undefined
+                if (!entryId) {
+                  dragPosRef.current.delete(c.id)
+                  return
+                }
+                targetId = entryId
+              }
+              updateNode(targetId, { position: pos })
+              dragPosRef.current.delete(c.id)
+            }
+          })
+        })
+
+        // Debounce disk save
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = setTimeout(async () => {
+          const updated = useFlowStore.getState().currentFlow
+          if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
+        }, 500)
+      }
     },
-    [onNodesChange],
+    [onNodesChange, updateNode, runWithoutHistory],
   )
+
+  const onSelectionChange = useCallback(({ nodes: selNodes }: OnSelectionChangeParams) => {
+    // Group nodes/boxes are not real flow nodes — exclude them from multi-select operations
+    setSelectedNodeIds(new Set(selNodes.map((n) => n.id).filter((id) => !id.startsWith('group'))))
+  }, [])
 
   const onPaneClick = useCallback(() => {
     selectNode(null)
     setContextMenu(null)
+    setSelectedNodeIds(new Set())
   }, [selectNode])
 
   const onNodeContextMenu = useCallback(
     (event: React.MouseEvent, node: Node) => {
       event.preventDefault()
+      // No context menu on group nodes/boxes — use their inline controls
+      if (node.id.startsWith('group:') || node.id.startsWith('groupbox:')) return
       selectNode(node.id)
       setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY })
     },
     [selectNode],
+  )
+
+  const onConnect = useCallback(
+    (connection: Connection) => {
+      if (!connection.source || !connection.target) return
+      connectNodes(connection.source, connection.target)
+      const updated = useFlowStore.getState().currentFlow
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+    },
+    [connectNodes],
+  )
+
+  const handleExtractClick = useCallback(() => {
+    if (!currentFlow) return
+    const validation = validateExtraction(currentFlow.nodes, selectedNodeIds)
+    if (!validation.valid) {
+      alert(validation.error)
+      return
+    }
+    setExtractionInfo({ entryNodeId: validation.entryNodeId!, exitNodeId: validation.exitNodeId! })
+    setExtractModal(true)
+  }, [currentFlow, selectedNodeIds])
+
+  // Form an in-place visual group from the current multi-selection (same shape constraints
+  // as sub-flow extraction: single entry, single exit, fully connected).
+  const handleGroupClick = useCallback(() => {
+    if (!currentFlow) return
+    const validation = validateExtraction(currentFlow.nodes, selectedNodeIds)
+    if (!validation.valid) {
+      alert(validation.error)
+      return
+    }
+    setGroupModal(true)
+  }, [currentFlow, selectedNodeIds])
+
+  const handleGroupConfirm = useCallback(
+    (name: string) => {
+      createGroup(Array.from(selectedNodeIds), name)
+      setSelectedNodeIds(new Set())
+      setGroupModal(false)
+      const updated = useFlowStore.getState().currentFlow
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+    },
+    [selectedNodeIds, createGroup],
+  )
+
+  const handleExtractConfirm = useCallback(
+    async (subFlowName: string) => {
+      if (!currentFlow || !extractionInfo) return
+      const subFlowId = uuidv4()
+      const callFlowNodeId = uuidv4()
+      const { newSubFlow, updatedParentFlow } = extractSubflow(
+        currentFlow,
+        selectedNodeIds,
+        extractionInfo.entryNodeId,
+        extractionInfo.exitNodeId,
+        subFlowName,
+        subFlowId,
+        callFlowNodeId,
+      )
+      await window.electronAPI.saveFlow(newSubFlow)
+      useFlowStore.getState().setCurrentFlow(updatedParentFlow)
+      await window.electronAPI.saveFlow(updatedParentFlow)
+      const list = await window.electronAPI.listFlows()
+      useFlowStore.getState().setFlows(list)
+      setSelectedNodeIds(new Set())
+      setExtractModal(false)
+    },
+    [currentFlow, extractionInfo, selectedNodeIds],
   )
 
   if (!currentFlow) {
@@ -160,12 +374,22 @@ function FlowCanvasInner() {
     )
   }
 
+  const entryNode = extractionInfo
+    ? currentFlow.nodes.find((n) => n.id === extractionInfo.entryNodeId)
+    : null
+  const exitNode = extractionInfo
+    ? currentFlow.nodes.find((n) => n.id === extractionInfo.exitNodeId)
+    : null
+
   return (
     <div style={{ flex: 1, position: 'relative' }}>
       {contextMenu && (() => {
         const contextNode = currentFlow?.nodes.find((n) => n.id === contextMenu.nodeId)
         const VALUE_TYPES = new Set(['fill', 'selectOption', 'goto', 'press', 'assertText', 'assertValue'])
         const hasValue = !!(contextNode?.action.value && VALUE_TYPES.has(contextNode.action.type))
+        const multi = selectedNodeIds.size >= 2 && selectedNodeIds.has(contextMenu.nodeId)
+        const deleteOnlyLabel = multi ? `刪除選取的 ${selectedNodeIds.size} 個節點` : '刪除此節點'
+        const disconnectLabel = multi ? `斷開選取的 ${selectedNodeIds.size} 個節點連綫` : '斷開此節點連綫'
         return (
           <NodeContextMenu
             nodeId={contextMenu.nodeId}
@@ -176,6 +400,14 @@ function FlowCanvasInner() {
             onBranchRecord={() => startBranchRecording(contextMenu.nodeId)}
             onDelete={async () => {
               deleteNode(contextMenu.nodeId)
+              const updated = useFlowStore.getState().currentFlow
+              if (updated) await window.electronAPI.saveFlow(updated)
+            }}
+            deleteOnlyLabel={deleteOnlyLabel}
+            onDeleteNodeOnly={async () => {
+              const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId]
+              deleteNodesOnly(ids)
+              setSelectedNodeIds(new Set())
               const updated = useFlowStore.getState().currentFlow
               if (updated) await window.electronAPI.saveFlow(updated)
             }}
@@ -191,10 +423,19 @@ function FlowCanvasInner() {
               const updated = useFlowStore.getState().currentFlow
               if (updated) await window.electronAPI.saveFlow(updated)
             }}
-            isRoot={contextNode?.parentId === null}
-            isLeaf={(contextNode?.childIds.length ?? 0) === 0}
             onInsertCallFlowBefore={() => setCallFlowModal({ mode: 'insertBefore', targetNodeId: contextMenu.nodeId })}
             onAppendCallFlowAfter={() => setCallFlowModal({ mode: 'appendAfter', targetNodeId: contextMenu.nodeId })}
+            showExtract={multi}
+            selectedCount={selectedNodeIds.size}
+            onExtract={handleExtractClick}
+            onGroup={handleGroupClick}
+            onDisconnect={async () => {
+              const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId]
+              ids.forEach((id) => disconnectNode(id))
+              const updated = useFlowStore.getState().currentFlow
+              if (updated) await window.electronAPI.saveFlow(updated)
+            }}
+            disconnectLabel={disconnectLabel}
           />
         )
       })()}
@@ -206,6 +447,9 @@ function FlowCanvasInner() {
           onConfirm={async (callFlowAction: Action) => {
             if (callFlowModal.mode === 'insertBefore') {
               insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction)
+              // Inserting (esp. before the root) shifts the tree; re-layout so the
+              // new node and its subtree don't overlap other flows on the canvas.
+              relayoutAll()
             } else {
               appendCallFlowAfter(callFlowModal.targetNodeId, callFlowAction)
             }
@@ -215,6 +459,24 @@ function FlowCanvasInner() {
           }}
         />
       )}
+      {extractModal && (
+        <ExtractSubflowModal
+          selectedCount={selectedNodeIds.size}
+          entryNodeDescription={entryNode?.action.description ?? ''}
+          exitNodeDescription={exitNode?.action.description ?? ''}
+          onConfirm={handleExtractConfirm}
+          onClose={() => setExtractModal(false)}
+        />
+      )}
+      {groupModal && (
+        <GroupNameModal
+          selectedCount={selectedNodeIds.size}
+          onConfirm={handleGroupConfirm}
+          onClose={() => setGroupModal(false)}
+        />
+      )}
+
+      {/* Recording indicator */}
       {isRecording && (
         <div
           style={{
@@ -248,6 +510,11 @@ function FlowCanvasInner() {
         </div>
       )}
 
+      {/* Multi-select status bar */}
+      {selectedNodeIds.size >= 2 && !isRecording && !isReplaying && (
+        <CanvasStatusBar selectedCount={selectedNodeIds.size} />
+      )}
+
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -256,11 +523,21 @@ function FlowCanvasInner() {
         onNodeClick={onNodeClick}
         onNodeContextMenu={onNodeContextMenu}
         onPaneClick={onPaneClick}
+        onSelectionChange={onSelectionChange}
+        onConnect={onConnect}
+        onNodesDelete={() => { /* no-op: node deletion only via context menu */ }}
+        onEdgesDelete={(edgesToDelete) => {
+          edgesToDelete.forEach((e) => disconnectNodes(e.source, e.target))
+          const updated = useFlowStore.getState().currentFlow
+          if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+        }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        multiSelectionKeyCode="Shift"
+        selectionOnDrag={false}
+        deleteKeyCode={null}
         fitView
         style={{ background: '#0f172a' }}
-        deleteKeyCode={null}
       >
         <Background color="#1e293b" gap={20} />
         <Controls />

@@ -20,6 +20,7 @@ export function BranchEdge({
   targetPosition,
   data,
   markerEnd,
+  selected,
 }: EdgeProps<BranchEdgeData>) {
   const [edgePath, labelX, labelY] = getBezierPath({
     sourceX,
@@ -32,7 +33,7 @@ export function BranchEdge({
 
   return (
     <>
-      <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={{ stroke: '#475569', strokeWidth: 2 }} />
+      <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={{ stroke: selected ? '#60a5fa' : '#475569', strokeWidth: selected ? 2.5 : 2 }} />
       {data?.label && (
         <EdgeLabelRenderer>
           <div

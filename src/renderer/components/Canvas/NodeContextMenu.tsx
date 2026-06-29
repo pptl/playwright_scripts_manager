@@ -8,15 +8,21 @@ interface NodeContextMenuProps {
   onReplay: () => void
   onBranchRecord: () => void
   onDelete: () => void
+  onDeleteNodeOnly: () => void
+  deleteOnlyLabel: string
   isRecording: boolean
   isReplaying: boolean
   hasValue: boolean
   currentCaptureAs?: string
   onCaptureAsVar: (varName: string | undefined) => void
-  isRoot: boolean
-  isLeaf: boolean
   onInsertCallFlowBefore: () => void
   onAppendCallFlowAfter: () => void
+  showExtract: boolean
+  selectedCount: number
+  onExtract: () => void
+  onGroup: () => void
+  onDisconnect: () => void
+  disconnectLabel: string
 }
 
 export function NodeContextMenu({
@@ -26,15 +32,21 @@ export function NodeContextMenu({
   onReplay,
   onBranchRecord,
   onDelete,
+  onDeleteNodeOnly,
+  deleteOnlyLabel,
   isRecording,
   isReplaying,
   hasValue,
   currentCaptureAs,
   onCaptureAsVar,
-  isRoot,
-  isLeaf,
   onInsertCallFlowBefore,
   onAppendCallFlowAfter,
+  showExtract,
+  selectedCount,
+  onExtract,
+  onGroup,
+  onDisconnect,
+  disconnectLabel,
 }: NodeContextMenuProps) {
   const disabled = isRecording || isReplaying
   const [captureInput, setCaptureInput] = useState<string | null>(null)
@@ -96,29 +108,49 @@ export function NodeContextMenu({
           }}
         />
 
+        {showExtract && (
+          <>
+            <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+            <MenuItem
+              icon="⊞"
+              label={`將選取的 ${selectedCount} 個節點組成群組`}
+              disabled={disabled}
+              onClick={() => {
+                onClose()
+                onGroup()
+              }}
+            />
+            <MenuItem
+              icon="⧉"
+              label={`將選取的 ${selectedCount} 個節點另存為子流程`}
+              disabled={disabled}
+              onClick={() => {
+                onClose()
+                onExtract()
+              }}
+            />
+          </>
+        )}
+
         <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
-        {!isRoot && (
-          <MenuItem
-            icon="⛓"
-            label="在此節點前插入子流程"
-            disabled={disabled}
-            onClick={() => {
-              onClose()
-              onInsertCallFlowBefore()
-            }}
-          />
-        )}
-        {isLeaf && (
-          <MenuItem
-            icon="⛓"
-            label="在此節點後加入子流程"
-            disabled={disabled}
-            onClick={() => {
-              onClose()
-              onAppendCallFlowAfter()
-            }}
-          />
-        )}
+        <MenuItem
+          icon="⛓"
+          label="在此節點前插入子流程"
+          disabled={disabled}
+          onClick={() => {
+            onClose()
+            onInsertCallFlowBefore()
+          }}
+        />
+        <MenuItem
+          icon="⛓"
+          label="在此節點後加入子流程"
+          disabled={disabled}
+          onClick={() => {
+            onClose()
+            onAppendCallFlowAfter()
+          }}
+        />
 
         {hasValue && (
           <>
@@ -178,6 +210,27 @@ export function NodeContextMenu({
         )}
 
         <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+        <MenuItem
+          icon="⊘"
+          label={disconnectLabel}
+          disabled={disabled}
+          onClick={() => {
+            onClose()
+            onDisconnect()
+          }}
+        />
+
+        <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+        <MenuItem
+          icon="✂"
+          label={deleteOnlyLabel}
+          disabled={disabled}
+          danger
+          onClick={() => {
+            onClose()
+            onDeleteNodeOnly()
+          }}
+        />
         <MenuItem
           icon="🗑"
           label="刪除此節點及其子節點"

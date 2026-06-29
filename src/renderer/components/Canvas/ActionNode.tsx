@@ -71,7 +71,7 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
         position: 'relative',
       }}
     >
-      <Handle type="target" position={Position.Top} style={{ background: '#555', pointerEvents: 'none', width: 8, height: 8 }} />
+      <Handle type="target" position={Position.Top} style={{ background: '#555', width: 8, height: 8 }} />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{ fontSize: 16 }}>{TYPE_ICONS[action.type] ?? '⚡'}</span>
@@ -158,7 +158,7 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Bottom} style={{ background: '#555', pointerEvents: 'none', width: 8, height: 8 }} />
+      <Handle type="source" position={Position.Bottom} style={{ background: '#555', width: 8, height: 8, cursor: 'crosshair' }} />
     </div>
   )
 }

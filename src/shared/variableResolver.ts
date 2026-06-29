@@ -175,6 +175,52 @@ export function sessionAwareValueToCodeExpr(
 }
 
 /**
+ * Transform variable placeholders inside a locatorExpr string for code generation.
+ * Quoted string arguments containing {{...}} are rewritten to JS expressions:
+ *   '{{sessionVar}}' → bare identifier  sessionVar
+ *   '{{profileVar}}' → bare identifier  _ftProf_profileVar
+ *   '{{randomText}}' → _ftRandomText()
+ *   Mixed content ('prefix_{{var}}') → template literal `prefix_${_ftProf_var}`
+ */
+export function locatorExprToCode(
+  expr: string,
+  profileVarKeys?: Set<string>,
+  sessionVarNames?: Set<string>,
+): string {
+  return expr.replace(/'([^']*\{\{[^}]+\}\}[^']*)'|"([^"]*\{\{[^}]+\}\}[^"]*)"/g, (match, sq, dq) => {
+    const inner = sq ?? dq
+    const singleVar = inner.match(/^\{\{(\w+)\}\}$/)
+    if (singleVar) {
+      const name = singleVar[1]
+      if (sessionVarNames?.has(name)) return name
+      if (profileVarKeys?.has(name)) return `_ftProf_${name}`
+      if (name === 'randomText') return '_ftRandomText()'
+      if (name === 'randomNumber') return '_ftRandomNumber()'
+      if (name === 'randomOneText') return '_ftRandomOneLetter()'
+      if (name === 'randomOneNumber') return '_ftRandomOneDigit()'
+      if (name === 'timestamp') return '_ftTimestamp()'
+      return match
+    }
+    // Mixed content → template literal
+    const templateInner = inner
+      .replace(/\\/g, '\\\\')
+      .replace(/`/g, '\\`')
+      .replace(/\$\{/g, '\\${')
+      .replace(/\{\{(\w+)\}\}/g, (m, name) => {
+        if (sessionVarNames?.has(name)) return `\${${name}}`
+        if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`
+        if (name === 'randomText') return '${_ftRandomText()}'
+        if (name === 'randomNumber') return '${_ftRandomNumber()}'
+        if (name === 'randomOneText') return '${_ftRandomOneLetter()}'
+        if (name === 'randomOneNumber') return '${_ftRandomOneDigit()}'
+        if (name === 'timestamp') return '${_ftTimestamp()}'
+        return m
+      })
+    return '`' + templateInner + '`'
+  })
+}
+
+/**
  * Emit top-level const declarations for profile variables.
  * e.g. { domain: 'https://prod.com', admin_name: 'admin' }
  *   → "const _ftProf_domain = 'https://prod.com';\nconst _ftProf_admin_name = 'admin';"

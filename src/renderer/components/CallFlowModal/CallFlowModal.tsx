@@ -4,8 +4,9 @@ import type { Action, Flow, FlowNode } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
 
 interface CallFlowModalProps {
-  mode: 'insertBefore' | 'appendAfter' | 'asRoot'
+  mode: 'insertBefore' | 'appendAfter'
   targetNodeId?: string
+  preselectedFlowId?: string
   onClose: () => void
   onConfirm: (callFlowAction: Action) => void
 }
@@ -22,10 +23,10 @@ function getBreadcrumb(node: FlowNode, nodeMap: Map<string, FlowNode>): string {
   return parts.join(' → ')
 }
 
-export function CallFlowModal({ mode, onClose, onConfirm }: CallFlowModalProps) {
+export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: CallFlowModalProps) {
   const { currentFlow } = useFlowStore()
 
-  const [step, setStep] = useState<Step>(1)
+  const [step, setStep] = useState<Step>(preselectedFlowId ? 2 : 1)
   const [allFlows, setAllFlows] = useState<Pick<Flow, 'id' | 'name' | 'description' | 'updatedAt'>[]>([])
   const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null)
   const [subFlow, setSubFlow] = useState<Flow | null>(null)
@@ -41,6 +42,10 @@ export function CallFlowModal({ mode, onClose, onConfirm }: CallFlowModalProps) 
       setAllFlows(flows.filter((f) => f.id !== currentFlow?.id))
     })
   }, [currentFlow?.id])
+
+  useEffect(() => {
+    if (preselectedFlowId) handleSelectFlow(preselectedFlowId)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSelectFlow = async (flowId: string) => {
     setCycleError(null)
@@ -130,12 +135,11 @@ export function CallFlowModal({ mode, onClose, onConfirm }: CallFlowModalProps) 
     (step === 2 && !!selectedExitNodeId) ||
     step === 3
 
-  const modeLabel =
-    mode === 'insertBefore' ? '在此節點前插入子流程' :
-    mode === 'appendAfter' ? '在此節點後加入子流程' :
-    '加入Flow作為起始節點'
+  const modeLabel = mode === 'insertBefore' ? '在此節點前插入子流程' : '在此節點後加入子流程'
 
   const totalSteps = subProfiles.length > 1 ? 3 : 2
+  const displayStep = preselectedFlowId ? step - 1 : step
+  const displayTotal = preselectedFlowId ? totalSteps - 1 : totalSteps
 
   return (
     <div style={{
@@ -156,7 +160,7 @@ export function CallFlowModal({ mode, onClose, onConfirm }: CallFlowModalProps) 
           <div>
             <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>{modeLabel}</div>
             <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
-              步驟 {step} / {totalSteps}
+              步驟 {displayStep} / {displayTotal}
             </div>
           </div>
           <button onClick={onClose} style={{
@@ -335,7 +339,7 @@ export function CallFlowModal({ mode, onClose, onConfirm }: CallFlowModalProps) 
           padding: '12px 20px', borderTop: '1px solid #334155',
           display: 'flex', justifyContent: 'flex-end', gap: 8,
         }}>
-          {step > 1 && (
+          {step > 1 && !preselectedFlowId && (
             <button
               onClick={() => setStep((s) => (s - 1) as Step)}
               style={{

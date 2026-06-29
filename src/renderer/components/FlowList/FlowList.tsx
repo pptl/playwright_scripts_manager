@@ -6,19 +6,22 @@ import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import type { Action } from '@shared/types'
 
 export function FlowList() {
-  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameCurrentFlow } = useFlowStore()
+  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, renameCurrentFlow } = useFlowStore()
   const { refreshFlowList, refreshProjectList, openFlow, deleteCurrentFlow } = useFlowManager()
 
   const [contextMenu, setContextMenu] = useState<{ flowId: string; x: number; y: number } | null>(null)
+  const [projectMenu, setProjectMenu] = useState<{ projectId: string; name: string; x: number; y: number } | null>(null)
   const [addSubFlowFlowId, setAddSubFlowFlowId] = useState<string | null>(null)
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [renameTarget, setRenameTarget] = useState<{ flowId: string; name: string } | null>(null)
+  const [renameProjectTarget, setRenameProjectTarget] = useState<{ projectId: string; name: string } | null>(null)
   // Which groups' "子流程" subsections are expanded (key = projectId or '__unassigned__'); default collapsed
   const [expandedSubFlows, setExpandedSubFlows] = useState<Set<string>>(new Set())
   // Which project folders are collapsed (key = projectId or '__unassigned__'); default expanded (empty set)
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set())
   const contextMenuRef = useRef<HTMLDivElement>(null)
+  const projectMenuRef = useRef<HTMLDivElement>(null)
 
   const toggleSubFlows = (key: string) => {
     setExpandedSubFlows((prev) => {
@@ -53,6 +56,26 @@ export function FlowList() {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [contextMenu])
+
+  useEffect(() => {
+    if (!projectMenu) return
+    const handler = (e: MouseEvent) => {
+      if (projectMenuRef.current && !projectMenuRef.current.contains(e.target as Node)) {
+        setProjectMenu(null)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [projectMenu])
+
+  const handleRenameProject = async () => {
+    if (!renameProjectTarget) return
+    const newName = renameProjectTarget.name.trim()
+    if (!newName) return
+    await renameProject(renameProjectTarget.projectId, newName)
+    setRenameProjectTarget(null)
+    await refreshProjectList()
+  }
 
   const handleAssign = async (flowId: string, projectId: string | null) => {
     await assignFlowToProject(flowId, projectId)
@@ -303,6 +326,11 @@ export function FlowList() {
             <div key={proj.id}>
               <div
                 onClick={() => toggleProject(proj.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setProjectMenu({ projectId: proj.id, name: proj.name, x: e.clientX, y: e.clientY })
+                }}
                 style={{
                   padding: '6px 12px 6px 8px',
                   fontSize: 12,
@@ -323,24 +351,6 @@ export function FlowList() {
                   {proj.name}
                 </span>
                 <span style={{ color: '#475569', fontSize: 11, fontWeight: 500 }}>({projFlows.length})</span>
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleDeleteProject(proj.id, proj.name) }}
-                  title="刪除專案"
-                  style={{
-                    background: 'transparent',
-                    border: 'none',
-                    color: '#475569',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    lineHeight: 1,
-                    padding: '0 2px',
-                    flexShrink: 0,
-                  }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#f87171' }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = '#475569' }}
-                >
-                  ✕
-                </button>
               </div>
               {!collapsed && (
                 <div style={{ marginLeft: 13 }}>
@@ -398,6 +408,48 @@ export function FlowList() {
           })()
         )}
       </div>
+
+      {/* Project context menu */}
+      {projectMenu && (
+        <div
+          ref={projectMenuRef}
+          style={{
+            position: 'fixed',
+            top: projectMenu.y,
+            left: projectMenu.x,
+            background: '#1e293b',
+            border: '1px solid #334155',
+            borderRadius: 8,
+            zIndex: 9999,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+            padding: '4px 0',
+            minWidth: 150,
+          }}
+        >
+          <div
+            onClick={() => {
+              setRenameProjectTarget({ projectId: projectMenu.projectId, name: projectMenu.name })
+              setProjectMenu(null)
+            }}
+            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+          >
+            ✎ 重新命名
+          </div>
+          <div
+            onClick={() => {
+              handleDeleteProject(projectMenu.projectId, projectMenu.name)
+              setProjectMenu(null)
+            }}
+            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#f87171'; (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#cbd5e1'; (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+          >
+            🗑 刪除專案
+          </div>
+        </div>
+      )}
 
       {/* Context menu */}
       {contextMenu && (
@@ -697,6 +749,90 @@ export function FlowList() {
                   background: renameTarget.name.trim() ? '#3b82f6' : '#374151',
                   color: renameTarget.name.trim() ? '#fff' : '#6b7280',
                   cursor: renameTarget.name.trim() ? 'pointer' : 'not-allowed',
+                  fontSize: 12,
+                }}
+              >
+                儲存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rename project dialog */}
+      {renameProjectTarget && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 3000,
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setRenameProjectTarget(null) }}
+        >
+          <div
+            style={{
+              background: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: 12,
+              padding: 24,
+              minWidth: 300,
+            }}
+          >
+            <h2 style={{ fontSize: 16, color: '#e2e8f0', marginBottom: 14, margin: '0 0 14px' }}>
+              重新命名專案
+            </h2>
+            <input
+              autoFocus
+              value={renameProjectTarget.name}
+              onChange={(e) => setRenameProjectTarget({ ...renameProjectTarget, name: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleRenameProject()
+                if (e.key === 'Escape') setRenameProjectTarget(null)
+              }}
+              placeholder="專案名稱"
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '8px 10px',
+                background: '#0f172a',
+                border: '1px solid #334155',
+                borderRadius: 6,
+                color: '#e2e8f0',
+                fontSize: 13,
+                outline: 'none',
+                marginBottom: 16,
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setRenameProjectTarget(null)}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  border: '1px solid #475569',
+                  background: 'transparent',
+                  color: '#94a3b8',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                }}
+              >
+                取消
+              </button>
+              <button
+                onClick={handleRenameProject}
+                disabled={!renameProjectTarget.name.trim()}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: 6,
+                  border: 'none',
+                  background: renameProjectTarget.name.trim() ? '#3b82f6' : '#374151',
+                  color: renameProjectTarget.name.trim() ? '#fff' : '#6b7280',
+                  cursor: renameProjectTarget.name.trim() ? 'pointer' : 'not-allowed',
                   fontSize: 12,
                 }}
               >

@@ -122,6 +122,7 @@ interface FlowStore {
   renameEnvironment: (envId: string, name: string) => Promise<void>
   deleteEnvironment: (envId: string) => Promise<void>
   deleteProject: (projectId: string) => Promise<void>
+  renameProject: (projectId: string, name: string) => Promise<void>
   /** Assign any flow (by ID) to a project. Pass null to detach. */
   assignFlowToProject: (flowId: string, projectId: string | null) => Promise<void>
 }
@@ -805,6 +806,19 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     set({
       projects: list,
       ...(currentProject?.id === projectId ? { currentProject: null, activeEnvironmentId: null } : {}),
+    })
+  },
+
+  renameProject: async (projectId, name) => {
+    const full = await window.electronAPI.loadProject(projectId)
+    if (!full) return
+    const updated: Project = { ...full, name, updatedAt: new Date().toISOString() }
+    await window.electronAPI.saveProject(updated)
+    const list = await window.electronAPI.listProjects()
+    const { currentProject } = get()
+    set({
+      projects: list,
+      ...(currentProject?.id === projectId ? { currentProject: updated } : {}),
     })
   },
 

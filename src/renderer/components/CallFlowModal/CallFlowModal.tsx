@@ -13,6 +13,11 @@ interface CallFlowModalProps {
 
 type Step = 1 | 2 | 3
 
+// Sentinel mapping key used when the parent flow has no profiles at all —
+// there's no parent profile ID to key the mapping by, so we fall back to
+// this fixed key and rely on the legacy subFlowProfileId field for persistence.
+const NO_PARENT_PROFILE_KEY = '__no_parent_profile__'
+
 function getBreadcrumb(node: FlowNode, nodeMap: Map<string, FlowNode>): string {
   const parts: string[] = []
   let cur: FlowNode | undefined = node
@@ -75,7 +80,11 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
     const subProfiles = flow.profiles ?? []
     const defaultSubProfileId = subProfiles.length > 0 ? subProfiles[0].id : null
     const initMapping: Record<string, string | null> = {}
-    parentProfiles.forEach((p) => { initMapping[p.id] = defaultSubProfileId })
+    if (parentProfiles.length > 0) {
+      parentProfiles.forEach((p) => { initMapping[p.id] = defaultSubProfileId })
+    } else {
+      initMapping[NO_PARENT_PROFILE_KEY] = defaultSubProfileId
+    }
     setProfileMapping(initMapping)
   }
 
@@ -94,10 +103,11 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
     const parentProfiles = currentFlow?.profiles ?? []
     const subProfiles = subFlow.profiles ?? []
 
-    // Single-parent-profile case: keep legacy subFlowProfileId + subFlowProfileName for badge display
+    // Single-parent-profile case (including zero parent profiles): keep legacy
+    // subFlowProfileId + subFlowProfileName for badge display and replay/export resolution
     const isSingleParentProfile = parentProfiles.length <= 1
-    const singleMappedId = isSingleParentProfile && parentProfiles.length === 1
-      ? (profileMapping[parentProfiles[0].id] ?? null)
+    const singleMappedId = isSingleParentProfile
+      ? (profileMapping[parentProfiles.length === 1 ? parentProfiles[0].id : NO_PARENT_PROFILE_KEY] ?? null)
       : null
 
     const callFlowAction: Action = {
@@ -302,15 +312,12 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
                     選擇子流程套用的配置（Profile）
                   </div>
                   {subProfiles.map((sp) => {
-                    const mappedId = parentProfiles.length > 0 ? profileMapping[parentProfiles[0].id] : null
+                    const mappingKey = parentProfiles.length > 0 ? parentProfiles[0].id : NO_PARENT_PROFILE_KEY
+                    const mappedId = profileMapping[mappingKey]
                     return (
                       <div
                         key={sp.id}
-                        onClick={() => {
-                          if (parentProfiles.length > 0) {
-                            setProfileMapping({ [parentProfiles[0].id]: sp.id })
-                          }
-                        }}
+                        onClick={() => setProfileMapping({ [mappingKey]: sp.id })}
                         style={{
                           padding: '10px 12px', borderRadius: 6, marginBottom: 6, cursor: 'pointer',
                           background: mappedId === sp.id ? '#1e3a5f' : '#0f172a',

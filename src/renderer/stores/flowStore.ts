@@ -187,12 +187,6 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setFlows: (flows) => set({ flows }),
 
   createFlow: (name, baseURL, description) => {
-    const origin = (() => { try { return new URL(baseURL).origin } catch { return baseURL } })()
-    const firstProfile: FlowProfile = {
-      id: uuidv4(),
-      name: '錄製',
-      vars: [{ key: 'domain', value: origin }],
-    }
     const flow: Flow = {
       id: uuidv4(),
       name,
@@ -200,11 +194,11 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       baseURL,
-      profiles: [firstProfile],
+      profiles: [],
       nodes: [],
       rootNodeId: '',
     }
-    set({ currentFlow: flow, activeProfileId: firstProfile.id })
+    set({ currentFlow: flow, activeProfileId: null })
     return flow
   },
 

@@ -9,3 +9,5 @@ exports/*
 !exports/.gitkeep
 flows/*
 !flows/.gitkeep
+projects/*
+!projects/.gitkeep

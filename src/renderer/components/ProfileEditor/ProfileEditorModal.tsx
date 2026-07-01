@@ -56,7 +56,6 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
   }
 
   const handleDeleteProfile = async (id: string) => {
-    if (profiles.length <= 1) return
     const nextProfile = profiles.find((p) => p.id !== id)
     await deleteProfile(id)
     if (selectedProfileId === id && nextProfile) {
@@ -217,28 +216,26 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         >
                           ✏
                         </button>
-                        {profiles.length > 1 && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleDeleteProfile(p.id) }}
-                            title="刪除此配置"
-                            style={{
-                              flexShrink: 0,
-                              background: 'transparent',
-                              border: 'none',
-                              cursor: 'pointer',
-                              color: '#f87171',
-                              fontSize: 13,
-                              padding: '1px 3px',
-                              borderRadius: 3,
-                              opacity: 0.7,
-                              lineHeight: 1,
-                            }}
-                            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '1' }}
-                            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.7' }}
-                          >
-                            ✕
-                          </button>
-                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteProfile(p.id) }}
+                          title="刪除此配置"
+                          style={{
+                            flexShrink: 0,
+                            background: 'transparent',
+                            border: 'none',
+                            cursor: 'pointer',
+                            color: '#f87171',
+                            fontSize: 13,
+                            padding: '1px 3px',
+                            borderRadius: 3,
+                            opacity: 0.7,
+                            lineHeight: 1,
+                          }}
+                          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '1' }}
+                          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.7' }}
+                        >
+                          ✕
+                        </button>
                       </>
                     )}
                   </div>

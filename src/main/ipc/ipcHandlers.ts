@@ -45,12 +45,12 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       await browserController.close().catch(() => {})
     }
     browserController = new BrowserController()
-    await browserController.launch()
+    await browserController.launch({ maximized: true })
     const page = browserController.getPage()
 
     // Branch recording: silently replay to the branch point first
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId)
+      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId, payload.envVars, payload.activeProjectId)
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -97,10 +97,10 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     try {
       if (!browserController || !browserController.isRunning()) {
         browserController = new BrowserController()
-        await browserController.launch()
+        await browserController.launch({ maximized: true })
       }
       const page = browserController.getPage()
-      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId)
+      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId, payload.envVars, payload.activeProjectId)
 
       await replayer.replayToNode(
         payload.nodes,

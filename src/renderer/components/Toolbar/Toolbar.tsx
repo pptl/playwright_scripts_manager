@@ -4,7 +4,9 @@ import { usePlaywright } from '../../hooks/usePlaywright'
 import { useFlowManager } from '../../hooks/useFlowStore'
 import { TestOutputModal } from './TestOutputModal'
 import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
+import { ProjectEnvVarModal } from '../ProjectEnvVar/ProjectEnvVarModal'
 import type { ExportConfig, TestFinishedPayload } from '../../../shared/types'
+import { flattenProjectEnvVars, resolveValue } from '../../../shared/variableResolver'
 
 const btn = (label: string, onClick: () => void, disabled = false, danger = false) => (
   <button
@@ -68,6 +70,7 @@ export function Toolbar() {
   const [showEnvMenu, setShowEnvMenu] = useState(false)
   const [addingEnv, setAddingEnv] = useState(false)
   const [newEnvName, setNewEnvName] = useState('')
+  const [showEnvVarEditor, setShowEnvVarEditor] = useState(false)
   const envMenuRef = useRef<HTMLDivElement>(null)
 
   // Close profile menu on outside click
@@ -102,14 +105,21 @@ export function Toolbar() {
   const activeProfileName = activeProfile?.name ?? '— 無配置 —'
   const isOverriding = activeProfile !== null && activeProfile !== profiles[0]
 
-  /** Build profileVars with env-aware resolution: envValues[activeEnvId] ?? value */
+  /** Active project's environment variables flattened for the active environment. */
+  function getEnvVars(): Record<string, string> {
+    return flattenProjectEnvVars(currentProject?.envVars, activeEnvironmentId)
+  }
+
+  /** Build profileVars with env-aware resolution: envValues[activeEnvId] ?? value,
+   *  then resolve any {{envKey}} references against the active project's env vars. */
   function getProfileVars(): Record<string, string> | undefined {
     if (!activeProfile) return undefined
+    const envVars = getEnvVars()
     return Object.fromEntries(
-      activeProfile.vars.map((v) => [
-        v.key,
-        (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value,
-      ]),
+      activeProfile.vars.map((v) => {
+        const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
+        return [v.key, resolveValue(raw, undefined, envVars)]
+      }),
     )
   }
 
@@ -156,6 +166,8 @@ export function Toolbar() {
       profileVars: getProfileVars(),
       activeProfileId: activeProfileId ?? undefined,
       activeEnvironmentId: activeEnvironmentId ?? undefined,
+      envVars: getEnvVars(),
+      activeProjectId: currentProject?.id,
     }
     try {
       const path = await window.electronAPI.exportScripts(currentFlow, config)
@@ -174,6 +186,8 @@ export function Toolbar() {
       profileVars: getProfileVars(),
       activeProfileId: activeProfileId ?? undefined,
       activeEnvironmentId: activeEnvironmentId ?? undefined,
+      envVars: getEnvVars(),
+      activeProjectId: currentProject?.id,
     }
     testLinesRef.current = []
     setTestLines([])
@@ -398,6 +412,22 @@ export function Toolbar() {
                     </button>
                   )}
                 </div>
+
+                {/* Manage project environment variables */}
+                <div style={{ borderTop: '1px solid #334155', padding: '6px 10px' }}>
+                  <button
+                    onClick={() => { setShowEnvVarEditor(true); setShowEnvMenu(false) }}
+                    style={{
+                      width: '100%', padding: '5px 0', borderRadius: 3,
+                      border: 'none', background: 'transparent',
+                      color: '#4ade80', fontSize: 12, cursor: 'pointer', textAlign: 'left', paddingLeft: 8,
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = '#0f172a' }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+                  >
+                    🔧 管理環境變數…
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -522,7 +552,6 @@ export function Toolbar() {
             justifyContent: 'center',
             zIndex: 1000,
           }}
-          onClick={(e) => { if (e.target === e.currentTarget) { setShowNewFlowDialog(false); setNewProjectId('') } }}
         >
           <div
             style={{
@@ -597,6 +626,11 @@ export function Toolbar() {
       {/* Profile Editor Modal */}
       {showProfileEditor && (
         <ProfileEditorModal onClose={() => setShowProfileEditor(false)} />
+      )}
+
+      {/* Project Environment Variable Editor */}
+      {showEnvVarEditor && (
+        <ProjectEnvVarModal onClose={() => setShowEnvVarEditor(false)} />
       )}
 
     </div>

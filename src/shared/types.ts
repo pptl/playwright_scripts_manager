@@ -108,10 +108,23 @@ export interface ProjectEnvironment {
   name: string
 }
 
+/** A project-level environment variable: one key with a value per environment.
+ *  Flow profile variable values can reference it via {{key}}, resolved against the
+ *  active environment. Resolution: values[activeEnvironmentId] ?? '' */
+export interface ProjectEnvVar {
+  key: string
+  /** Per-environment value keyed by ProjectEnvironment.id */
+  values: Record<string, string>
+  description?: string
+}
+
 export interface Project {
   id: string
   name: string
   environments: ProjectEnvironment[]
+  /** Project-level environment variables shared by all flows in this project.
+   *  Referenced from flow profile variable values via {{key}}. */
+  envVars?: ProjectEnvVar[]
   createdAt: string
   updatedAt: string
 }
@@ -160,6 +173,11 @@ export interface ExportConfig {
   activeProfileId?: string
   /** Active project environment ID — used to resolve envValues overrides in sub-flow profiles */
   activeEnvironmentId?: string
+  /** Active project's environment variables, flattened for the active environment (key -> value).
+   *  Used to resolve {{key}} references inside sub-flow profile values. */
+  envVars?: Record<string, string>
+  /** ID of the active project — env-var references only resolve for (sub-)flows in this project */
+  activeProjectId?: string
 }
 
 export interface TestPath {
@@ -234,6 +252,10 @@ export interface ReplayToNodePayload {
   activeProfileId?: string
   /** Active project environment ID — used to resolve envValues overrides in sub-flow profiles */
   activeEnvironmentId?: string
+  /** Active project's environment variables, flattened for the active environment (key -> value) */
+  envVars?: Record<string, string>
+  /** ID of the active project — env-var references only resolve for (sub-)flows in this project */
+  activeProjectId?: string
 }
 
 export interface ReplayNodeCompletePayload {
@@ -274,6 +296,10 @@ export interface RecordingStartPayload {
   activeProfileId?: string
   /** Active project environment ID — used to resolve envValues overrides in sub-flow profiles */
   activeEnvironmentId?: string
+  /** Active project's environment variables, flattened for the active environment (key -> value) */
+  envVars?: Record<string, string>
+  /** ID of the active project — env-var references only resolve for (sub-)flows in this project */
+  activeProjectId?: string
 }
 
 export interface ProjectSavePayload {

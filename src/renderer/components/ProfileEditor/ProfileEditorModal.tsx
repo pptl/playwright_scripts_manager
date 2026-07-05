@@ -24,6 +24,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
 
   const profiles = currentFlow?.profiles ?? []
   const environments = currentProject?.environments ?? []
+  const projectEnvVars = currentProject?.envVars ?? []
   const [selectedProfileId, setSelectedProfileId] = useState<string>(
     () => activeProfileId ?? profiles[0]?.id ?? '',
   )
@@ -92,7 +93,6 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
         justifyContent: 'center',
         zIndex: 2000,
       }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
         style={{
@@ -325,6 +325,43 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     {activeProfileId === selectedProfile.id ? '目前使用中' : '切換為此配置'}
                   </button>
                 </div>
+
+                {/* Project env var reference hint — click a chip to copy {{key}} */}
+                {projectEnvVars.length > 0 && (
+                  <div
+                    style={{
+                      padding: '6px 16px',
+                      borderBottom: '1px solid #334155',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      flexWrap: 'wrap',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>
+                      🌐 專案環境變數（點擊複製引用）:
+                    </span>
+                    {projectEnvVars.map((ev) => (
+                      <button
+                        key={ev.key}
+                        onClick={() => navigator.clipboard?.writeText(`{{${ev.key}}}`)}
+                        title={`複製 {{${ev.key}}}`}
+                        style={{
+                          padding: '2px 8px',
+                          borderRadius: 10,
+                          border: '1px solid #166534',
+                          background: '#14532d',
+                          color: '#4ade80',
+                          fontSize: 11,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {`{{${ev.key}}}`}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 {/* Env switcher — only when flow belongs to a project with environments */}
                 {environments.length > 0 && (

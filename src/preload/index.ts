@@ -25,8 +25,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopRecording: () => ipcRenderer.invoke(IPC_CHANNELS.RECORDING_STOP),
 
   // Replay
-  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId }),
+  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId }),
   stopReplay: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_STOP),
 
   // Storage

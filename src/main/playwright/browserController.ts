@@ -4,8 +4,11 @@ export class BrowserController {
   private browser: Browser | null = null
   private page: Page | null = null
 
-  async launch(): Promise<void> {
-    this.browser = await chromium.launch({ headless: false })
+  async launch(options?: { maximized?: boolean }): Promise<void> {
+    this.browser = await chromium.launch({
+      headless: false,
+      args: options?.maximized ? ['--start-maximized'] : undefined
+    })
     const context = await this.browser.newContext({ viewport: null })
     this.page = await context.newPage()
 

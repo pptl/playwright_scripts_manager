@@ -1,14 +1,16 @@
 import React, { useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
-import { flattenProjectEnvVars, resolveValue, hasVariables } from '../../../shared/variableResolver'
 
-export function ProfileVarList() {
-  const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore()
+/** Sidebar list of the current project's environment variables, showing each
+ *  key with its value for the active environment. Click a row to copy {{key}}. */
+export function ProjectEnvVarList() {
+  const { currentFlow, currentProject, activeEnvironmentId } = useFlowStore()
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
-  const profiles = currentFlow?.profiles ?? []
-  const activeProfile = profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null
-  const envVars = flattenProjectEnvVars(currentProject?.envVars, activeEnvironmentId)
+  if (!currentFlow?.projectId || currentFlow.projectId !== currentProject?.id) return null
+
+  const envVars = currentProject.envVars ?? []
+  const activeEnv = currentProject.environments.find((e) => e.id === activeEnvironmentId) ?? null
 
   const copyToClipboard = (placeholder: string, key: string) => {
     navigator.clipboard.writeText(placeholder).then(() => {
@@ -44,36 +46,34 @@ export function ProfileVarList() {
           flexShrink: 0,
         }}
       >
-        <span>環境變數</span>
-        {activeProfile && (
+        <span>🌐 專案環境變數</span>
+        {activeEnv && (
           <span
             style={{
               fontSize: 11,
               padding: '2px 6px',
               borderRadius: 3,
-              background: '#78350f',
-              color: '#fcd34d',
+              background: '#14532d',
+              color: '#4ade80',
               fontWeight: 600,
               textTransform: 'none',
               letterSpacing: 0,
             }}
           >
-            {activeProfile.name}
+            {activeEnv.name}
           </span>
         )}
       </div>
 
       <div style={{ overflowY: 'auto', flex: 1 }}>
-        {!activeProfile || activeProfile.vars.length === 0 ? (
+        {envVars.length === 0 ? (
           <div style={{ padding: '12px 14px', color: '#64748b', fontSize: 12 }}>
-            {activeProfile ? '此配置尚無變數。' : '尚無環境配置。'}
+            尚無專案環境變數。
           </div>
         ) : (
-          activeProfile.vars.map((v) => {
+          envVars.map((v) => {
             const placeholder = `{{${v.key}}}`
-            const rawValue = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
-            const referencesEnvVar = hasVariables(rawValue)
-            const resolvedValue = resolveValue(rawValue, undefined, envVars)
+            const value = (activeEnvironmentId && v.values[activeEnvironmentId]) ?? ''
             return (
               <div
                 key={v.key}
@@ -86,7 +86,7 @@ export function ProfileVarList() {
                   userSelect: 'none',
                 }}
                 onMouseEnter={(e) => {
-                  ;(e.currentTarget as HTMLDivElement).style.background = '#1c1408'
+                  ;(e.currentTarget as HTMLDivElement).style.background = '#08140c'
                 }}
                 onMouseLeave={(e) => {
                   ;(e.currentTarget as HTMLDivElement).style.background = 'transparent'
@@ -97,10 +97,10 @@ export function ProfileVarList() {
                     style={{
                       fontSize: 11,
                       background: '#0f172a',
-                      color: '#fcd34d',
+                      color: '#4ade80',
                       padding: '1px 5px',
                       borderRadius: 3,
-                      border: '1px solid #78350f',
+                      border: '1px solid #166534',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
@@ -108,45 +108,21 @@ export function ProfileVarList() {
                   >
                     {placeholder}
                   </code>
-                  {referencesEnvVar && (
-                    <span
-                      title="引用專案環境變數"
-                      style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}
-                    >
-                      🌐
-                    </span>
-                  )}
                   {copiedKey === v.key && (
                     <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>已複製</span>
                   )}
                 </div>
-                {v.description && (
-                  <div
-                    style={{
-                      fontSize: 10,
-                      color: '#94a3b8',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      marginBottom: 1,
-                    }}
-                  >
-                    {v.description}
-                  </div>
-                )}
-                {resolvedValue && (
-                  <div
-                    style={{
-                      fontSize: 10,
-                      color: '#78716c',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {resolvedValue}
-                  </div>
-                )}
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: value ? '#78716c' : '#475569',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {value || '(空)'}
+                </div>
               </div>
             )
           })

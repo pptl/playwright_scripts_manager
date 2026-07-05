@@ -73,38 +73,75 @@ function generateTimestamp(): string {
   )
 }
 
-/** Resolve all {{...}} placeholders in a value string at runtime (used by Replayer). */
-export function resolveValue(value: string, profileVars?: Record<string, string>): string {
-  return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
-    if (profileVars && name in profileVars) return profileVars[name]
-    if (name === 'randomText') return generateRandomText()
-    if (name === 'randomNumber') return generateRandomNumber()
-    if (name === 'randomOneText') return generateRandomOneLetter()
-    if (name === 'randomOneNumber') return generateRandomOneDigit()
-    if (name === 'timestamp') return generateTimestamp()
-    return match
-  })
+/** Max passes when resolving nested placeholders (e.g. a profile value that references
+ *  an environment variable). Also guards against circular references. */
+const MAX_RESOLVE_PASSES = 10
+
+/** Flatten a project's environment variables for the active environment into a key->value map.
+ *  Resolution: values[activeEnvironmentId] ?? '' */
+export function flattenProjectEnvVars(
+  envVars: Array<{ key: string; values: Record<string, string> }> | undefined,
+  activeEnvironmentId: string | null | undefined,
+): Record<string, string> {
+  if (!envVars || !activeEnvironmentId) return {}
+  return Object.fromEntries(
+    envVars.map((v) => [v.key, v.values[activeEnvironmentId] ?? '']),
+  )
+}
+
+/** Resolve all {{...}} placeholders in a value string at runtime (used by Replayer).
+ *  Iterates so that a profile value expanding into {{envKey}} gets fully resolved.
+ *  Priority per pass: profile vars > env vars > built-ins. */
+export function resolveValue(
+  value: string,
+  profileVars?: Record<string, string>,
+  envVars?: Record<string, string>,
+): string {
+  let out = value
+  for (let i = 0; i < MAX_RESOLVE_PASSES && /\{\{\w+\}\}/.test(out); i++) {
+    const prev = out
+    out = out.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+      if (profileVars && name in profileVars) return profileVars[name]
+      if (envVars && name in envVars) return envVars[name]
+      if (name === 'randomText') return generateRandomText()
+      if (name === 'randomNumber') return generateRandomNumber()
+      if (name === 'randomOneText') return generateRandomOneLetter()
+      if (name === 'randomOneNumber') return generateRandomOneDigit()
+      if (name === 'timestamp') return generateTimestamp()
+      return match
+    })
+    if (out === prev) break
+  }
+  return out
 }
 
 /**
  * Like resolveValue but also checks session variables first.
- * Priority: session vars > profile vars > built-ins.
+ * Priority: session vars > profile vars > env vars > built-ins.
  */
 export function resolveValueWithSession(
   value: string,
   sessionVars: Map<string, string>,
   profileVars?: Record<string, string>,
+  envVars?: Record<string, string>,
 ): string {
-  return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
-    if (sessionVars.has(name)) return sessionVars.get(name)!
-    if (profileVars && name in profileVars) return profileVars[name]
-    if (name === 'randomText') return generateRandomText()
-    if (name === 'randomNumber') return generateRandomNumber()
-    if (name === 'randomOneText') return generateRandomOneLetter()
-    if (name === 'randomOneNumber') return generateRandomOneDigit()
-    if (name === 'timestamp') return generateTimestamp()
-    return match
-  })
+  let out = value
+  for (let i = 0; i < MAX_RESOLVE_PASSES && /\{\{\w+\}\}/.test(out); i++) {
+    const prev = out
+    out = out.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+      if (sessionVars.has(name)) return sessionVars.get(name)!
+      if (profileVars && name in profileVars) return profileVars[name]
+      if (envVars && name in envVars) return envVars[name]
+      if (name === 'randomText') return generateRandomText()
+      if (name === 'randomNumber') return generateRandomNumber()
+      if (name === 'randomOneText') return generateRandomOneLetter()
+      if (name === 'randomOneNumber') return generateRandomOneDigit()
+      if (name === 'timestamp') return generateTimestamp()
+      return match
+    })
+    if (out === prev) break
+  }
+  return out
 }
 
 /** True if the value string contains any variable placeholder. */

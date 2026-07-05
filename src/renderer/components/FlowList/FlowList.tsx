@@ -603,7 +603,6 @@ export function FlowList() {
             justifyContent: 'center',
             zIndex: 3000,
           }}
-          onClick={(e) => { if (e.target === e.currentTarget) setShowNewProjectDialog(false) }}
         >
           <div
             style={{
@@ -687,7 +686,6 @@ export function FlowList() {
             justifyContent: 'center',
             zIndex: 3000,
           }}
-          onClick={(e) => { if (e.target === e.currentTarget) setRenameTarget(null) }}
         >
           <div
             style={{
@@ -771,7 +769,6 @@ export function FlowList() {
             justifyContent: 'center',
             zIndex: 3000,
           }}
-          onClick={(e) => { if (e.target === e.currentTarget) setRenameProjectTarget(null) }}
         >
           <div
             style={{

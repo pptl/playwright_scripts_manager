@@ -6,12 +6,16 @@ interface ProjectEnvVarModalProps {
 }
 
 /**
- * Editor for project-level environment variables. One key per row, one value column
- * per project environment. Flow profile variable values can reference these via {{key}}.
+ * Editor for project-level environment variables. One key per row with a single
+ * value column for the currently selected environment (switched via the dropdown,
+ * mirroring ProfileEditorModal's 環境值 selector). Flow profile variable values
+ * can reference these via {{key}}.
  */
 export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
   const {
     currentProject,
+    activeEnvironmentId,
+    setActiveEnvironment,
     addProjectEnvVar,
     renameProjectEnvVarKey,
     deleteProjectEnvVar,
@@ -20,6 +24,11 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
 
   const environments = currentProject?.environments ?? []
   const envVars = currentProject?.envVars ?? []
+
+  // Display fallback only — the global activeEnvironmentId is untouched until
+  // the user picks from the dropdown.
+  const selectedEnv =
+    environments.find((e) => e.id === activeEnvironmentId) ?? environments[0] ?? null
 
   const [newKey, setNewKey] = useState('')
   const [adding, setAdding] = useState(false)
@@ -32,7 +41,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     setAdding(false)
   }
 
-  const gridCols = `180px repeat(${Math.max(environments.length, 1)}, 1fr) 32px`
+  const gridCols = '1fr 1fr 32px'
 
   return (
     <div
@@ -51,7 +60,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
           background: '#1e293b',
           border: '1px solid #334155',
           borderRadius: 12,
-          width: 820,
+          width: 640,
           maxHeight: '80vh',
           display: 'flex',
           flexDirection: 'column',
@@ -83,6 +92,40 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
           </button>
         </div>
 
+        {/* Env switcher */}
+        {environments.length > 0 && (
+          <div
+            style={{
+              padding: '6px 16px',
+              borderBottom: '1px solid #334155',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              flexShrink: 0,
+            }}
+          >
+            <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>環境:</span>
+            <select
+              value={selectedEnv?.id ?? ''}
+              onChange={(e) => setActiveEnvironment(e.target.value || null)}
+              style={{
+                background: '#0f172a',
+                border: '1px solid #334155',
+                borderRadius: 4,
+                color: '#e2e8f0',
+                fontSize: 12,
+                padding: '2px 6px',
+                cursor: 'pointer',
+                outline: 'none',
+              }}
+            >
+              {environments.map((env) => (
+                <option key={env.id} value={env.id}>{env.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
         {/* Body */}
         <div style={{ overflowY: 'auto', flex: 1, padding: '8px 0' }}>
           {environments.length === 0 ? (
@@ -102,11 +145,9 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                 }}
               >
                 <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>變數名稱</span>
-                {environments.map((env) => (
-                  <span key={env.id} style={{ fontSize: 11, color: '#4ade80', fontWeight: 600 }}>
-                    {env.name}
-                  </span>
-                ))}
+                <span style={{ fontSize: 11, color: '#4ade80', fontWeight: 600 }}>
+                  值{selectedEnv ? ` (${selectedEnv.name})` : ''}
+                </span>
                 <span />
               </div>
 
@@ -132,15 +173,14 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     style={cellInputStyle}
                     title="變數名稱（配置以 {{key}} 引用）"
                   />
-                  {environments.map((env) => (
-                    <input
-                      key={env.id}
-                      value={v.values[env.id] ?? ''}
-                      onChange={(e) => setProjectEnvVarValue(v.key, env.id, e.target.value)}
-                      placeholder="(空)"
-                      style={{ ...cellInputStyle, borderColor: '#166534' }}
-                    />
-                  ))}
+                  <input
+                    value={(selectedEnv && v.values[selectedEnv.id]) ?? ''}
+                    onChange={(e) => {
+                      if (selectedEnv) setProjectEnvVarValue(v.key, selectedEnv.id, e.target.value)
+                    }}
+                    placeholder="(空)"
+                    style={{ ...cellInputStyle, borderColor: '#166534' }}
+                  />
                   <button
                     onClick={() => deleteProjectEnvVar(v.key)}
                     title="刪除此變數"

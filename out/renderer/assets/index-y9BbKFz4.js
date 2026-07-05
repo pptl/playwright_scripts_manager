@@ -8318,7 +8318,6 @@ function TestOutputModal({ lines, finished, onClose }) {
         justifyContent: "center",
         zIndex: 2e3
       },
-      onClick: (e) => e.target === e.currentTarget && finished && onClose(),
       children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "div",
         {
@@ -8499,7 +8498,6 @@ function ProfileEditorModal({ onClose }) {
         justifyContent: "center",
         zIndex: 2e3
       },
-      onClick: (e) => e.target === e.currentTarget && onClose(),
       children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "div",
         {
@@ -9009,6 +9007,8 @@ const closeBtnStyle$1 = {
 function ProjectEnvVarModal({ onClose }) {
   const {
     currentProject,
+    activeEnvironmentId,
+    setActiveEnvironment,
     addProjectEnvVar,
     renameProjectEnvVarKey,
     deleteProjectEnvVar,
@@ -9016,6 +9016,7 @@ function ProjectEnvVarModal({ onClose }) {
   } = useFlowStore();
   const environments = currentProject?.environments ?? [];
   const envVars = currentProject?.envVars ?? [];
+  const selectedEnv = environments.find((e) => e.id === activeEnvironmentId) ?? environments[0] ?? null;
   const [newKey, setNewKey] = reactExports.useState("");
   const [adding, setAdding] = reactExports.useState(false);
   const handleAdd = async () => {
@@ -9025,7 +9026,7 @@ function ProjectEnvVarModal({ onClose }) {
     setNewKey("");
     setAdding(false);
   };
-  const gridCols = `180px repeat(${Math.max(environments.length, 1)}, 1fr) 32px`;
+  const gridCols = "1fr 1fr 32px";
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
     "div",
     {
@@ -9038,7 +9039,6 @@ function ProjectEnvVarModal({ onClose }) {
         justifyContent: "center",
         zIndex: 2e3
       },
-      onClick: (e) => e.target === e.currentTarget && onClose(),
       children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "div",
         {
@@ -9046,7 +9046,7 @@ function ProjectEnvVarModal({ onClose }) {
             background: "#1e293b",
             border: "1px solid #334155",
             borderRadius: 12,
-            width: 820,
+            width: 640,
             maxHeight: "80vh",
             display: "flex",
             flexDirection: "column",
@@ -9085,6 +9085,40 @@ function ProjectEnvVarModal({ onClose }) {
                 ]
               }
             ),
+            environments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  padding: "6px 16px",
+                  borderBottom: "1px solid #334155",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  flexShrink: 0
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }, children: "環境:" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "select",
+                    {
+                      value: selectedEnv?.id ?? "",
+                      onChange: (e) => setActiveEnvironment(e.target.value || null),
+                      style: {
+                        background: "#0f172a",
+                        border: "1px solid #334155",
+                        borderRadius: 4,
+                        color: "#e2e8f0",
+                        fontSize: 12,
+                        padding: "2px 6px",
+                        cursor: "pointer",
+                        outline: "none"
+                      },
+                      children: environments.map((env) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: env.id, children: env.name }, env.id))
+                    }
+                  )
+                ]
+              }
+            ),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflowY: "auto", flex: 1, padding: "8px 0" }, children: environments.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: 24, color: "#f59e0b", fontSize: 13 }, children: "此專案尚無環境。請先在工具列的 🌐 環境選單新增環境（如 esd / rde），才能填寫各環境的值。" }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs(
                 "div",
@@ -9098,7 +9132,10 @@ function ProjectEnvVarModal({ onClose }) {
                   },
                   children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", fontWeight: 600 }, children: "變數名稱" }),
-                    environments.map((env) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#4ade80", fontWeight: 600 }, children: env.name }, env.id)),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "#4ade80", fontWeight: 600 }, children: [
+                      "值",
+                      selectedEnv ? ` (${selectedEnv.name})` : ""
+                    ] }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", {})
                   ]
                 }
@@ -9128,16 +9165,17 @@ function ProjectEnvVarModal({ onClose }) {
                         title: "變數名稱（配置以 {{key}} 引用）"
                       }
                     ),
-                    environments.map((env) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
                       "input",
                       {
-                        value: v2.values[env.id] ?? "",
-                        onChange: (e) => setProjectEnvVarValue(v2.key, env.id, e.target.value),
+                        value: (selectedEnv && v2.values[selectedEnv.id]) ?? "",
+                        onChange: (e) => {
+                          if (selectedEnv) setProjectEnvVarValue(v2.key, selectedEnv.id, e.target.value);
+                        },
                         placeholder: "(空)",
                         style: { ...cellInputStyle, borderColor: "#166534" }
-                      },
-                      env.id
-                    )),
+                      }
+                    ),
                     /* @__PURE__ */ jsxRuntimeExports.jsx(
                       "button",
                       {
@@ -9803,12 +9841,6 @@ ${path}`);
               alignItems: "center",
               justifyContent: "center",
               zIndex: 1e3
-            },
-            onClick: (e) => {
-              if (e.target === e.currentTarget) {
-                setShowNewFlowDialog(false);
-                setNewProjectId("");
-              }
             },
             children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
               "div",
@@ -17298,9 +17330,6 @@ function ExtractSubflowModal({
         justifyContent: "center",
         zIndex: 1e3
       },
-      onClick: (e) => {
-        if (e.target === e.currentTarget) onClose();
-      },
       children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "div",
         {
@@ -17409,9 +17438,6 @@ function GroupNameModal({ selectedCount, onConfirm, onClose }) {
         alignItems: "center",
         justifyContent: "center",
         zIndex: 3e3
-      },
-      onClick: (e) => {
-        if (e.target === e.currentTarget) onClose();
       },
       children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "#1e293b", border: "1px solid #334155", borderRadius: 12, padding: 24, minWidth: 320 }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: 16, color: "#e2e8f0", margin: "0 0 6px" }, children: "組成群組" }),
@@ -19228,9 +19254,6 @@ function FlowList() {
               justifyContent: "center",
               zIndex: 3e3
             },
-            onClick: (e) => {
-              if (e.target === e.currentTarget) setShowNewProjectDialog(false);
-            },
             children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
               "div",
               {
@@ -19324,9 +19347,6 @@ function FlowList() {
               justifyContent: "center",
               zIndex: 3e3
             },
-            onClick: (e) => {
-              if (e.target === e.currentTarget) setRenameTarget(null);
-            },
             children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
               "div",
               {
@@ -19416,9 +19436,6 @@ function FlowList() {
               alignItems: "center",
               justifyContent: "center",
               zIndex: 3e3
-            },
-            onClick: (e) => {
-              if (e.target === e.currentTarget) setRenameProjectTarget(null);
             },
             children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
               "div",
@@ -20201,6 +20218,131 @@ function ProfileVarList() {
     }
   );
 }
+function ProjectEnvVarList() {
+  const { currentFlow, currentProject, activeEnvironmentId } = useFlowStore();
+  const [copiedKey, setCopiedKey] = reactExports.useState(null);
+  if (!currentFlow?.projectId || currentFlow.projectId !== currentProject?.id) return null;
+  const envVars = currentProject.envVars ?? [];
+  const activeEnv = currentProject.environments.find((e) => e.id === activeEnvironmentId) ?? null;
+  const copyToClipboard = (placeholder, key) => {
+    navigator.clipboard.writeText(placeholder).then(() => {
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 1500);
+    });
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        background: "#1e293b",
+        borderTop: "1px solid #334155",
+        display: "flex",
+        flexDirection: "column",
+        flexShrink: 0,
+        maxHeight: 220,
+        overflow: "hidden"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              padding: "12px 14px",
+              borderBottom: "1px solid #334155",
+              fontSize: 12,
+              color: "#64748b",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.06em",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flexShrink: 0
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🌐 專案環境變數" }),
+              activeEnv && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: 11,
+                    padding: "2px 6px",
+                    borderRadius: 3,
+                    background: "#14532d",
+                    color: "#4ade80",
+                    fontWeight: 600,
+                    textTransform: "none",
+                    letterSpacing: 0
+                  },
+                  children: activeEnv.name
+                }
+              )
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflowY: "auto", flex: 1 }, children: envVars.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "12px 14px", color: "#64748b", fontSize: 12 }, children: "尚無專案環境變數。" }) : envVars.map((v2) => {
+          const placeholder = `{{${v2.key}}}`;
+          const value = (activeEnvironmentId && v2.values[activeEnvironmentId]) ?? "";
+          return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
+            {
+              onClick: () => copyToClipboard(placeholder, v2.key),
+              title: `點擊複製 ${placeholder}`,
+              style: {
+                padding: "7px 14px",
+                cursor: "pointer",
+                borderBottom: "1px solid #0f172a",
+                userSelect: "none"
+              },
+              onMouseEnter: (e) => {
+                e.currentTarget.style.background = "#08140c";
+              },
+              onMouseLeave: (e) => {
+                e.currentTarget.style.background = "transparent";
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "code",
+                    {
+                      style: {
+                        fontSize: 11,
+                        background: "#0f172a",
+                        color: "#4ade80",
+                        padding: "1px 5px",
+                        borderRadius: 3,
+                        border: "1px solid #166534",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap"
+                      },
+                      children: placeholder
+                    }
+                  ),
+                  copiedKey === v2.key && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#4ade80", flexShrink: 0 }, children: "已複製" })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "div",
+                  {
+                    style: {
+                      fontSize: 10,
+                      color: value ? "#78716c" : "#475569",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap"
+                    },
+                    children: value || "(空)"
+                  }
+                )
+              ]
+            },
+            v2.key
+          );
+        }) })
+      ]
+    }
+  );
+}
 function usePlaywrightEvents() {
   const { setReplayStatus, setReplayingNode, setIsReplaying } = useFlowStore();
   reactExports.useEffect(() => {
@@ -20279,6 +20421,7 @@ function App() {
       selectedNodeId && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", width: 200, flexShrink: 0, borderLeft: "1px solid #334155", overflow: "hidden" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(VariableList, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx(ProfileVarList, {}),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(ProjectEnvVarList, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx(SessionVarList, {})
       ] })
     ] })

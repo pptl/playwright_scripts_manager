@@ -6,6 +6,7 @@ import { VariableList } from './components/VariableList/VariableList'
 import { PropertyPanel } from './components/PropertyPanel/PropertyPanel'
 import { SessionVarList } from './components/SessionVarList/SessionVarList'
 import { ProfileVarList } from './components/ProfileVarList/ProfileVarList'
+import { ProjectEnvVarList } from './components/ProjectEnvVar/ProjectEnvVarList'
 import { usePlaywrightEvents } from './hooks/usePlaywrightEvents'
 import { useUndoRedo } from './hooks/useUndoRedo'
 import { useFlowStore } from './stores/flowStore'
@@ -33,6 +34,7 @@ export default function App() {
           <div style={{ display: 'flex', flexDirection: 'column', width: 200, flexShrink: 0, borderLeft: '1px solid #334155', overflow: 'hidden' }}>
             <VariableList />
             <ProfileVarList />
+            <ProjectEnvVarList />
             <SessionVarList />
           </div>
         )}

@@ -25,9 +25,6 @@ export function GroupNameModal({ selectedCount, onConfirm, onClose }: GroupNameM
         justifyContent: 'center',
         zIndex: 3000,
       }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
     >
       <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 12, padding: 24, minWidth: 320 }}>
         <h2 style={{ fontSize: 16, color: '#e2e8f0', margin: '0 0 6px' }}>組成群組</h2>

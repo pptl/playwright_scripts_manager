@@ -69,8 +69,11 @@ const IPC_CHANNELS = {
 class BrowserController {
   browser = null;
   page = null;
-  async launch() {
-    this.browser = await playwrightCore.chromium.launch({ headless: false });
+  async launch(options) {
+    this.browser = await playwrightCore.chromium.launch({
+      headless: false,
+      args: options?.maximized ? ["--start-maximized"] : void 0
+    });
     const context = await this.browser.newContext({ viewport: null });
     this.page = await context.newPage();
     this.browser.on("disconnected", () => {
@@ -964,28 +967,42 @@ function generateTimestamp() {
   const d = /* @__PURE__ */ new Date();
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}${pad(d.getMilliseconds(), 3)}`;
 }
-function resolveValue(value, profileVars) {
-  return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
-    if (profileVars && name in profileVars) return profileVars[name];
-    if (name === "randomText") return generateRandomText();
-    if (name === "randomNumber") return generateRandomNumber();
-    if (name === "randomOneText") return generateRandomOneLetter();
-    if (name === "randomOneNumber") return generateRandomOneDigit();
-    if (name === "timestamp") return generateTimestamp();
-    return match;
-  });
+const MAX_RESOLVE_PASSES = 10;
+function resolveValue(value, profileVars, envVars) {
+  let out = value;
+  for (let i = 0; i < MAX_RESOLVE_PASSES && /\{\{\w+\}\}/.test(out); i++) {
+    const prev = out;
+    out = out.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+      if (profileVars && name in profileVars) return profileVars[name];
+      if (envVars && name in envVars) return envVars[name];
+      if (name === "randomText") return generateRandomText();
+      if (name === "randomNumber") return generateRandomNumber();
+      if (name === "randomOneText") return generateRandomOneLetter();
+      if (name === "randomOneNumber") return generateRandomOneDigit();
+      if (name === "timestamp") return generateTimestamp();
+      return match;
+    });
+    if (out === prev) break;
+  }
+  return out;
 }
-function resolveValueWithSession(value, sessionVars, profileVars) {
-  return value.replace(/\{\{(\w+)\}\}/g, (match, name) => {
-    if (sessionVars.has(name)) return sessionVars.get(name);
-    if (profileVars && name in profileVars) return profileVars[name];
-    if (name === "randomText") return generateRandomText();
-    if (name === "randomNumber") return generateRandomNumber();
-    if (name === "randomOneText") return generateRandomOneLetter();
-    if (name === "randomOneNumber") return generateRandomOneDigit();
-    if (name === "timestamp") return generateTimestamp();
-    return match;
-  });
+function resolveValueWithSession(value, sessionVars, profileVars, envVars) {
+  let out = value;
+  for (let i = 0; i < MAX_RESOLVE_PASSES && /\{\{\w+\}\}/.test(out); i++) {
+    const prev = out;
+    out = out.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+      if (sessionVars.has(name)) return sessionVars.get(name);
+      if (profileVars && name in profileVars) return profileVars[name];
+      if (name === "randomText") return generateRandomText();
+      if (name === "randomNumber") return generateRandomNumber();
+      if (name === "randomOneText") return generateRandomOneLetter();
+      if (name === "randomOneNumber") return generateRandomOneDigit();
+      if (name === "timestamp") return generateTimestamp();
+      return match;
+    });
+    if (out === prev) break;
+  }
+  return out;
 }
 function hasVariables(value) {
   return /\{\{.+?\}\}/.test(value);
@@ -1142,11 +1159,17 @@ class Replayer {
   profileVars;
   activeProfileId;
   activeEnvironmentId;
-  constructor(page, baseURL = "", profileVars, activeProfileId, activeEnvironmentId) {
+  /** Active project's environment variables (flattened for the active environment). */
+  envVars;
+  /** Active project ID — env-var references only resolve for sub-flows in this project. */
+  activeProjectId;
+  constructor(page, baseURL = "", profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
     this.page = page;
     this.profileVars = profileVars ?? {};
     this.activeProfileId = activeProfileId;
     this.activeEnvironmentId = activeEnvironmentId;
+    this.envVars = envVars ?? {};
+    this.activeProjectId = activeProjectId;
     this.baseOrigin = (() => {
       try {
         return new URL(baseURL).origin;
@@ -1191,11 +1214,12 @@ class Replayer {
     if (action.subFlowProfileMapping && this.activeProfileId && this.activeProfileId in action.subFlowProfileMapping) {
       resolvedSubProfileId = action.subFlowProfileMapping[this.activeProfileId];
     }
+    const subFlowEnvVars = this.activeProjectId && subFlow.projectId === this.activeProjectId ? this.envVars : {};
     const resolveVars = (vars) => Object.fromEntries(
-      vars.map((v) => [
-        v.key,
-        (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value
-      ])
+      vars.map((v) => {
+        const raw = (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value;
+        return [v.key, resolveValue(raw, void 0, subFlowEnvVars)];
+      })
     );
     let subProfileVars = {};
     if (resolvedSubProfileId) {
@@ -1208,7 +1232,7 @@ class Replayer {
       subProfileVars = resolveVars(firstProfile.vars);
       resolvedSubProfileId = firstProfile.id;
     }
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0, this.activeEnvironmentId);
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0, this.activeEnvironmentId, this.envVars, this.activeProjectId);
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId,
@@ -1423,14 +1447,15 @@ class ScriptExporter {
     }
     return result;
   }
-  static resolveProfileVars(flow, profileId, activeEnvironmentId) {
+  static resolveProfileVars(flow, profileId, activeEnvironmentId, envVars, activeProjectId) {
     const profile = profileId ? (flow.profiles ?? []).find((p) => p.id === profileId) : (flow.profiles ?? [])[0];
     if (!profile) return {};
+    const flowEnvVars = activeProjectId && flow.projectId === activeProjectId ? envVars ?? {} : {};
     return Object.fromEntries(
-      profile.vars.map((v) => [
-        v.key,
-        (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
-      ])
+      profile.vars.map((v) => {
+        const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value;
+        return [v.key, resolveValue(raw, void 0, flowEnvVars)];
+      })
     );
   }
   /** Resolve which sub-flow profile ID to use given the parent's active profile.
@@ -1441,7 +1466,7 @@ class ScriptExporter {
     }
     return action.subFlowProfileId ?? null;
   }
-  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin, activeProfileId, activeEnvironmentId) {
+  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin, activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]));
     const path2 = [];
     const visited = /* @__PURE__ */ new Set();
@@ -1452,7 +1477,7 @@ class ScriptExporter {
         const nested = subFlowMap.get(cur.action.subFlowId);
         if (nested) {
           const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, activeProfileId);
-          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId, activeEnvironmentId);
+          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId, activeEnvironmentId, envVars, activeProjectId);
           const nestedBaseOrigin = (() => {
             try {
               return new URL(nested.baseURL).origin;
@@ -1460,7 +1485,7 @@ class ScriptExporter {
               return "";
             }
           })();
-          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedProfileId ?? void 0, activeEnvironmentId));
+          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
         }
       } else {
         path2.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true });
@@ -1469,7 +1494,7 @@ class ScriptExporter {
     }
     return path2;
   }
-  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "", activeProfileId, activeEnvironmentId) {
+  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "", activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
     const result = [];
     for (const id of nodeIds) {
       const node = nodeMap.get(id);
@@ -1478,7 +1503,7 @@ class ScriptExporter {
         const subFlow = subFlowMap.get(node.action.subFlowId);
         if (subFlow) {
           const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, activeProfileId);
-          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId, activeEnvironmentId);
+          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId, activeEnvironmentId, envVars, activeProjectId);
           const subBaseOrigin = (() => {
             try {
               return new URL(subFlow.baseURL).origin;
@@ -1486,7 +1511,7 @@ class ScriptExporter {
               return "";
             }
           })();
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subProfileId ?? void 0, activeEnvironmentId));
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
         }
       } else {
         result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false });
@@ -1534,7 +1559,7 @@ class ScriptExporter {
     );
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
-      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId, config.activeEnvironmentId);
+      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const hoistedVars = config.useTestStep ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       const hoistDecls = hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "";
@@ -1731,10 +1756,10 @@ function registerIpcHandlers(win) {
       });
     }
     browserController = new BrowserController();
-    await browserController.launch();
+    await browserController.launch({ maximized: true });
     const page = browserController.getPage();
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId);
+      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId, payload.envVars, payload.activeProjectId);
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -1774,10 +1799,10 @@ function registerIpcHandlers(win) {
     try {
       if (!browserController || !browserController.isRunning()) {
         browserController = new BrowserController();
-        await browserController.launch();
+        await browserController.launch({ maximized: true });
       }
       const page = browserController.getPage();
-      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId);
+      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId, payload.envVars, payload.activeProjectId);
       await replayer.replayToNode(
         payload.nodes,
         payload.targetNodeId,

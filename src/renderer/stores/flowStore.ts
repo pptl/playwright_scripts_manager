@@ -125,6 +125,11 @@ interface FlowStore {
   renameProject: (projectId: string, name: string) => Promise<void>
   /** Assign any flow (by ID) to a project. Pass null to detach. */
   assignFlowToProject: (flowId: string, projectId: string | null) => Promise<void>
+  // Project-level environment variables (shared across flows in the project)
+  addProjectEnvVar: (key: string) => Promise<void>
+  renameProjectEnvVarKey: (oldKey: string, newKey: string) => Promise<void>
+  deleteProjectEnvVar: (key: string) => Promise<void>
+  setProjectEnvVarValue: (key: string, envId: string, value: string) => Promise<void>
 }
 
 /** Migrate legacy callFlow actions that have subFlowProfileId but no subFlowProfileMapping.
@@ -781,6 +786,11 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const updatedProject: Project = {
       ...project,
       environments: project.environments.filter((e) => e.id !== envId),
+      // Drop the deleted environment's value from every project env var
+      envVars: (project.envVars ?? []).map((v) => {
+        const { [envId]: _removed, ...rest } = v.values
+        return { ...v, values: rest }
+      }),
     }
     await window.electronAPI.saveProject(updatedProject)
     const { activeEnvironmentId } = get()
@@ -825,6 +835,53 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     if (currentFlow?.id === flowId) {
       set({ currentFlow: updatedFlow })
     }
+  },
+
+  addProjectEnvVar: async (key) => {
+    const project = get().currentProject
+    if (!project) return
+    const envVars = project.envVars ?? []
+    if (envVars.some((v) => v.key === key)) return
+    const updatedProject: Project = { ...project, envVars: [...envVars, { key, values: {} }] }
+    await window.electronAPI.saveProject(updatedProject)
+    set({ currentProject: updatedProject })
+  },
+
+  renameProjectEnvVarKey: async (oldKey, newKey) => {
+    const project = get().currentProject
+    if (!project) return
+    const envVars = project.envVars ?? []
+    if (oldKey === newKey || envVars.some((v) => v.key === newKey)) return
+    const updatedProject: Project = {
+      ...project,
+      envVars: envVars.map((v) => (v.key === oldKey ? { ...v, key: newKey } : v)),
+    }
+    await window.electronAPI.saveProject(updatedProject)
+    set({ currentProject: updatedProject })
+  },
+
+  deleteProjectEnvVar: async (key) => {
+    const project = get().currentProject
+    if (!project) return
+    const updatedProject: Project = {
+      ...project,
+      envVars: (project.envVars ?? []).filter((v) => v.key !== key),
+    }
+    await window.electronAPI.saveProject(updatedProject)
+    set({ currentProject: updatedProject })
+  },
+
+  setProjectEnvVarValue: async (key, envId, value) => {
+    const project = get().currentProject
+    if (!project) return
+    const updatedProject: Project = {
+      ...project,
+      envVars: (project.envVars ?? []).map((v) =>
+        v.key === key ? { ...v, values: { ...v.values, [envId]: value } } : v,
+      ),
+    }
+    await window.electronAPI.saveProject(updatedProject)
+    set({ currentProject: updatedProject })
   },
 }))
 

@@ -1,12 +1,14 @@
 import React, { useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
+import { flattenProjectEnvVars, resolveValue, hasVariables } from '../../../shared/variableResolver'
 
 export function ProfileVarList() {
-  const { currentFlow, activeProfileId, activeEnvironmentId } = useFlowStore()
+  const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore()
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
   const profiles = currentFlow?.profiles ?? []
   const activeProfile = profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null
+  const envVars = flattenProjectEnvVars(currentProject?.envVars, activeEnvironmentId)
 
   const copyToClipboard = (placeholder: string, key: string) => {
     navigator.clipboard.writeText(placeholder).then(() => {
@@ -69,7 +71,9 @@ export function ProfileVarList() {
         ) : (
           activeProfile.vars.map((v) => {
             const placeholder = `{{${v.key}}}`
-            const resolvedValue = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
+            const rawValue = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
+            const referencesEnvVar = hasVariables(rawValue)
+            const resolvedValue = resolveValue(rawValue, undefined, envVars)
             return (
               <div
                 key={v.key}
@@ -104,6 +108,14 @@ export function ProfileVarList() {
                   >
                     {placeholder}
                   </code>
+                  {referencesEnvVar && (
+                    <span
+                      title="引用專案環境變數"
+                      style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}
+                    >
+                      🌐
+                    </span>
+                  )}
                   {copiedKey === v.key && (
                     <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>已複製</span>
                   )}

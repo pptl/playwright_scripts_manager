@@ -33,7 +33,6 @@ export function TestOutputModal({ lines, finished, onClose }: TestOutputModalPro
         justifyContent: 'center',
         zIndex: 2000,
       }}
-      onClick={(e) => e.target === e.currentTarget && finished && onClose()}
     >
       <div
         style={{

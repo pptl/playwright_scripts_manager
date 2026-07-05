@@ -1,7 +1,7 @@
 import { Page, Locator } from 'playwright-core'
 import type { Action, FlowNode } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
-import { resolveValueWithSession } from '../../shared/variableResolver'
+import { resolveValueWithSession, resolveValue } from '../../shared/variableResolver'
 import { getCursorHighlightScript } from './captureShared'
 import { FlowStorage } from '../storage/flowStorage'
 
@@ -15,12 +15,18 @@ export class Replayer {
   private profileVars: Record<string, string>
   private activeProfileId?: string
   private activeEnvironmentId?: string
+  /** Active project's environment variables (flattened for the active environment). */
+  private envVars: Record<string, string>
+  /** Active project ID — env-var references only resolve for sub-flows in this project. */
+  private activeProjectId?: string
 
-  constructor(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string) {
+  constructor(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string) {
     this.page = page
     this.profileVars = profileVars ?? {}
     this.activeProfileId = activeProfileId
     this.activeEnvironmentId = activeEnvironmentId
+    this.envVars = envVars ?? {}
+    this.activeProjectId = activeProjectId
     this.baseOrigin = (() => { try { return new URL(baseURL).origin } catch { return '' } })()
   }
 
@@ -76,12 +82,16 @@ export class Replayer {
       resolvedSubProfileId = action.subFlowProfileMapping[this.activeProfileId]
     }
 
+    // Env-var references ({{envKey}}) only resolve when the sub-flow belongs to the active
+    // project (v1 restriction: no cross-project env-var references).
+    const subFlowEnvVars =
+      this.activeProjectId && subFlow.projectId === this.activeProjectId ? this.envVars : {}
     const resolveVars = (vars: import('../../shared/types').ProfileVariable[]): Record<string, string> =>
       Object.fromEntries(
-        vars.map((v) => [
-          v.key,
-          (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value,
-        ]),
+        vars.map((v) => {
+          const raw = (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value
+          return [v.key, resolveValue(raw, undefined, subFlowEnvVars)]
+        }),
       )
 
     let subProfileVars: Record<string, string> = {}
@@ -99,7 +109,7 @@ export class Replayer {
 
     // Pass the resolved sub-flow profile ID as the nested Replayer's activeProfileId so it
     // can resolve its own sub-flow mappings — this enables correct N-level nesting
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? undefined, this.activeEnvironmentId)
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? undefined, this.activeEnvironmentId, this.envVars, this.activeProjectId)
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId!,

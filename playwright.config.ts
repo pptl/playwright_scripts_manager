@@ -6,6 +6,10 @@ export default defineConfig({
   reporter: [['html', { open: 'on-failure' }]],
   use: {
     headless: false,
+    viewport: null,
+    launchOptions: {
+      args: ['--start-maximized'],
+    },
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
   },

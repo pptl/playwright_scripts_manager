@@ -1,20 +1,30 @@
 import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
-import type { Flow } from '../../../shared/types'
+import type { Flow, Project } from '../../../shared/types'
+import { flattenProjectEnvVars, resolveValue } from '@shared/variableResolver'
 
 function buildProfileVars(
   flow: Flow | null,
   activeProfileId: string | null,
   activeEnvironmentId: string | null,
+  envVars: Record<string, string>,
 ): Record<string, string> | undefined {
   const profile = flow?.profiles?.find((p) => p.id === activeProfileId)
   if (!profile) return undefined
   return Object.fromEntries(
-    profile.vars.map((v) => [
-      v.key,
-      (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value,
-    ]),
+    profile.vars.map((v) => {
+      const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
+      return [v.key, resolveValue(raw, undefined, envVars)]
+    }),
   )
+}
+
+/** Active project's environment variables flattened for the active environment. */
+function getEnvVars(
+  currentProject: Project | null,
+  activeEnvironmentId: string | null,
+): Record<string, string> {
+  return flattenProjectEnvVars(currentProject?.envVars, activeEnvironmentId)
 }
 
 /**
@@ -38,13 +48,14 @@ export function usePlaywright() {
 
   const startBranchRecording = useCallback(
     async (fromNodeId: string) => {
-      const { currentFlow, activeProfileId, activeEnvironmentId } = useFlowStore.getState()
+      const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore.getState()
       if (!currentFlow) return
       // Set recording head so new actions append as children of this node
       useFlowStore.getState().setRecordingHead(fromNodeId)
       setIsRecording(true)
 
-      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId)
+      const envVars = getEnvVars(currentProject, activeEnvironmentId)
+      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars)
 
       try {
         await window.electronAPI.startRecording({
@@ -55,6 +66,8 @@ export function usePlaywright() {
           profileVars,
           activeProfileId: activeProfileId ?? undefined,
           activeEnvironmentId: activeEnvironmentId ?? undefined,
+          envVars,
+          activeProjectId: currentProject?.id,
         })
       } catch (err) {
         setIsRecording(false)
@@ -80,12 +93,13 @@ export function usePlaywright() {
 
   const replayToNode = useCallback(
     async (targetNodeId: string, speed: number) => {
-      const { currentFlow, activeProfileId, activeEnvironmentId } = useFlowStore.getState()
+      const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore.getState()
       if (!currentFlow) return
       clearReplayStatus()
       setIsReplaying(true)
 
-      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId)
+      const envVars = getEnvVars(currentProject, activeEnvironmentId)
+      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars)
 
       try {
         await window.electronAPI.replayToNode(
@@ -96,6 +110,8 @@ export function usePlaywright() {
           profileVars,
           activeProfileId ?? undefined,
           activeEnvironmentId ?? undefined,
+          envVars,
+          currentProject?.id,
         )
       } catch (err) {
         console.error('Replay IPC error:', err)

@@ -24,6 +24,16 @@ export function usePlaywrightEvents() {
       if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
     })
 
+    const unsubUpdated = window.electronAPI.onActionUpdated(({ actionId, updates }) => {
+      // Node id === action id (addActionNode uses action.id as the node id)
+      const { currentFlow, updateNode } = useFlowStore.getState()
+      const node = currentFlow?.nodes.find((n) => n.id === actionId)
+      if (!node) return
+      updateNode(actionId, { action: { ...node.action, ...updates } })
+      const updated = useFlowStore.getState().currentFlow
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+    })
+
     const unsubNodeStart = window.electronAPI.onReplayNodeStart((nodeId: string) => {
       setReplayingNode(nodeId)
       setReplayStatus(nodeId, 'running')
@@ -54,6 +64,7 @@ export function usePlaywrightEvents() {
 
     return () => {
       unsubCaptured()
+      unsubUpdated()
       unsubNodeStart()
       unsubNodeComplete()
       unsubFinished()

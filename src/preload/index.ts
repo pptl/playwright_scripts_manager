@@ -11,6 +11,7 @@ import type {
   TestFinishedPayload,
   Project,
   LocatorPickPayload,
+  ActionUpdatedPayload,
 } from '../shared/types'
 
 // Expose a type-safe API to the renderer via window.electronAPI
@@ -67,6 +68,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_: Electron.IpcRendererEvent, action: Action) => cb(action)
     ipcRenderer.on(IPC_CHANNELS.ACTION_CAPTURED, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTION_CAPTURED, handler)
+  },
+  onActionUpdated: (cb: (payload: ActionUpdatedPayload) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: ActionUpdatedPayload) => cb(payload)
+    ipcRenderer.on(IPC_CHANNELS.ACTION_UPDATED, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTION_UPDATED, handler)
   },
   onReplayNodeStart: (cb: (nodeId: string) => void) => {
     const handler = (_: Electron.IpcRendererEvent, nodeId: string) => cb(nodeId)

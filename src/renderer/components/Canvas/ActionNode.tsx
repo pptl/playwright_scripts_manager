@@ -116,6 +116,33 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
         {action.description}
       </div>
 
+      {(action.pageAlias || action.opensPage) && (
+        <div style={{ display: 'flex', gap: 4, marginTop: 3, flexWrap: 'wrap' }}>
+          {action.pageAlias && (
+            <span
+              title={`此動作在分頁 ${action.pageAlias} 上執行`}
+              style={{
+                fontSize: 10, color: '#38bdf8', background: '#082f49',
+                border: '1px solid #0369a1', borderRadius: 3, padding: '1px 5px',
+              }}
+            >
+              📄 {action.pageAlias}
+            </span>
+          )}
+          {action.opensPage && (
+            <span
+              title={`此動作會開啟新分頁 ${action.opensPage}`}
+              style={{
+                fontSize: 10, color: '#fbbf24', background: '#292008',
+                border: '1px solid #92600e', borderRadius: 3, padding: '1px 5px',
+              }}
+            >
+              ↗ 開新頁 {action.opensPage}
+            </span>
+          )}
+        </div>
+      )}
+
       {action.type === 'callFlow' && (action.subFlowProfileName || (action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 0)) && (() => {
         const isDynamic = action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 1
         const label = isDynamic ? '動態配置' : (action.subFlowProfileName ?? '已配置')

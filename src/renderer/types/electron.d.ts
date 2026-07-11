@@ -1,4 +1,4 @@
-import type { Action, ActionType, Flow, FlowNode, FlowListItem, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload, Project, LocatorPickPayload } from '../../shared/types'
+import type { Action, ActionType, ActionUpdatedPayload, Flow, FlowNode, FlowListItem, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload, Project, LocatorPickPayload } from '../../shared/types'
 
 export interface ElectronAPI {
   launchBrowser: () => Promise<void>
@@ -16,6 +16,7 @@ export interface ElectronAPI {
   showReport: () => Promise<void>
   startAssertionPick: (assertionType: ActionType) => Promise<void>
   onActionCaptured: (cb: (action: Action) => void) => () => void
+  onActionUpdated: (cb: (payload: ActionUpdatedPayload) => void) => () => void
   onReplayNodeStart: (cb: (nodeId: string) => void) => () => void
   onReplayNodeComplete: (cb: (payload: ReplayNodeCompletePayload) => void) => () => void
   onReplayFinished: (cb: () => void) => () => void

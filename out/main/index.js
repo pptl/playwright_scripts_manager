@@ -59,6 +59,7 @@ const IPC_CHANNELS = {
   LOCATOR_PICK_NEEDED: "locator:pickNeeded",
   ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
+  ACTION_UPDATED: "action:updated",
   TEST_OUTPUT: "test:output",
   TEST_FINISHED: "test:finished",
   REPLAY_NODE_START: "replay:nodeStart",
@@ -107,10 +108,15 @@ function shouldSuppressNav(navigationTime, last) {
   if (!["click", "press", "fill"].includes(last.type)) return false;
   return navigationTime - last.time < NAV_SUPPRESSION_MS;
 }
-function generateDescription(kind, label, value, selectedText) {
+function generateDescription(kind, label, value, selectedText, clickOpts) {
   switch (kind) {
-    case "click":
-      return `點擊「${label}」`;
+    case "click": {
+      const mods = clickOpts?.modifiers?.length ? `${clickOpts.modifiers.join("+")}+` : "";
+      if ((clickOpts?.clickCount ?? 1) >= 2) return `${mods}雙擊「${label}」`;
+      if (clickOpts?.button === "right") return `${mods}右鍵點擊「${label}」`;
+      if (clickOpts?.button === "middle") return `${mods}中鍵點擊「${label}」`;
+      return `${mods}點擊「${label}」`;
+    }
     case "fill":
       return `填入「${value ?? ""}」到「${label}」`;
     case "selectOption":
@@ -121,6 +127,8 @@ function generateDescription(kind, label, value, selectedText) {
       return `取消勾選「${label}」`;
     case "press":
       return `在「${label}」按下 ${value}`;
+    case "upload":
+      return `上傳檔案「${value ?? ""}」到「${label}」`;
   }
 }
 function extractSource3() {
@@ -241,7 +249,15 @@ function getDOMCaptureScript() {
       }
     }
     const focusValues = /* @__PURE__ */ new WeakMap();
-    document.addEventListener("click", (e) => {
+    function modifiersFor(e) {
+      const m = [];
+      if (e.altKey) m.push("Alt");
+      if (e.ctrlKey) m.push("Control");
+      if (e.metaKey) m.push("Meta");
+      if (e.shiftKey) m.push("Shift");
+      return m;
+    }
+    function handleMouseAction(e, button, clickCount) {
       let el = getTarget(e);
       if (!el?.tagName) return;
       const tag = el.tagName.toLowerCase();
@@ -250,14 +266,21 @@ function getDOMCaptureScript() {
       if (el.closest?.('[id^="__ft_"]')) return;
       if (tag === "select" || tag === "option") return;
       if (tag === "input" && (type === "date" || type === "range")) return;
+      if (tag === "input" && type === "file") return;
       if (tag === "html" || tag === "body") return;
-      if (isTextInput(el)) {
+      const mods = modifiersFor(e);
+      const extras = {
+        button: button !== "left" ? button : void 0,
+        clickCount: clickCount >= 2 ? clickCount : void 0,
+        modifiers: mods.length ? mods : void 0
+      };
+      if (isTextInput(el) && button === "left") {
         const locatorExpr2 = getLocatorExpr(el);
         const label2 = extractLabel(locatorExpr2, el);
-        report({ kind: "click", locatorExpr: locatorExpr2, selector: generateCSSSelector(el), label: label2, timestamp: Date.now(), url: window.location.href, isInputClick: true });
+        report({ kind: "click", locatorExpr: locatorExpr2, selector: generateCSSSelector(el), label: label2, timestamp: Date.now(), url: window.location.href, isInputClick: true, ...extras });
         return;
       }
-      if (tag === "input" && (type === "checkbox" || type === "radio")) {
+      if (tag === "input" && (type === "checkbox" || type === "radio") && button === "left") {
         const locatorExpr2 = getLocatorExpr(el);
         const label2 = extractLabel(locatorExpr2, el);
         report({ kind: el.checked ? "check" : "uncheck", locatorExpr: locatorExpr2, selector: generateCSSSelector(el), label: label2, timestamp: Date.now(), url: window.location.href });
@@ -276,7 +299,7 @@ function getDOMCaptureScript() {
       const locatorExpr = getLocatorExpr(el);
       const label = extractLabel(locatorExpr, el);
       let alternativeLocators;
-      const tr = el.closest?.("tr");
+      const tr = button === "left" && clickCount < 2 ? el.closest?.("tr") : null;
       if (tr && tr.parentElement) {
         const rows = Array.from(tr.parentElement.children).filter(
           (c) => c.tagName === "TR"
@@ -303,7 +326,20 @@ function getDOMCaptureScript() {
           ];
         }
       }
-      report({ kind: "click", locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, alternativeLocators });
+      report({ kind: "click", locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, alternativeLocators, ...extras });
+    }
+    document.addEventListener("click", (e) => {
+      if (e.detail >= 2) return;
+      handleMouseAction(e, "left", 1);
+    }, true);
+    document.addEventListener("dblclick", (e) => {
+      handleMouseAction(e, "left", 2);
+    }, true);
+    document.addEventListener("contextmenu", (e) => {
+      handleMouseAction(e, "right", 1);
+    }, true);
+    document.addEventListener("auxclick", (e) => {
+      if (e.button === 1) handleMouseAction(e, "middle", 1);
     }, true);
     document.addEventListener("focus", (e) => {
       const el = getTarget(e);
@@ -325,10 +361,34 @@ function getDOMCaptureScript() {
     }, true);
     document.addEventListener("change", (e) => {
       const el = getTarget(e);
-      if (!el?.tagName || el.tagName.toLowerCase() !== "select") return;
-      const opt = el.options[el.selectedIndex];
-      const locatorExpr = getLocatorExpr(el);
-      report({ kind: "selectOption", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: el.value, selectedText: opt?.text?.trim(), timestamp: Date.now(), url: window.location.href });
+      if (!el?.tagName) return;
+      const tag = el.tagName.toLowerCase();
+      if (tag === "select") {
+        const locatorExpr = getLocatorExpr(el);
+        if (el.multiple) {
+          const selected = Array.from(el.selectedOptions);
+          const values = selected.map((o) => o.value);
+          report({ kind: "selectOption", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: values.join(", "), values, selectedText: selected.map((o) => o.text?.trim()).join("、"), timestamp: Date.now(), url: window.location.href });
+          return;
+        }
+        const opt = el.options[el.selectedIndex];
+        report({ kind: "selectOption", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: el.value, selectedText: opt?.text?.trim(), timestamp: Date.now(), url: window.location.href });
+        return;
+      }
+      const inputType = (el.type || "").toLowerCase();
+      if (tag === "input" && inputType === "file") {
+        const input = el;
+        const names = Array.from(input.files ?? []).map((f) => f.name);
+        if (names.length === 0) return;
+        const locatorExpr = getLocatorExpr(el);
+        report({ kind: "upload", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: names.join(", "), timestamp: Date.now(), url: window.location.href });
+        return;
+      }
+      if (tag === "input" && (inputType === "range" || inputType === "color")) {
+        const input = el;
+        const locatorExpr = getLocatorExpr(el);
+        report({ kind: "fill", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: input.value, timestamp: Date.now(), url: window.location.href });
+      }
     }, true);
     document.addEventListener("keydown", (e) => {
       if (typeof e.key !== "string") return;
@@ -344,6 +404,15 @@ function getDOMCaptureScript() {
       if (["Shift", "Control", "Meta", "Alt", "Process"].includes(e.key)) return;
       const hasModifier = e.ctrlKey || e.altKey || e.metaKey;
       if (e.key.length === 1 && !hasModifier) return;
+      if (isTextInput(el) || isContentEditable(el)) {
+        const initial = focusValues.get(el);
+        const current = isContentEditable(el) ? el.innerText : el.value ?? "";
+        if (initial !== void 0 && current !== initial) {
+          const fillLocator = getLocatorExpr(el);
+          report({ kind: "fill", locatorExpr: fillLocator, selector: generateCSSSelector(el), label: extractLabel(fillLocator, el), value: current, timestamp: Date.now(), url: window.location.href });
+          focusValues.set(el, current);
+        }
+      }
       const locatorExpr = getLocatorExpr(el);
       report({ kind: "press", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: e.key, timestamp: Date.now(), url: window.location.href });
     }, true);
@@ -724,57 +793,79 @@ function buildAction(raw) {
       type = "press";
       value = raw.value;
       break;
+    case "upload":
+      type = "upload";
+      value = raw.value;
+      break;
     default:
       return null;
   }
-  return {
+  const action = {
     id: uuid.v4(),
     type,
     selector: raw.selector,
     locatorExpr: raw.locatorExpr,
     value,
-    description: generateDescription(raw.kind, raw.label, raw.value, raw.selectedText),
+    description: generateDescription(raw.kind, raw.label, raw.value, raw.selectedText, {
+      button: raw.button,
+      clickCount: raw.clickCount,
+      modifiers: raw.modifiers
+    }),
     timestamp: raw.timestamp || Date.now(),
     url: raw.url,
     isPageNavigation: false
   };
+  if (raw.button && raw.button !== "left") action.button = raw.button;
+  if (raw.modifiers?.length) action.modifiers = raw.modifiers;
+  if ((raw.clickCount ?? 1) >= 2) action.clickCount = raw.clickCount;
+  if (raw.values?.length) action.values = raw.values;
+  return action;
+}
+const DBLCLICK_MERGE_MS = 350;
+const OPENS_PAGE_WINDOW_MS = 1e3;
+function topFrameOnly(script) {
+  return `(function(){ try { if (window.self !== window.top) return; } catch (e) { return; } ${script} })()`;
 }
 class CodegenCapture {
   context;
   onAction;
+  onActionUpdated;
   active = false;
   paused = false;
-  lastGotoUrl = "";
   lastInteraction = null;
   assertCancelCb = null;
-  pendingInputClick = null;
+  /** One-slot action buffer. Input clicks wait for a possible fill (no timer);
+   *  plain left clicks wait DBLCLICK_MERGE_MS for a possible dblclick. */
+  pendingAction = null;
   pendingLocatorPick = null;
-  constructor(context, onAction) {
+  /** Last emitted action — a popup arriving shortly after can still be attributed to it. */
+  lastEmitted = null;
+  /** Page → alias. The initial page maps to '' (actions carry no pageAlias). */
+  pageAliases = /* @__PURE__ */ new Map();
+  nextPageOrdinal = 1;
+  lastGotoUrlByPage = /* @__PURE__ */ new Map();
+  /** Frame → iframe locator chain (top → innermost); invalidated on detach/navigation. */
+  frameChainCache = /* @__PURE__ */ new Map();
+  constructor(context, onAction, onActionUpdated) {
     this.context = context;
     this.onAction = onAction;
+    this.onActionUpdated = onActionUpdated ?? null;
   }
   async start() {
     this.active = true;
-    this.lastGotoUrl = "";
     this.lastInteraction = null;
+    this.lastEmitted = null;
+    this.pageAliases.clear();
+    this.lastGotoUrlByPage.clear();
+    this.frameChainCache.clear();
+    this.nextPageOrdinal = 1;
     const pages = this.context.pages();
     const page = pages[0];
     if (!page) throw new Error("No page available in browser context");
-    const initScript = getBrowserInitScript();
-    if (initScript) {
-      await page.addInitScript(initScript);
-      await page.evaluate(initScript).catch(() => {
-      });
-    }
-    const captureScript = getDOMCaptureScript();
-    await page.addInitScript(captureScript);
-    await page.evaluate(captureScript).catch(() => {
-    });
-    const cursorScript = getCursorHighlightScript();
-    await page.addInitScript(cursorScript);
-    await page.evaluate(cursorScript).catch(() => {
-    });
-    await page.exposeFunction("__flowtest_assert_report", (data) => {
+    this.pageAliases.set(page, "");
+    await this.context.exposeBinding("__flowtest_assert_report", async ({ page: srcPage, frame }, data) => {
+      const srcAlias = this.pageAliases.get(srcPage);
+      const framePath = await this.frameLocatorChain(frame, srcPage);
       const action = {
         id: uuid.v4(),
         type: data.type,
@@ -784,14 +875,16 @@ class CodegenCapture {
         description: generateAssertDescription(data),
         timestamp: Date.now(),
         url: data.url,
-        isPageNavigation: false
+        isPageNavigation: false,
+        ...srcAlias ? { pageAlias: srcAlias } : {},
+        ...framePath.length ? { framePath } : {}
       };
-      this.onAction(action);
+      this.emitAction(action);
     });
-    await page.exposeFunction("__flowtest_assert_cancel", () => {
+    await this.context.exposeBinding("__flowtest_assert_cancel", () => {
       this.assertCancelCb?.();
     });
-    await page.exposeFunction("__flowtest_locator_resolved", (index) => {
+    await this.context.exposeBinding("__flowtest_locator_resolved", (_source, index) => {
       const pending = this.pendingLocatorPick;
       this.pendingLocatorPick = null;
       this.resume();
@@ -802,44 +895,57 @@ class CodegenCapture {
         locatorExpr: chosen.expr,
         description: index === 0 ? pending.action.description : deriveRowDescription(chosen.expr)
       };
-      this.onAction(finalAction);
+      this.emitAction(finalAction);
     });
-    const toolbarScript = getAssertionToolbarScript();
-    await page.addInitScript(toolbarScript);
+    await this.context.exposeBinding("__flowtest_report", async ({ page: srcPage, frame }, raw) => {
+      const framePath = await this.frameLocatorChain(frame, srcPage);
+      this.handleRawEvent(srcPage, raw, framePath.length ? framePath : void 0);
+    });
+    const initScript = getBrowserInitScript();
+    if (initScript) await this.context.addInitScript(initScript);
+    const captureScript = getDOMCaptureScript();
+    await this.context.addInitScript(captureScript);
+    const cursorScript = topFrameOnly(getCursorHighlightScript());
+    await this.context.addInitScript(cursorScript);
+    const toolbarScript = topFrameOnly(getAssertionToolbarScript());
+    await this.context.addInitScript(toolbarScript);
+    if (initScript) await page.evaluate(initScript).catch(() => {
+    });
+    await page.evaluate(captureScript).catch(() => {
+    });
+    await page.evaluate(cursorScript).catch(() => {
+    });
     await page.evaluate(toolbarScript).catch(() => {
     });
-    await page.exposeFunction("__flowtest_report", (raw) => {
-      if (!this.active || this.paused) return;
-      const action = buildAction(raw);
-      if (!action) return;
-      if (raw.isInputClick) {
-        this.flushPendingInputClick();
-        this.pendingInputClick = action;
-        this.lastInteraction = { time: Date.now(), type: action.type };
-        return;
-      }
-      if (action.type === "fill" && this.pendingInputClick?.selector === action.selector) {
-        this.pendingInputClick = null;
-      } else {
-        this.flushPendingInputClick();
-      }
-      this.lastInteraction = { time: Date.now(), type: action.type };
-      if (raw.alternativeLocators?.length) {
-        this.showLocatorPicker(action, raw.alternativeLocators);
-      } else {
-        this.onAction(action);
-      }
+    this.attachNavListener(page);
+    this.context.on("page", (newPage) => {
+      if (!this.active) return;
+      const alias = `page${this.nextPageOrdinal++}`;
+      this.pageAliases.set(newPage, alias);
+      this.attachNavListener(newPage);
+      this.attributeOpensPage(alias);
     });
+  }
+  /** Mirrors Playwright's RecorderSignalProcessor: navigation within NAV_SUPPRESSION_MS
+   *  after a click/press/fill is a redirect side-effect and must NOT generate a goto node.
+   *  The 50 ms delay lets pending IPC round-trips (from browser → Node.js) settle first,
+   *  so that SPA navigations (which fire framenavigated before the IPC arrives) are also
+   *  correctly suppressed. A popup's first navigation is likewise suppressed because the
+   *  triggering click sits within the suppression window. */
+  attachNavListener(page) {
+    page.on("framedetached", (frame) => this.frameChainCache.delete(frame));
     page.on("framenavigated", (frame) => {
+      this.frameChainCache.delete(frame);
       if (!this.active || frame !== page.mainFrame()) return;
       const url = frame.url();
-      if (!url || url === "about:blank" || url === this.lastGotoUrl) return;
-      this.lastGotoUrl = url;
+      if (!url || url === "about:blank" || url === this.lastGotoUrlByPage.get(page)) return;
+      this.lastGotoUrlByPage.set(page, url);
       const navigationTime = Date.now();
       setTimeout(() => {
         if (!this.active) return;
         if (shouldSuppressNav(navigationTime, this.lastInteraction)) return;
-        this.onAction({
+        const alias = this.pageAliases.get(page);
+        this.emitAction({
           id: uuid.v4(),
           type: "goto",
           selector: "",
@@ -847,16 +953,114 @@ class CodegenCapture {
           description: `導航到 ${url}`,
           timestamp: navigationTime,
           url,
-          isPageNavigation: true
+          isPageNavigation: true,
+          ...alias ? { pageAlias: alias } : {}
         });
       }, 50);
     });
   }
-  flushPendingInputClick() {
-    if (this.pendingInputClick) {
-      this.onAction(this.pendingInputClick);
-      this.pendingInputClick = null;
+  /** Attribute a freshly opened page to the click/press that triggered it:
+   *  stamp the buffered action if one is pending, otherwise retro-patch the
+   *  last emitted action via ACTION_UPDATED (renderer updates the node). */
+  attributeOpensPage(alias) {
+    if (this.pendingAction && ["click", "press"].includes(this.pendingAction.action.type)) {
+      this.pendingAction.action.opensPage = alias;
+      return;
     }
+    if (this.lastEmitted && ["click", "press"].includes(this.lastEmitted.action.type) && Date.now() - this.lastEmitted.time < OPENS_PAGE_WINDOW_MS) {
+      this.onActionUpdated?.({ actionId: this.lastEmitted.action.id, updates: { opensPage: alias } });
+    }
+  }
+  /** Build the iframe locator chain (top → innermost) for a frame, using the same
+   *  __ftGetLocator quality as element locators. Cached per Frame; falls back to
+   *  iframe[name=…]/iframe[src=…] when the frame element can't be resolved. */
+  async frameLocatorChain(frame, page) {
+    if (frame === page.mainFrame()) return [];
+    const cached = this.frameChainCache.get(frame);
+    if (cached) return cached;
+    const chain = [];
+    let cur = frame;
+    while (cur && cur !== page.mainFrame()) {
+      const parent = cur.parentFrame();
+      if (!parent) break;
+      let expr = null;
+      try {
+        const handle = await cur.frameElement();
+        expr = await parent.evaluate(
+          (el) => {
+            try {
+              return window.__ftGetLocator?.(el) ?? null;
+            } catch {
+              return null;
+            }
+          },
+          handle
+        );
+        await handle.dispose();
+      } catch {
+      }
+      if (!expr) {
+        const name = cur.name();
+        expr = name ? `locator('iframe[name="${name.replace(/"/g, '\\"')}"]')` : `locator('iframe[src="${cur.url().replace(/"/g, '\\"')}"]')`;
+      }
+      chain.unshift(expr);
+      cur = parent;
+    }
+    this.frameChainCache.set(frame, chain);
+    return chain;
+  }
+  handleRawEvent(srcPage, raw, framePath) {
+    if (!this.active || this.paused) return;
+    const action = buildAction(raw);
+    if (!action) return;
+    const alias = this.pageAliases.get(srcPage);
+    if (alias) action.pageAlias = alias;
+    if (framePath?.length) action.framePath = framePath;
+    if (action.type === "click" && (action.clickCount ?? 1) >= 2 && this.pendingAction?.action.type === "click" && this.pendingAction.action.selector === action.selector) {
+      if (this.pendingAction.action.opensPage) action.opensPage = this.pendingAction.action.opensPage;
+      this.discardPendingAction();
+    }
+    if (raw.isInputClick) {
+      this.setPendingAction(action, true);
+      this.lastInteraction = { time: Date.now(), type: action.type };
+      return;
+    }
+    if (action.type === "fill" && this.pendingAction?.isInputClick && this.pendingAction.action.selector === action.selector) {
+      this.discardPendingAction();
+    } else {
+      this.flushPendingAction();
+    }
+    this.lastInteraction = { time: Date.now(), type: action.type };
+    if (raw.alternativeLocators?.length) {
+      this.showLocatorPicker(action, raw.alternativeLocators, srcPage);
+      return;
+    }
+    if (action.type === "click" && (action.clickCount ?? 1) === 1 && !action.button) {
+      this.setPendingAction(action, false);
+      return;
+    }
+    this.emitAction(action);
+  }
+  emitAction(action) {
+    this.lastEmitted = { action, time: Date.now() };
+    this.onAction(action);
+  }
+  setPendingAction(action, isInputClick) {
+    this.flushPendingAction();
+    const timer = isInputClick ? null : setTimeout(() => this.flushPendingAction(), DBLCLICK_MERGE_MS);
+    this.pendingAction = { action, isInputClick, timer };
+  }
+  flushPendingAction() {
+    if (!this.pendingAction) return;
+    if (this.pendingAction.timer) clearTimeout(this.pendingAction.timer);
+    const { action } = this.pendingAction;
+    this.pendingAction = null;
+    this.emitAction(action);
+  }
+  discardPendingAction() {
+    if (!this.pendingAction) return;
+    if (this.pendingAction.timer) clearTimeout(this.pendingAction.timer);
+    this.pendingAction = null;
   }
   pause() {
     this.paused = true;
@@ -865,12 +1069,12 @@ class CodegenCapture {
     this.paused = false;
   }
   async stop() {
-    this.pendingInputClick = null;
+    if (this.pendingAction?.isInputClick) this.discardPendingAction();
+    else this.flushPendingAction();
     this.active = false;
     this.paused = false;
     this.pendingLocatorPick = null;
-    const page = this.context.pages()[0];
-    if (page) {
+    for (const page of this.context.pages()) {
       await page.evaluate(() => {
         ["__ft_assert_toolbar", "__ft_pick_overlay", "__ft_pick_tooltip", "__ft_locator_picker"].forEach(
           (id) => {
@@ -880,16 +1084,14 @@ class CodegenCapture {
       }).catch(() => {
       });
     }
+    this.pageAliases.clear();
+    this.lastGotoUrlByPage.clear();
+    this.frameChainCache.clear();
   }
   // Shows the in-browser "選擇 Locator 方式" dialog and pauses recording until the
-  // user confirms (resolved via the exposed __flowtest_locator_resolved function).
-  showLocatorPicker(action, alternatives) {
-    const page = this.context.pages()[0];
-    if (!page) {
-      this.onAction(action);
-      return;
-    }
-    this.pendingLocatorPick = { action, alternatives };
+  // user confirms (resolved via the exposed __flowtest_locator_resolved binding).
+  showLocatorPicker(action, alternatives, page) {
+    this.pendingLocatorPick = { action, alternatives, page };
     this.pause();
     page.evaluate(getLocatorPickerScript(alternatives)).catch(() => {
     });
@@ -913,9 +1115,9 @@ class Recorder {
   page;
   capture;
   recording = false;
-  constructor(page, onAction) {
+  constructor(page, onAction, onActionUpdated) {
     this.page = page;
-    this.capture = new CodegenCapture(page.context(), onAction);
+    this.capture = new CodegenCapture(page.context(), onAction, onActionUpdated);
   }
   /**
    * @param baseURL - if provided, navigate to this URL after starting capture.
@@ -1163,13 +1365,16 @@ class Replayer {
   envVars;
   /** Active project ID — env-var references only resolve for sub-flows in this project. */
   activeProjectId;
-  constructor(page, baseURL = "", profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
+  /** pageAlias → Page for popups opened during replay (shared with nested Replayers). */
+  pages;
+  constructor(page, baseURL = "", profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId, sharedPages) {
     this.page = page;
     this.profileVars = profileVars ?? {};
     this.activeProfileId = activeProfileId;
     this.activeEnvironmentId = activeEnvironmentId;
     this.envVars = envVars ?? {};
     this.activeProjectId = activeProjectId;
+    this.pages = sharedPages ?? /* @__PURE__ */ new Map();
     this.baseOrigin = (() => {
       try {
         return new URL(baseURL).origin;
@@ -1177,6 +1382,15 @@ class Replayer {
         return "";
       }
     })();
+  }
+  /** Resolve the page an action targets. Absent alias = the initial page. */
+  pageFor(action) {
+    if (!action.pageAlias) return this.page;
+    const p = this.pages.get(action.pageAlias);
+    if (!p || p.isClosed()) {
+      throw new Error(`頁面 "${action.pageAlias}" 尚未開啟 — 觸發開新頁的動作可能未執行或失敗`);
+    }
+    return p;
   }
   async replayToNode(nodes, targetNodeId, onNodeStart, onNodeComplete, speed = 500) {
     this.sessionVars.clear();
@@ -1232,7 +1446,7 @@ class Replayer {
       subProfileVars = resolveVars(firstProfile.vars);
       resolvedSubProfileId = firstProfile.id;
     }
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0, this.activeEnvironmentId, this.envVars, this.activeProjectId);
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0, this.activeEnvironmentId, this.envVars, this.activeProjectId, this.pages);
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId,
@@ -1244,20 +1458,33 @@ class Replayer {
       this.sessionVars.set(k, v);
     }
   }
+  /** Fold the action's framePath into a scope: page → frameLocator chain.
+   *  Each entry is a locator expression for an iframe element; `.contentFrame()`
+   *  turns it into the scope for the next hop (never baked into locatorExpr). */
+  scopeFor(action) {
+    let scope = this.pageFor(action);
+    for (const frameExpr of action.framePath ?? []) {
+      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.profileVars);
+      const fn = new Function("s", `return s.${resolved}`);
+      scope = fn(scope).contentFrame();
+    }
+    return scope;
+  }
   /**
    * Resolve a Playwright Locator from an Action.
    * Prefers locatorExpr (Codegen-quality) over the fallback CSS selector.
    */
   getLocator(action) {
+    const scope = this.scopeFor(action);
     if (action.locatorExpr) {
       try {
         const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars);
         const fn = new Function("page", `return page.${resolved}`);
-        return fn(this.page);
+        return fn(scope);
       } catch {
       }
     }
-    return this.page.locator(action.selector);
+    return scope.locator(action.selector);
   }
   substituteOrigin(url) {
     const domainOverride = this.profileVars["domain"];
@@ -1273,18 +1500,30 @@ class Replayer {
   }
   async executeAction(action) {
     const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars) : void 0;
+    const popupPromise = action.opensPage ? this.pageFor(action).context().waitForEvent("page", { timeout: 15e3 }) : null;
     switch (action.type) {
       case "goto":
-        await this.page.goto(this.substituteOrigin(val));
+        await this.pageFor(action).goto(this.substituteOrigin(val));
         break;
-      case "click":
-        await this.getLocator(action).click();
+      case "click": {
+        const opts = {};
+        if (action.button && action.button !== "left") opts.button = action.button;
+        if (action.modifiers?.length) opts.modifiers = action.modifiers;
+        if ((action.clickCount ?? 1) >= 2) await this.getLocator(action).dblclick(opts);
+        else await this.getLocator(action).click(opts);
         break;
+      }
       case "fill":
         await this.getLocator(action).fill(val ?? "");
         break;
       case "selectOption":
-        await this.getLocator(action).selectOption(val ?? "");
+        if (action.values?.length) {
+          await this.getLocator(action).selectOption(
+            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.profileVars))
+          );
+        } else {
+          await this.getLocator(action).selectOption(val ?? "");
+        }
         break;
       case "check":
         await this.getLocator(action).check();
@@ -1296,12 +1535,23 @@ class Replayer {
         if (action.locatorExpr) {
           await this.getLocator(action).press(val ?? "");
         } else {
-          await this.page.keyboard.press(val ?? "");
+          await this.pageFor(action).keyboard.press(val ?? "");
         }
         break;
+      case "upload": {
+        const files = (val ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+        await this.getLocator(action).setInputFiles(files);
+        break;
+      }
       case "wait":
         await this.getLocator(action).waitFor({ state: "visible" });
         break;
+    }
+    if (popupPromise && action.opensPage) {
+      const newPage = await popupPromise;
+      await newPage.waitForLoadState("domcontentloaded").catch(() => {
+      });
+      this.pages.set(action.opensPage, newPage);
     }
     if (action.captureAs && val != null) {
       this.sessionVars.set(action.captureAs, val);
@@ -1311,10 +1561,12 @@ class Replayer {
     const assertion = action.assertion;
     if (!assertion) return;
     const TIMEOUT = 1e4;
+    const page = this.pageFor(action);
+    const scope = this.scopeFor(action);
     switch (assertion.type) {
       case "text": {
-        await this.page.locator(assertion.target).waitFor({ state: "visible", timeout: TIMEOUT });
-        const text = await this.page.locator(assertion.target).textContent({ timeout: TIMEOUT });
+        await scope.locator(assertion.target).waitFor({ state: "visible", timeout: TIMEOUT });
+        const text = await scope.locator(assertion.target).textContent({ timeout: TIMEOUT });
         if (!text?.includes(assertion.expected)) {
           throw new Error(
             `Assertion failed: expected text "${assertion.expected}" in "${assertion.target}", got "${text}"`
@@ -1323,19 +1575,31 @@ class Replayer {
         break;
       }
       case "visible": {
-        const visible = await this.page.locator(assertion.target).isVisible();
+        const visible = await scope.locator(assertion.target).isVisible();
         if (!visible) {
           throw new Error(`Assertion failed: "${assertion.target}" is not visible`);
         }
         break;
       }
       case "url": {
-        await this.page.waitForURL(new RegExp(assertion.expected), { timeout: TIMEOUT });
+        await page.waitForURL(new RegExp(assertion.expected), { timeout: TIMEOUT });
         break;
       }
       case "count": {
         const expected = parseInt(assertion.expected, 10);
-        await this.page.waitForFunction(
+        if (action.framePath?.length) {
+          const deadline = Date.now() + TIMEOUT;
+          for (; ; ) {
+            const count = await scope.locator(assertion.target).count();
+            if (count === expected) break;
+            if (Date.now() > deadline) {
+              throw new Error(`Assertion failed: expected ${expected} of "${assertion.target}", got ${count}`);
+            }
+            await new Promise((res) => setTimeout(res, 200));
+          }
+          break;
+        }
+        await page.waitForFunction(
           ({ sel, cnt }) => document.querySelectorAll(sel).length === cnt,
           { sel: assertion.target, cnt: expected },
           { timeout: TIMEOUT }
@@ -1557,14 +1821,25 @@ class ScriptExporter {
     const usesVariables = flow.nodes.some(
       (n) => n.action.value && hasVariables(n.action.value) || n.action.locatorExpr && hasVariables(n.action.locatorExpr)
     );
+    let usesPopupHoist = false;
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
       const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const hoistedVars = config.useTestStep ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v) => !!v)) : /* @__PURE__ */ new Set();
-      const hoistDecls = hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "";
+      const hoistedPages = config.useTestStep ? new Set(steps.map(({ node }) => node.action.opensPage).filter((v) => !!v)) : /* @__PURE__ */ new Set();
+      if (hoistedPages.size > 0) usesPopupHoist = true;
+      const hoistDecls = (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "") + (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join("\n") + "\n" : "");
       const stepCode = steps.map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {
-        const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars);
+        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars);
+        if (node.action.opensPage) {
+          const alias = node.action.opensPage;
+          const pageRef = node.action.pageAlias || "page";
+          const assign = hoistedPages.has(alias) ? `${alias} = await ${alias}Promise;` : `const ${alias} = await ${alias}Promise;`;
+          rawAction = `const ${alias}Promise = ${pageRef}.waitForEvent('popup');
+${rawAction}
+${assign}`;
+        }
         const assertCode = node.action.assertion ? ScriptExporter.assertionToCode(node.action) : "";
         if (config.useTestStep) {
           const action2 = rawAction.replace(/\n/g, "\n      ");
@@ -1581,7 +1856,7 @@ ${hoistDecls}${stepCode}
   });`;
     }).join("\n\n");
     return [
-      `import { test, expect } from '@playwright/test';`,
+      `import { test, expect${usesPopupHoist ? ", Page" : ""} } from '@playwright/test';`,
       helperImport,
       usesVariables ? VARIABLE_HELPERS_CODE : "",
       hasProfileVars ? `
@@ -1596,31 +1871,34 @@ ${emitProfileVarDecls(profileVars)}` : "",
   }
   static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false, hoistedVars = /* @__PURE__ */ new Set()) {
     const { action } = node;
+    const pageRef = action.pageAlias || "page";
+    const frameChain = (action.framePath ?? []).map((f) => `.${f}.contentFrame()`).join("");
+    const scopeRef = `${pageRef}${frameChain}`;
     const profileVarKeys = inlineVars ? /* @__PURE__ */ new Set() : new Set(Object.keys(profileVars));
     let loc;
     const { selector } = action;
     const locatorExpr = action.locatorExpr && inlineVars ? action.locatorExpr.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : action.locatorExpr;
     if (selector && /^\[name=/.test(selector)) {
-      loc = `page.locator('${selector}')`;
+      loc = `${scopeRef}.locator('${selector}')`;
     } else if (selector && /^\[data-id=/.test(selector)) {
-      loc = `page.locator('${selector}')`;
+      loc = `${scopeRef}.locator('${selector}')`;
     } else if (selector && /^\[aria-label=/.test(selector) && locatorExpr && /^getByText\(/.test(locatorExpr)) {
-      loc = `page.locator('${selector}')`;
+      loc = `${scopeRef}.locator('${selector}')`;
     } else if (locatorExpr && /^getByText\(/.test(locatorExpr)) {
       const textMatch = locatorExpr.match(/^getByText\("([^"]+)"/);
       if (textMatch && selector && /^button/.test(selector)) {
-        loc = `page.getByRole("button", { name: "${textMatch[1]}", exact: true })`;
+        loc = `${scopeRef}.getByRole("button", { name: "${textMatch[1]}", exact: true })`;
       } else if (textMatch && selector && /^a[\s\[]/.test(selector)) {
-        loc = `page.getByRole("link", { name: "${textMatch[1]}", exact: true })`;
+        loc = `${scopeRef}.getByRole("link", { name: "${textMatch[1]}", exact: true })`;
       } else if (textMatch) {
-        loc = `page.getByText("${textMatch[1]}", { exact: true })`;
+        loc = `${scopeRef}.getByText("${textMatch[1]}", { exact: true })`;
       } else {
-        loc = `page.${locatorExpr}`;
+        loc = `${scopeRef}.${locatorExpr}`;
       }
     } else if (locatorExpr) {
-      loc = `page.${locatorExpr}`;
+      loc = `${scopeRef}.${locatorExpr}`;
     } else {
-      loc = `page.locator('${selector}')`;
+      loc = `${scopeRef}.locator('${selector}')`;
     }
     if (hasVariables(loc)) {
       loc = locatorExprToCode(loc, profileVarKeys, sessionVarsDefined);
@@ -1646,9 +1924,9 @@ ${emitProfileVarDecls(profileVars)}` : "",
             if (parsed.origin === baseOrigin) {
               const rest = parsed.pathname + parsed.search + parsed.hash;
               if (inlineVars) {
-                return `${captureDecl}await page.goto('${domainOverride}${rest}');`;
+                return `${captureDecl}await ${pageRef}.goto('${domainOverride}${rest}');`;
               }
-              return `${captureDecl}await page.goto(\`\${_ftProf_domain}${rest}\`);`;
+              return `${captureDecl}await ${pageRef}.goto(\`\${_ftProf_domain}${rest}\`);`;
             }
           } catch {
           }
@@ -1656,20 +1934,34 @@ ${emitProfileVarDecls(profileVars)}` : "",
         if (inlineVars) {
           gotoVal = resolveValue(gotoVal, profileVars);
         }
-        return `${captureDecl}await page.goto(${va(gotoVal)});`;
+        return `${captureDecl}await ${pageRef}.goto(${va(gotoVal)});`;
       }
-      case "click":
-        return `await ${loc}.click();`;
+      case "click": {
+        const clickOpts = [];
+        if (action.button && action.button !== "left") clickOpts.push(`button: '${action.button}'`);
+        if (action.modifiers?.length) clickOpts.push(`modifiers: [${action.modifiers.map((m) => `'${m}'`).join(", ")}]`);
+        const optStr = clickOpts.length ? `{ ${clickOpts.join(", ")} }` : "";
+        const method = (action.clickCount ?? 1) >= 2 ? "dblclick" : "click";
+        return `await ${loc}.${method}(${optStr});`;
+      }
       case "fill":
         return `${captureDecl}await ${loc}.fill(${va(action.value ?? "")});`;
       case "selectOption":
+        if (action.values?.length) {
+          return `${captureDecl}await ${loc}.selectOption([${action.values.map((v) => va(v)).join(", ")}]);`;
+        }
         return `${captureDecl}await ${loc}.selectOption(${va(action.value ?? "")});`;
       case "check":
         return `await ${loc}.check();`;
       case "uncheck":
         return `await ${loc}.uncheck();`;
       case "press":
-        return action.locatorExpr ? `${captureDecl}await ${loc}.press(${va(action.value ?? "")});` : `${captureDecl}await page.keyboard.press(${va(action.value ?? "")});`;
+        return action.locatorExpr ? `${captureDecl}await ${loc}.press(${va(action.value ?? "")});` : `${captureDecl}await ${pageRef}.keyboard.press(${va(action.value ?? "")});`;
+      case "upload": {
+        const files = (action.value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+        const arg = files.length === 1 ? va(files[0]) : `[${files.map((f) => va(f)).join(", ")}]`;
+        return `${captureDecl}await ${loc}.setInputFiles(${arg});`;
+      }
       case "wait":
         return `await ${loc}.waitFor({ state: 'visible' });`;
       case "assertVisible":
@@ -1677,7 +1969,7 @@ ${emitProfileVarDecls(profileVars)}` : "",
       case "assertText": {
         const valueExpr = va(action.value ?? "");
         const isSessionVar = !!action.value && /^\{\{(\w+)\}\}$/.test(action.value) && sessionVarsDefined.has(action.value.slice(2, -2));
-        const assertLoc = isSessionVar && action.selector ? `page.locator('${action.selector}').filter({ hasText: ${valueExpr} })` : loc;
+        const assertLoc = isSessionVar && action.selector ? `${scopeRef}.locator('${action.selector}').filter({ hasText: ${valueExpr} })` : loc;
         return `${captureDecl}await expect(${assertLoc}).toContainText(${valueExpr});`;
       }
       case "assertValue":
@@ -1691,15 +1983,17 @@ ${emitProfileVarDecls(profileVars)}` : "",
   static assertionToCode(action) {
     const a = action.assertion;
     if (!a) return "";
+    const pageRef = action.pageAlias || "page";
+    const scopeRef = `${pageRef}${(action.framePath ?? []).map((f) => `.${f}.contentFrame()`).join("")}`;
     switch (a.type) {
       case "text":
-        return `await expect(page.locator('${a.target}')).toContainText('${a.expected}');`;
+        return `await expect(${scopeRef}.locator('${a.target}')).toContainText('${a.expected}');`;
       case "visible":
-        return `await expect(page.locator('${a.target}')).toBeVisible();`;
+        return `await expect(${scopeRef}.locator('${a.target}')).toBeVisible();`;
       case "url":
-        return `await expect(page).toHaveURL(/${a.expected}/);`;
+        return `await expect(${pageRef}).toHaveURL(/${a.expected}/);`;
       case "count":
-        return `await expect(page.locator('${a.target}')).toHaveCount(${a.expected});`;
+        return `await expect(${scopeRef}.locator('${a.target}')).toHaveCount(${a.expected});`;
       default:
         return "";
     }
@@ -1717,6 +2011,9 @@ ${emitProfileVarDecls(profileVars)}` : "",
     }
     if (prefixLen < 3) return { helperCode: "", helperImport: "" };
     const prefixNodes = pathArrays[0].slice(0, prefixLen).map((id) => nodeMap.get(id));
+    if (prefixNodes.some((n) => n.action.pageAlias || n.action.opensPage)) {
+      return { helperCode: "", helperImport: "" };
+    }
     const fnName = `setup_${flow.id.replace(/-/g, "_")}`;
     const helperSessionVars = /* @__PURE__ */ new Set();
     const body = prefixNodes.map((node) => {
@@ -1776,9 +2073,15 @@ function registerIpcHandlers(win) {
         return;
       }
     }
-    recorder = new Recorder(page, (action) => {
-      win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action);
-    });
+    recorder = new Recorder(
+      page,
+      (action) => {
+        win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action);
+      },
+      (payload2) => {
+        win.webContents.send(IPC_CHANNELS.ACTION_UPDATED, payload2);
+      }
+    );
     await recorder.start(payload.branchFromNodeId ? void 0 : payload.baseURL);
   });
   electron.ipcMain.handle(IPC_CHANNELS.RECORDING_STOP, async () => {

@@ -32,7 +32,7 @@ export function shouldSuppressNav(
 }
 
 export interface RawEvent {
-  kind: 'click' | 'fill' | 'selectOption' | 'check' | 'uncheck' | 'press'
+  kind: 'click' | 'fill' | 'selectOption' | 'check' | 'uncheck' | 'press' | 'upload'
   locatorExpr: string
   selector: string
   label: string
@@ -42,6 +42,14 @@ export interface RawEvent {
   url: string
   isInputClick?: boolean
   alternativeLocators?: LocatorOption[]
+  /** click only: mouse button — absent means left */
+  button?: 'left' | 'right' | 'middle'
+  /** click only: modifier keys held (Alt/Control/Meta/Shift) */
+  modifiers?: string[]
+  /** click only: 2 = double click */
+  clickCount?: number
+  /** selectOption only: all selected values of a <select multiple> */
+  values?: string[]
 }
 
 export function generateDescription(
@@ -49,14 +57,22 @@ export function generateDescription(
   label: string,
   value?: string,
   selectedText?: string,
+  clickOpts?: { button?: string; clickCount?: number; modifiers?: string[] },
 ): string {
   switch (kind) {
-    case 'click':        return `點擊「${label}」`
+    case 'click': {
+      const mods = clickOpts?.modifiers?.length ? `${clickOpts.modifiers.join('+')}+` : ''
+      if ((clickOpts?.clickCount ?? 1) >= 2) return `${mods}雙擊「${label}」`
+      if (clickOpts?.button === 'right')     return `${mods}右鍵點擊「${label}」`
+      if (clickOpts?.button === 'middle')    return `${mods}中鍵點擊「${label}」`
+      return `${mods}點擊「${label}」`
+    }
     case 'fill':         return `填入「${value ?? ''}」到「${label}」`
     case 'selectOption': return `選擇「${selectedText ?? value ?? ''}」from「${label}」`
     case 'check':        return `勾選「${label}」`
     case 'uncheck':      return `取消勾選「${label}」`
     case 'press':        return `在「${label}」按下 ${value}`
+    case 'upload':       return `上傳檔案「${value ?? ''}」到「${label}」`
   }
 }
 
@@ -220,10 +236,19 @@ export function getDOMCaptureScript(): () => void {
 
     const focusValues = new WeakMap<Element, string>()
 
-    // ── Click ─────────────────────────────────────────────────────────────
+    // ── Click / DblClick / Right-click / Middle-click ─────────────────────
     // Blacklist approach matching Playwright's _shouldIgnoreMouseEvent:
-    // Record ANY element click EXCEPT SELECT/OPTION/html/body/date/range inputs.
-    document.addEventListener('click', (e: MouseEvent) => {
+    // Record ANY element click EXCEPT SELECT/OPTION/html/body/date/range/file inputs.
+    function modifiersFor(e: MouseEvent): string[] {
+      const m: string[] = []
+      if (e.altKey) m.push('Alt')
+      if (e.ctrlKey) m.push('Control')
+      if (e.metaKey) m.push('Meta')
+      if (e.shiftKey) m.push('Shift')
+      return m
+    }
+
+    function handleMouseAction(e: MouseEvent, button: 'left' | 'right' | 'middle', clickCount: number): void {
       let el = getTarget(e) as Element
       if (!el?.tagName) return
 
@@ -239,18 +264,28 @@ export function getDOMCaptureScript(): () => void {
       // Playwright blacklist
       if (tag === 'select' || tag === 'option') return
       if (tag === 'input' && (type === 'date' || type === 'range')) return
+      // File inputs: the click only opens the OS dialog — the change event records the upload
+      if (tag === 'input' && type === 'file') return
       if (tag === 'html' || tag === 'body') return
 
-      // Text inputs: report with isInputClick so a subsequent fill can suppress it
-      if (isTextInput(el)) {
+      const mods = modifiersFor(e)
+      const extras = {
+        button: button !== 'left' ? button : undefined,
+        clickCount: clickCount >= 2 ? clickCount : undefined,
+        modifiers: mods.length ? mods : undefined,
+      }
+
+      // Text inputs (left button only): report with isInputClick so a subsequent
+      // fill can suppress it. Covers dblclick too (select-word before retyping).
+      if (isTextInput(el) && button === 'left') {
         const locatorExpr = getLocatorExpr(el)
         const label = extractLabel(locatorExpr, el)
-        report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, isInputClick: true })
+        report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, isInputClick: true, ...extras })
         return
       }
 
-      // Checkbox / radio → check / uncheck
-      if (tag === 'input' && (type === 'checkbox' || type === 'radio')) {
+      // Checkbox / radio → check / uncheck (left button only — right click doesn't toggle)
+      if (tag === 'input' && (type === 'checkbox' || type === 'radio') && button === 'left') {
         const locatorExpr = getLocatorExpr(el)
         const label = extractLabel(locatorExpr, el)
         report({ kind: (el as HTMLInputElement).checked ? 'check' : 'uncheck', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href })
@@ -270,9 +305,10 @@ export function getDOMCaptureScript(): () => void {
       const locatorExpr = getLocatorExpr(el)
       const label = extractLabel(locatorExpr, el)
 
-      // Table cell detection: offer row-based alternative locators
+      // Table cell detection: offer row-based alternative locators.
+      // Only for plain left single clicks — variants skip the picker flow.
       let alternativeLocators: { label: string, expr: string }[] | undefined
-      const tr = (el as HTMLElement).closest?.('tr')
+      const tr = button === 'left' && clickCount < 2 ? (el as HTMLElement).closest?.('tr') : null
       if (tr && tr.parentElement) {
         const rows = Array.from(tr.parentElement.children).filter(
           (c) => c.tagName === 'TR'
@@ -306,7 +342,27 @@ export function getDOMCaptureScript(): () => void {
         }
       }
 
-      report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, alternativeLocators })
+      report({ kind: 'click', locatorExpr, selector: generateCSSSelector(el), label, timestamp: Date.now(), url: window.location.href, alternativeLocators, ...extras })
+    }
+
+    document.addEventListener('click', (e: MouseEvent) => {
+      // detail >= 2 clicks are the components of a double-click — the dblclick
+      // listener reports those (Node side merges away the buffered single click).
+      if (e.detail >= 2) return
+      handleMouseAction(e, 'left', 1)
+    }, true)
+
+    document.addEventListener('dblclick', (e: MouseEvent) => {
+      handleMouseAction(e, 'left', 2)
+    }, true)
+
+    document.addEventListener('contextmenu', (e: MouseEvent) => {
+      handleMouseAction(e, 'right', 1)
+    }, true)
+
+    document.addEventListener('auxclick', (e: MouseEvent) => {
+      // button 1 = middle; button 2 (right) is already covered by contextmenu
+      if (e.button === 1) handleMouseAction(e, 'middle', 1)
     }, true)
 
     // ── Fill: emit on blur when value changed ──────────────────────────────
@@ -335,13 +391,43 @@ export function getDOMCaptureScript(): () => void {
       report({ kind: 'fill', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href })
     }, true)
 
-    // ── SelectOption ───────────────────────────────────────────────────────
+    // ── SelectOption / Upload ─────────────────────────────────────────────
     document.addEventListener('change', (e: Event) => {
       const el = getTarget(e) as HTMLSelectElement
-      if (!el?.tagName || el.tagName.toLowerCase() !== 'select') return
-      const opt = el.options[el.selectedIndex]
-      const locatorExpr = getLocatorExpr(el)
-      report({ kind: 'selectOption', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: el.value, selectedText: opt?.text?.trim(), timestamp: Date.now(), url: window.location.href })
+      if (!el?.tagName) return
+      const tag = el.tagName.toLowerCase()
+      if (tag === 'select') {
+        const locatorExpr = getLocatorExpr(el)
+        if (el.multiple) {
+          // <select multiple>: capture every selected option (matches Playwright's selectedOptions)
+          const selected = Array.from(el.selectedOptions)
+          const values = selected.map((o) => o.value)
+          report({ kind: 'selectOption', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: values.join(', '), values, selectedText: selected.map((o) => o.text?.trim()).join('、'), timestamp: Date.now(), url: window.location.href })
+          return
+        }
+        const opt = el.options[el.selectedIndex]
+        report({ kind: 'selectOption', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: el.value, selectedText: opt?.text?.trim(), timestamp: Date.now(), url: window.location.href })
+        return
+      }
+      const inputType = ((el as unknown as HTMLInputElement).type || '').toLowerCase()
+      // input[type=file] → upload (matches Playwright's setInputFiles capture).
+      // Browsers only expose file names, not paths — the user replaces them with
+      // real paths in the PropertyPanel before replay/export.
+      if (tag === 'input' && inputType === 'file') {
+        const input = el as unknown as HTMLInputElement
+        const names = Array.from(input.files ?? []).map((f) => f.name)
+        if (names.length === 0) return
+        const locatorExpr = getLocatorExpr(el)
+        report({ kind: 'upload', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: names.join(', '), timestamp: Date.now(), url: window.location.href })
+        return
+      }
+      // range/color have no blur-based fill path (excluded from isTextInput and the
+      // click blacklist) — record their final value as a fill, like Playwright does.
+      if (tag === 'input' && (inputType === 'range' || inputType === 'color')) {
+        const input = el as unknown as HTMLInputElement
+        const locatorExpr = getLocatorExpr(el)
+        report({ kind: 'fill', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: input.value, timestamp: Date.now(), url: window.location.href })
+      }
     }, true)
 
     // ── Press: matches Playwright's _shouldGenerateKeyPressFor ────────────
@@ -371,6 +457,23 @@ export function getDOMCaptureScript(): () => void {
       const hasModifier = e.ctrlKey || e.altKey || e.metaKey
       // Single printable char without modifier → becomes fill value, not a press
       if (e.key.length === 1 && !hasModifier) return
+
+      // Flush the pending fill BEFORE reporting the press. Fill is normally emitted
+      // on blur, but Enter/Tab arrive first and may navigate away before blur's IPC
+      // lands — so "type then Enter" would record press before fill, or lose the
+      // fill entirely. Emitting it here fixes ordering and survives navigation.
+      if (isTextInput(el) || isContentEditable(el)) {
+        const initial = focusValues.get(el)
+        const current = isContentEditable(el)
+          ? (el as HTMLElement).innerText
+          : (el as HTMLInputElement).value ?? ''
+        if (initial !== undefined && current !== initial) {
+          const fillLocator = getLocatorExpr(el)
+          report({ kind: 'fill', locatorExpr: fillLocator, selector: generateCSSSelector(el), label: extractLabel(fillLocator, el), value: current, timestamp: Date.now(), url: window.location.href })
+          // Keep the entry but sync it, so the later blur sees no diff and stays silent.
+          focusValues.set(el, current)
+        }
+      }
 
       const locatorExpr = getLocatorExpr(el)
       report({ kind: 'press', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: e.key, timestamp: Date.now(), url: window.location.href })
@@ -781,18 +884,29 @@ export function buildAction(raw: RawEvent): Action | null {
     case 'check':        type = 'check'; break
     case 'uncheck':      type = 'uncheck'; break
     case 'press':        type = 'press';        value = raw.value; break
+    case 'upload':       type = 'upload';       value = raw.value; break
     default:             return null
   }
 
-  return {
+  const action: Action = {
     id: uuidv4(),
     type,
     selector: raw.selector,
     locatorExpr: raw.locatorExpr,
     value,
-    description: generateDescription(raw.kind, raw.label, raw.value, raw.selectedText),
+    description: generateDescription(raw.kind, raw.label, raw.value, raw.selectedText, {
+      button: raw.button,
+      clickCount: raw.clickCount,
+      modifiers: raw.modifiers,
+    }),
     timestamp: raw.timestamp || Date.now(),
     url: raw.url,
     isPageNavigation: false,
   }
+  // Only persist non-default click variants so plain clicks stay schema-identical to old flows
+  if (raw.button && raw.button !== 'left') action.button = raw.button
+  if (raw.modifiers?.length) action.modifiers = raw.modifiers
+  if ((raw.clickCount ?? 1) >= 2) action.clickCount = raw.clickCount
+  if (raw.values?.length) action.values = raw.values
+  return action
 }

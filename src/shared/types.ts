@@ -28,6 +28,23 @@ export interface Action {
   /** Full Playwright locator expression from Codegen, e.g. getByRole('button', { name: 'Login' }) */
   locatorExpr?: string
   value?: string
+  /** click only: mouse button — absent means left */
+  button?: 'left' | 'right' | 'middle'
+  /** click only: modifier keys held during the click (Playwright names: Alt/Control/Meta/Shift) */
+  modifiers?: string[]
+  /** click only: 2 = double click (replayed/exported as dblclick) */
+  clickCount?: number
+  /** selectOption only: all selected values when the <select> allows multiple.
+   *  Takes precedence over `value` at replay/export. */
+  values?: string[]
+  /** Page this action ran on — absent means the initial page. Popups get 'page1', 'page2'… */
+  pageAlias?: string
+  /** iframe chain (top → innermost) as locator expressions for each iframe element.
+   *  Replay/export scope the locator via `.contentFrame()` chains; absent = main frame. */
+  framePath?: string[]
+  /** Set when this action opened a new page/popup: the alias assigned to that page.
+   *  Replay waits for the page event; export emits the waitForEvent('popup') pattern. */
+  opensPage?: string
   captureAs?: string
   description: string
   timestamp: number
@@ -229,6 +246,7 @@ export const IPC_CHANNELS = {
   LOCATOR_PICK_NEEDED: 'locator:pickNeeded',
   ASSERTION_PICK_CANCELLED: 'assertion:pickCancelled',
   ACTION_CAPTURED: 'action:captured',
+  ACTION_UPDATED: 'action:updated',
   TEST_OUTPUT: 'test:output',
   TEST_FINISHED: 'test:finished',
   REPLAY_NODE_START: 'replay:nodeStart',
@@ -308,6 +326,13 @@ export interface ProjectSavePayload {
 
 export interface ProjectLoadPayload {
   projectId: string
+}
+
+/** Main → Renderer: retroactively patch fields of an already-captured action
+ *  (e.g. a popup that arrived after its triggering click was emitted). */
+export interface ActionUpdatedPayload {
+  actionId: string
+  updates: Partial<Action>
 }
 
 export interface LocatorOption {

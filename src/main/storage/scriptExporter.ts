@@ -215,6 +215,8 @@ export class ScriptExporter {
       (n.action.locatorExpr && hasVariables(n.action.locatorExpr))
     )
 
+    let usesPopupHoist = false
+
     const tests = paths
       .map((path, idx) => {
         const testName = path.name || `測試路徑 ${idx + 1}`
@@ -227,13 +229,28 @@ export class ScriptExporter {
         const hoistedVars: Set<string> = config.useTestStep
           ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v): v is string => !!v))
           : new Set()
-        const hoistDecls = hoistedVars.size > 0
-          ? [...hoistedVars].map((v) => `    let ${v} = ''`).join('\n') + '\n'
-          : ''
+        // Popup page aliases need the same hoisting: `const page1` inside a step closure
+        // would be invisible to later steps that act on page1.
+        const hoistedPages: Set<string> = config.useTestStep
+          ? new Set(steps.map(({ node }) => node.action.opensPage).filter((v): v is string => !!v))
+          : new Set()
+        if (hoistedPages.size > 0) usesPopupHoist = true
+        const hoistDecls =
+          (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join('\n') + '\n' : '') +
+          (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join('\n') + '\n' : '')
 
         const stepCode = steps
           .map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {
-            const rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars)
+            let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars)
+            // Popup-opening action: wrap in the official waitForEvent('popup') pattern
+            if (node.action.opensPage) {
+              const alias = node.action.opensPage
+              const pageRef = node.action.pageAlias || 'page'
+              const assign = hoistedPages.has(alias)
+                ? `${alias} = await ${alias}Promise;`
+                : `const ${alias} = await ${alias}Promise;`
+              rawAction = `const ${alias}Promise = ${pageRef}.waitForEvent('popup');\n${rawAction}\n${assign}`
+            }
             const assertCode = node.action.assertion
               ? ScriptExporter.assertionToCode(node.action)
               : ''
@@ -251,7 +268,7 @@ export class ScriptExporter {
       .join('\n\n')
 
     return [
-      `import { test, expect } from '@playwright/test';`,
+      `import { test, expect${usesPopupHoist ? ', Page' : ''} } from '@playwright/test';`,
       helperImport,
       usesVariables ? VARIABLE_HELPERS_CODE : '',
       hasProfileVars ? `\n${emitProfileVarDecls(profileVars)}` : '',
@@ -275,6 +292,12 @@ export class ScriptExporter {
     hoistedVars: Set<string> = new Set(),
   ): string {
     const { action } = node
+    // Popup actions target their page alias ('page1', 'page2'…); absent = the initial 'page'.
+    const pageRef = action.pageAlias || 'page'
+    // Actions inside iframes scope their locators through a .contentFrame() chain.
+    // goto / keyboard / waitForEvent stay on the page itself.
+    const frameChain = (action.framePath ?? []).map((f) => `.${f}.contentFrame()`).join('')
+    const scopeRef = `${pageRef}${frameChain}`
     // For sub-flow nodes (inlineVars=true), profile vars are baked into actual values at code-gen
     // time so we don't emit _ftProf_* references (which would resolve to the parent flow's values).
     const profileVarKeys = inlineVars ? new Set<string>() : new Set(Object.keys(profileVars))
@@ -296,33 +319,33 @@ export class ScriptExporter {
 
     if (selector && /^\[name=/.test(selector)) {
       // Form input with a name attribute — always the most reliable locator
-      loc = `page.locator('${selector}')`
+      loc = `${scopeRef}.locator('${selector}')`
     } else if (selector && /^\[data-id=/.test(selector)) {
       // Unique data-id attribute (e.g. MUI nav buttons that share the same aria-label)
-      loc = `page.locator('${selector}')`
+      loc = `${scopeRef}.locator('${selector}')`
     } else if (selector && /^\[aria-label=/.test(selector) && locatorExpr && /^getByText\(/.test(locatorExpr)) {
       // Element has a unique aria-label: prefer it over getByText which can time out
       // on buttons whose textContent doesn't perfectly match (e.g. icon + text).
-      loc = `page.locator('${selector}')`
+      loc = `${scopeRef}.locator('${selector}')`
     } else if (locatorExpr && /^getByText\(/.test(locatorExpr)) {
       // Attempt to upgrade getByText("X") → getByRole("tag", { name: "X", exact: true })
       // when the selector tells us the actual HTML element type.
       // Note: stored locatorExpr may already contain { exact: true } so match just the text portion.
       const textMatch = locatorExpr.match(/^getByText\("([^"]+)"/)
       if (textMatch && selector && /^button/.test(selector)) {
-        loc = `page.getByRole("button", { name: "${textMatch[1]}", exact: true })`
+        loc = `${scopeRef}.getByRole("button", { name: "${textMatch[1]}", exact: true })`
       } else if (textMatch && selector && /^a[\s\[]/.test(selector)) {
-        loc = `page.getByRole("link", { name: "${textMatch[1]}", exact: true })`
+        loc = `${scopeRef}.getByRole("link", { name: "${textMatch[1]}", exact: true })`
       } else if (textMatch) {
         // No role info — at least add exact:true to limit partial matches
-        loc = `page.getByText("${textMatch[1]}", { exact: true })`
+        loc = `${scopeRef}.getByText("${textMatch[1]}", { exact: true })`
       } else {
-        loc = `page.${locatorExpr}`
+        loc = `${scopeRef}.${locatorExpr}`
       }
     } else if (locatorExpr) {
-      loc = `page.${locatorExpr}`
+      loc = `${scopeRef}.${locatorExpr}`
     } else {
-      loc = `page.locator('${selector}')`
+      loc = `${scopeRef}.locator('${selector}')`
     }
 
     // Transform any {{...}} variable placeholders remaining in loc into JS code expressions
@@ -363,10 +386,10 @@ export class ScriptExporter {
               const rest = parsed.pathname + parsed.search + parsed.hash
               if (inlineVars) {
                 // Sub-flow: bake the actual domain value directly into the URL
-                return `${captureDecl}await page.goto('${domainOverride}${rest}');`
+                return `${captureDecl}await ${pageRef}.goto('${domainOverride}${rest}');`
               }
               // Parent flow: emit a parameterized reference so different profiles can be swapped at runtime
-              return `${captureDecl}await page.goto(\`\${_ftProf_domain}${rest}\`);`
+              return `${captureDecl}await ${pageRef}.goto(\`\${_ftProf_domain}${rest}\`);`
             }
           } catch { /* not a URL, fall through */ }
         }
@@ -374,13 +397,22 @@ export class ScriptExporter {
           // Resolve any remaining {{key}} placeholders with actual profile var values
           gotoVal = resolveValue(gotoVal, profileVars)
         }
-        return `${captureDecl}await page.goto(${va(gotoVal)});`
+        return `${captureDecl}await ${pageRef}.goto(${va(gotoVal)});`
       }
-      case 'click':
-        return `await ${loc}.click();`
+      case 'click': {
+        const clickOpts: string[] = []
+        if (action.button && action.button !== 'left') clickOpts.push(`button: '${action.button}'`)
+        if (action.modifiers?.length) clickOpts.push(`modifiers: [${action.modifiers.map((m) => `'${m}'`).join(', ')}]`)
+        const optStr = clickOpts.length ? `{ ${clickOpts.join(', ')} }` : ''
+        const method = (action.clickCount ?? 1) >= 2 ? 'dblclick' : 'click'
+        return `await ${loc}.${method}(${optStr});`
+      }
       case 'fill':
         return `${captureDecl}await ${loc}.fill(${va(action.value ?? '')});`
       case 'selectOption':
+        if (action.values?.length) {
+          return `${captureDecl}await ${loc}.selectOption([${action.values.map((v) => va(v)).join(', ')}]);`
+        }
         return `${captureDecl}await ${loc}.selectOption(${va(action.value ?? '')});`
       case 'check':
         return `await ${loc}.check();`
@@ -390,7 +422,13 @@ export class ScriptExporter {
         // keyboard.press has no locator
         return action.locatorExpr
           ? `${captureDecl}await ${loc}.press(${va(action.value ?? '')});`
-          : `${captureDecl}await page.keyboard.press(${va(action.value ?? '')});`
+          : `${captureDecl}await ${pageRef}.keyboard.press(${va(action.value ?? '')});`
+      case 'upload': {
+        // value holds comma-separated file paths
+        const files = (action.value ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+        const arg = files.length === 1 ? va(files[0]) : `[${files.map((f) => va(f)).join(', ')}]`
+        return `${captureDecl}await ${loc}.setInputFiles(${arg});`
+      }
       case 'wait':
         return `await ${loc}.waitFor({ state: 'visible' });`
       case 'assertVisible':
@@ -404,7 +442,7 @@ export class ScriptExporter {
         const isSessionVar = !!action.value && /^\{\{(\w+)\}\}$/.test(action.value)
           && sessionVarsDefined.has(action.value.slice(2, -2))
         const assertLoc = isSessionVar && action.selector
-          ? `page.locator('${action.selector}').filter({ hasText: ${valueExpr} })`
+          ? `${scopeRef}.locator('${action.selector}').filter({ hasText: ${valueExpr} })`
           : loc
         return `${captureDecl}await expect(${assertLoc}).toContainText(${valueExpr});`
       }
@@ -417,18 +455,20 @@ export class ScriptExporter {
     }
   }
 
-  private static assertionToCode(action: { assertion?: Flow['nodes'][0]['action']['assertion'] }): string {
+  private static assertionToCode(action: { assertion?: Flow['nodes'][0]['action']['assertion']; pageAlias?: string; framePath?: string[] }): string {
     const a = action.assertion
     if (!a) return ''
+    const pageRef = action.pageAlias || 'page'
+    const scopeRef = `${pageRef}${(action.framePath ?? []).map((f) => `.${f}.contentFrame()`).join('')}`
     switch (a.type) {
       case 'text':
-        return `await expect(page.locator('${a.target}')).toContainText('${a.expected}');`
+        return `await expect(${scopeRef}.locator('${a.target}')).toContainText('${a.expected}');`
       case 'visible':
-        return `await expect(page.locator('${a.target}')).toBeVisible();`
+        return `await expect(${scopeRef}.locator('${a.target}')).toBeVisible();`
       case 'url':
-        return `await expect(page).toHaveURL(/${a.expected}/);`
+        return `await expect(${pageRef}).toHaveURL(/${a.expected}/);`
       case 'count':
-        return `await expect(page.locator('${a.target}')).toHaveCount(${a.expected});`
+        return `await expect(${scopeRef}.locator('${a.target}')).toHaveCount(${a.expected});`
       default:
         return ''
     }
@@ -455,6 +495,12 @@ export class ScriptExporter {
     if (prefixLen < 3) return { helperCode: '', helperImport: '' }
 
     const prefixNodes = pathArrays[0].slice(0, prefixLen).map((id) => nodeMap.get(id)!)
+
+    // Popup pages opened inside the helper wouldn't be visible to the test body
+    // (and vice versa) — skip helper extraction when the prefix touches popups.
+    if (prefixNodes.some((n) => n.action.pageAlias || n.action.opensPage)) {
+      return { helperCode: '', helperImport: '' }
+    }
     const fnName = `setup_${flow.id.replace(/-/g, '_')}`
     const helperSessionVars = new Set<string>()
     const body = prefixNodes

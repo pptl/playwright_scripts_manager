@@ -68,9 +68,16 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
     // The locator picker (Cell vs Row) is now handled in-browser by CodegenCapture,
     // so every action arrives here finalised and is forwarded straight to the renderer.
-    recorder = new Recorder(page, (action) => {
-      win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
-    })
+    recorder = new Recorder(
+      page,
+      (action) => {
+        win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
+      },
+      (payload) => {
+        // Late popup attribution: patch the already-captured action in the renderer
+        win.webContents.send(IPC_CHANNELS.ACTION_UPDATED, payload)
+      },
+    )
     // For branch recording, don't navigate (we're already at the right page)
     await recorder.start(payload.branchFromNodeId ? undefined : payload.baseURL)
   })

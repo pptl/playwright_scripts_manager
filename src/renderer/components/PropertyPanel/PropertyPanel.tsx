@@ -85,6 +85,10 @@ export function PropertyPanel() {
         selector,
         locatorExpr: locatorExpr || selectedNode.action.locatorExpr,
         value: value || undefined,
+        // Multi-select nodes keep values[] in sync with the comma-joined value field
+        ...(selectedNode.action.values
+          ? { values: value.split(',').map((s) => s.trim()).filter(Boolean) }
+          : {}),
         ...callFlowUpdates,
       },
     })
@@ -148,10 +152,11 @@ export function PropertyPanel() {
             )}
 
             {/* Value */}
-            {['fill', 'selectOption', 'goto', 'press', 'assertText', 'assertValue'].includes(selectedNode.action.type) && (
+            {['fill', 'selectOption', 'goto', 'press', 'upload', 'assertText', 'assertValue'].includes(selectedNode.action.type) && (
               <Field label={
                 selectedNode.action.type === 'assertText' ? '驗證文字' :
-                selectedNode.action.type === 'assertValue' ? '驗證值' : '值'
+                selectedNode.action.type === 'assertValue' ? '驗證值' :
+                selectedNode.action.type === 'upload' ? '檔案路徑' : '值'
               }>
                 <input
                   value={value}
@@ -159,7 +164,9 @@ export function PropertyPanel() {
                   style={inputStyle}
                 />
                 <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
-                  可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code>
+                  {selectedNode.action.type === 'upload'
+                    ? '錄製時只能取得檔名，回放前請改成完整路徑（多檔用逗號分隔）'
+                    : <>可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code></>}
                 </div>
               </Field>
             )}

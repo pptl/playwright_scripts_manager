@@ -16902,6 +16902,44 @@ function ActionNodeComponent({ data, selected }) {
             children: action.description
           }
         ),
+        (action.pageAlias || action.opensPage) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 4, marginTop: 3, flexWrap: "wrap" }, children: [
+          action.pageAlias && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "span",
+            {
+              title: `此動作在分頁 ${action.pageAlias} 上執行`,
+              style: {
+                fontSize: 10,
+                color: "#38bdf8",
+                background: "#082f49",
+                border: "1px solid #0369a1",
+                borderRadius: 3,
+                padding: "1px 5px"
+              },
+              children: [
+                "📄 ",
+                action.pageAlias
+              ]
+            }
+          ),
+          action.opensPage && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "span",
+            {
+              title: `此動作會開啟新分頁 ${action.opensPage}`,
+              style: {
+                fontSize: 10,
+                color: "#fbbf24",
+                background: "#292008",
+                border: "1px solid #92600e",
+                borderRadius: 3,
+                padding: "1px 5px"
+              },
+              children: [
+                "↗ 開新頁 ",
+                action.opensPage
+              ]
+            }
+          )
+        ] }),
         action.type === "callFlow" && (action.subFlowProfileName || action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 0) && (() => {
           const isDynamic = action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 1;
           const label = isDynamic ? "動態配置" : action.subFlowProfileName ?? "已配置";
@@ -19665,6 +19703,8 @@ function PropertyPanel() {
         selector: selector2,
         locatorExpr: locatorExpr || selectedNode.action.locatorExpr,
         value: value || void 0,
+        // Multi-select nodes keep values[] in sync with the comma-joined value field
+        ...selectedNode.action.values ? { values: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
         ...callFlowUpdates
       }
     });
@@ -19715,7 +19755,7 @@ function PropertyPanel() {
             /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "{{randomText}}" })
           ] })
         ] }),
-        ["fill", "selectOption", "goto", "press", "assertText", "assertValue"].includes(selectedNode.action.type) && /* @__PURE__ */ jsxRuntimeExports.jsxs(Field, { label: selectedNode.action.type === "assertText" ? "驗證文字" : selectedNode.action.type === "assertValue" ? "驗證值" : "值", children: [
+        ["fill", "selectOption", "goto", "press", "upload", "assertText", "assertValue"].includes(selectedNode.action.type) && /* @__PURE__ */ jsxRuntimeExports.jsxs(Field, { label: selectedNode.action.type === "assertText" ? "驗證文字" : selectedNode.action.type === "assertValue" ? "驗證值" : selectedNode.action.type === "upload" ? "檔案路徑" : "值", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(
             "input",
             {
@@ -19724,10 +19764,10 @@ function PropertyPanel() {
               style: inputStyle
             }
           ),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: selectedNode.action.type === "upload" ? "錄製時只能取得檔名，回放前請改成完整路徑（多檔用逗號分隔）" : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
             "可插入變數，如 ",
             /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "{{randomText}}" })
-          ] })
+          ] }) })
         ] }),
         showMappingSection && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { width: "100%", marginTop: 8 }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
@@ -20354,6 +20394,14 @@ function usePlaywrightEvents() {
       const updated = useFlowStore.getState().currentFlow;
       if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
     });
+    const unsubUpdated = window.electronAPI.onActionUpdated(({ actionId, updates }) => {
+      const { currentFlow, updateNode } = useFlowStore.getState();
+      const node = currentFlow?.nodes.find((n2) => n2.id === actionId);
+      if (!node) return;
+      updateNode(actionId, { action: { ...node.action, ...updates } });
+      const updated = useFlowStore.getState().currentFlow;
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
+    });
     const unsubNodeStart = window.electronAPI.onReplayNodeStart((nodeId) => {
       setReplayingNode(nodeId);
       setReplayStatus(nodeId, "running");
@@ -20378,6 +20426,7 @@ function usePlaywrightEvents() {
     });
     return () => {
       unsubCaptured();
+      unsubUpdated();
       unsubNodeStart();
       unsubNodeComplete();
       unsubFinished();

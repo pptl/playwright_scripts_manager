@@ -1,4 +1,4 @@
-import { Page, Locator } from 'playwright-core'
+import { Page, Locator, FrameLocator } from 'playwright-core'
 import type { Action, FlowNode } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
 import { resolveValueWithSession, resolveValue } from '../../shared/variableResolver'
@@ -19,15 +19,28 @@ export class Replayer {
   private envVars: Record<string, string>
   /** Active project ID — env-var references only resolve for sub-flows in this project. */
   private activeProjectId?: string
+  /** pageAlias → Page for popups opened during replay (shared with nested Replayers). */
+  private pages: Map<string, Page>
 
-  constructor(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string) {
+  constructor(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string, sharedPages?: Map<string, Page>) {
     this.page = page
     this.profileVars = profileVars ?? {}
     this.activeProfileId = activeProfileId
     this.activeEnvironmentId = activeEnvironmentId
     this.envVars = envVars ?? {}
     this.activeProjectId = activeProjectId
+    this.pages = sharedPages ?? new Map()
     this.baseOrigin = (() => { try { return new URL(baseURL).origin } catch { return '' } })()
+  }
+
+  /** Resolve the page an action targets. Absent alias = the initial page. */
+  private pageFor(action: Action): Page {
+    if (!action.pageAlias) return this.page
+    const p = this.pages.get(action.pageAlias)
+    if (!p || p.isClosed()) {
+      throw new Error(`頁面 "${action.pageAlias}" 尚未開啟 — 觸發開新頁的動作可能未執行或失敗`)
+    }
+    return p
   }
 
   async replayToNode(
@@ -109,7 +122,7 @@ export class Replayer {
 
     // Pass the resolved sub-flow profile ID as the nested Replayer's activeProfileId so it
     // can resolve its own sub-flow mappings — this enables correct N-level nesting
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? undefined, this.activeEnvironmentId, this.envVars, this.activeProjectId)
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? undefined, this.activeEnvironmentId, this.envVars, this.activeProjectId, this.pages)
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId!,
@@ -123,23 +136,38 @@ export class Replayer {
     }
   }
 
+  /** Fold the action's framePath into a scope: page → frameLocator chain.
+   *  Each entry is a locator expression for an iframe element; `.contentFrame()`
+   *  turns it into the scope for the next hop (never baked into locatorExpr). */
+  private scopeFor(action: Action): Page | FrameLocator {
+    let scope: Page | FrameLocator = this.pageFor(action)
+    for (const frameExpr of action.framePath ?? []) {
+      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.profileVars)
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const fn = new Function('s', `return s.${resolved}`)
+      scope = (fn(scope) as Locator).contentFrame()
+    }
+    return scope
+  }
+
   /**
    * Resolve a Playwright Locator from an Action.
    * Prefers locatorExpr (Codegen-quality) over the fallback CSS selector.
    */
   private getLocator(action: Action): Locator {
+    const scope = this.scopeFor(action)
     if (action.locatorExpr) {
       try {
         // Resolve {{...}} variables before evaluating the locator expression
         const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars)
         // eslint-disable-next-line @typescript-eslint/no-implied-eval
         const fn = new Function('page', `return page.${resolved}`)
-        return fn(this.page) as Locator
+        return fn(scope) as Locator
       } catch {
         // fall through to CSS selector
       }
     }
-    return this.page.locator(action.selector)
+    return scope.locator(action.selector)
   }
 
   private substituteOrigin(url: string): string {
@@ -160,18 +188,36 @@ export class Replayer {
     const val = action.value != null
       ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars)
       : undefined
+
+    // If this action opens a popup, start waiting for the page event BEFORE executing
+    // (mirrors the exported waitForEvent('popup') pattern).
+    const popupPromise = action.opensPage
+      ? this.pageFor(action).context().waitForEvent('page', { timeout: 15_000 })
+      : null
+
     switch (action.type) {
       case 'goto':
-        await this.page.goto(this.substituteOrigin(val!))
+        await this.pageFor(action).goto(this.substituteOrigin(val!))
         break
-      case 'click':
-        await this.getLocator(action).click()
+      case 'click': {
+        const opts: { button?: 'left' | 'right' | 'middle'; modifiers?: Array<'Alt' | 'Control' | 'Meta' | 'Shift'> } = {}
+        if (action.button && action.button !== 'left') opts.button = action.button
+        if (action.modifiers?.length) opts.modifiers = action.modifiers as Array<'Alt' | 'Control' | 'Meta' | 'Shift'>
+        if ((action.clickCount ?? 1) >= 2) await this.getLocator(action).dblclick(opts)
+        else await this.getLocator(action).click(opts)
         break
+      }
       case 'fill':
         await this.getLocator(action).fill(val ?? '')
         break
       case 'selectOption':
-        await this.getLocator(action).selectOption(val ?? '')
+        if (action.values?.length) {
+          await this.getLocator(action).selectOption(
+            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.profileVars)),
+          )
+        } else {
+          await this.getLocator(action).selectOption(val ?? '')
+        }
         break
       case 'check':
         await this.getLocator(action).check()
@@ -184,15 +230,28 @@ export class Replayer {
         if (action.locatorExpr) {
           await this.getLocator(action).press(val ?? '')
         } else {
-          await this.page.keyboard.press(val ?? '')
+          await this.pageFor(action).keyboard.press(val ?? '')
         }
         break
+      case 'upload': {
+        // value holds comma-separated file paths (recorded as names; user edits to real paths)
+        const files = (val ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+        await this.getLocator(action).setInputFiles(files)
+        break
+      }
       case 'wait':
         await this.getLocator(action).waitFor({ state: 'visible' })
         break
       case 'callFlow':
         break
     }
+
+    if (popupPromise && action.opensPage) {
+      const newPage = await popupPromise
+      await newPage.waitForLoadState('domcontentloaded').catch(() => {})
+      this.pages.set(action.opensPage, newPage)
+    }
+
     if (action.captureAs && val != null) {
       this.sessionVars.set(action.captureAs, val)
     }
@@ -202,11 +261,14 @@ export class Replayer {
     const assertion = action.assertion
     if (!assertion) return
     const TIMEOUT = 10_000
+    const page = this.pageFor(action)
+    // Element assertions resolve inside the action's frame scope; URL stays page-level.
+    const scope = this.scopeFor(action)
 
     switch (assertion.type) {
       case 'text': {
-        await this.page.locator(assertion.target!).waitFor({ state: 'visible', timeout: TIMEOUT })
-        const text = await this.page.locator(assertion.target!).textContent({ timeout: TIMEOUT })
+        await scope.locator(assertion.target!).waitFor({ state: 'visible', timeout: TIMEOUT })
+        const text = await scope.locator(assertion.target!).textContent({ timeout: TIMEOUT })
         if (!text?.includes(assertion.expected)) {
           throw new Error(
             `Assertion failed: expected text "${assertion.expected}" in "${assertion.target}", got "${text}"`,
@@ -215,7 +277,7 @@ export class Replayer {
         break
       }
       case 'visible': {
-        const visible = await this.page
+        const visible = await scope
           .locator(assertion.target!)
           .isVisible()
         if (!visible) {
@@ -224,12 +286,25 @@ export class Replayer {
         break
       }
       case 'url': {
-        await this.page.waitForURL(new RegExp(assertion.expected), { timeout: TIMEOUT })
+        await page.waitForURL(new RegExp(assertion.expected), { timeout: TIMEOUT })
         break
       }
       case 'count': {
         const expected = parseInt(assertion.expected, 10)
-        await this.page.waitForFunction(
+        if (action.framePath?.length) {
+          // FrameLocator has no waitForFunction — poll count() until match or timeout
+          const deadline = Date.now() + TIMEOUT
+          for (;;) {
+            const count = await scope.locator(assertion.target!).count()
+            if (count === expected) break
+            if (Date.now() > deadline) {
+              throw new Error(`Assertion failed: expected ${expected} of "${assertion.target}", got ${count}`)
+            }
+            await new Promise((res) => setTimeout(res, 200))
+          }
+          break
+        }
+        await page.waitForFunction(
           ({ sel, cnt }: { sel: string; cnt: number }) =>
             document.querySelectorAll(sel).length === cnt,
           { sel: assertion.target!, cnt: expected },

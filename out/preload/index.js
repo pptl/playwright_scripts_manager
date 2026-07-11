@@ -30,6 +30,7 @@ const IPC_CHANNELS = {
   LOCATOR_PICK_NEEDED: "locator:pickNeeded",
   ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
+  ACTION_UPDATED: "action:updated",
   TEST_OUTPUT: "test:output",
   TEST_FINISHED: "test:finished",
   REPLAY_NODE_START: "replay:nodeStart",
@@ -74,6 +75,11 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_, action) => cb(action);
     electron.ipcRenderer.on(IPC_CHANNELS.ACTION_CAPTURED, handler);
     return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.ACTION_CAPTURED, handler);
+  },
+  onActionUpdated: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    electron.ipcRenderer.on(IPC_CHANNELS.ACTION_UPDATED, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.ACTION_UPDATED, handler);
   },
   onReplayNodeStart: (cb) => {
     const handler = (_, nodeId) => cb(nodeId);

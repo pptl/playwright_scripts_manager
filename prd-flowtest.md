@@ -260,7 +260,7 @@ interface TestPath {
   "description": "簽核設定 → 申請 → 送審 → 審核",
   "createdAt": "2026-06-14T10:00:00Z",
   "updatedAt": "2026-06-14T12:30:00Z",
-  "baseURL": "https://esd.genesys-tech.com",
+  "baseURL": "https://app.example.com",
   "rootNodeId": "node-001",
   "nodes": [
     {
@@ -269,10 +269,10 @@ interface TestPath {
         "id": "node-001",
         "type": "goto",
         "selector": "",
-        "value": "https://esd.genesys-tech.com/Login",
+        "value": "https://app.example.com/Login",
         "description": "開啟登入頁面",
         "timestamp": 1718352000000,
-        "url": "https://esd.genesys-tech.com/Login",
+        "url": "https://app.example.com/Login",
         "isPageNavigation": true
       },
       "position": { "x": 300, "y": 50 },
@@ -288,7 +288,7 @@ interface TestPath {
         "value": "emp-001",
         "description": "填寫帳號",
         "timestamp": 1718352001000,
-        "url": "https://esd.genesys-tech.com/Login",
+        "url": "https://app.example.com/Login",
         "isPageNavigation": false
       },
       "position": { "x": 300, "y": 130 },
@@ -450,7 +450,7 @@ test.describe('簽核流程', () => {
 
   test('簽核 - 表單A', async ({ page }) => {
     await test.step('開啟登入頁面', async () => {
-      await page.goto('https://esd.genesys-tech.com/Login');
+      await page.goto('https://app.example.com/Login');
     });
 
     await test.step('填寫帳號', async () => {
@@ -494,7 +494,7 @@ test.describe('簽核流程', () => {
   test('簽核 - 表單B', async ({ page }) => {
     // 共用前綴（登入 → 進入頁面 → 點新增）
     await test.step('開啟登入頁面', async () => {
-      await page.goto('https://esd.genesys-tech.com/Login');
+      await page.goto('https://app.example.com/Login');
     });
 
     // ... 相同的前綴步驟 ...
@@ -524,7 +524,7 @@ test.describe('簽核流程', () => {
 ```typescript
 // exports/helpers/signing-helpers.ts
 export async function loginAsEmployee(page: Page) {
-  await page.goto('https://esd.genesys-tech.com/Login');
+  await page.goto('https://app.example.com/Login');
   await page.locator('#account').fill('emp-001');
   await page.locator('#password').fill('Test1234!');
   await page.locator('#login-btn').click();

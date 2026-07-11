@@ -8,6 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Beyond recording, the app is a full visual flow editor: drag-to-reposition, drag-to-connect/disconnect nodes, multi-select, undo/redo, collapsible visual groups, sub-flow extraction/embedding, environment profiles, and project-level environment overrides.
 
+## Project Stage
+
+**This project is currently in MVP development.** Existing on-disk data (flows under `flows/`, projects under `projects/`) does **not** need to be preserved or migrated — feel free to change data shapes, defaults, and storage formats without backward-compatibility shims or migration code. Don't add or retain migration logic solely to protect old data; optimize for a clean design.
+
 ## Commands
 
 ```bash
@@ -158,7 +162,7 @@ A new flow starts with one profile named `錄製` holding `{ key: 'domain', valu
 
 ### Projects & Environments system
 
-Projects add a layer **above** flows for managing environment-specific variable values. A `Project` has named `environments`; a `Flow` joins a project via `projectId`.
+Projects add a layer **above** flows for managing environment-specific variable values. A `Project` has named `environments` (e.g. `DEV` / `UAT` / `PRD`); a `Flow` joins a project via `projectId`.
 
 - A `ProfileVariable` can carry `envValues: Record<envId, string>` — per-environment overrides of its base `value`. Resolution everywhere is `envValues[activeEnvironmentId] ?? value`.
 - The **active environment** (`activeEnvironmentId` in the store) is threaded through replay, branch recording, and export as `activeEnvironmentId`, and is used by `Replayer`/`ScriptExporter`/`usePlaywright`/`Toolbar` when building `profileVars`.

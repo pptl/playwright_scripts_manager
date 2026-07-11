@@ -376,7 +376,7 @@ export function Toolbar() {
                           }
                           if (e.key === 'Escape') { setAddingEnv(false); setNewEnvName('') }
                         }}
-                        placeholder="環境名稱"
+                        placeholder="環境名稱，例如 DEV / UAT / PRD"
                         style={{
                           flex: 1, padding: '3px 6px',
                           background: '#0f172a', border: '1px solid #3b82f6', borderRadius: 3,

@@ -130,7 +130,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
         <div style={{ overflowY: 'auto', flex: 1, padding: '8px 0' }}>
           {environments.length === 0 ? (
             <div style={{ padding: 24, color: '#f59e0b', fontSize: 13 }}>
-              此專案尚無環境。請先在工具列的 🌐 環境選單新增環境（如 esd / rde），才能填寫各環境的值。
+              此專案尚無環境。請先在工具列的 🌐 環境選單新增環境（如 DEV / UAT / PRD），才能填寫各環境的值。
             </div>
           ) : (
             <>

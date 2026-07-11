@@ -1,6 +1,6 @@
 import { Page, Locator, FrameLocator } from 'playwright-core'
 import type { Action, FlowNode } from '../../shared/types'
-import { isCallFlowAction } from '../../shared/types'
+import { isCallFlowAction, DEFAULT_PROJECT_ID, DOMAIN_ENV_KEY } from '../../shared/types'
 import { resolveValueWithSession, resolveValue } from '../../shared/variableResolver'
 import { getCursorHighlightScript } from './captureShared'
 import { FlowStorage } from '../storage/flowStorage'
@@ -98,7 +98,9 @@ export class Replayer {
     // Env-var references ({{envKey}}) only resolve when the sub-flow belongs to the active
     // project (v1 restriction: no cross-project env-var references).
     const subFlowEnvVars =
-      this.activeProjectId && subFlow.projectId === this.activeProjectId ? this.envVars : {}
+      this.activeProjectId && (subFlow.projectId ?? DEFAULT_PROJECT_ID) === this.activeProjectId
+        ? this.envVars
+        : {}
     const resolveVars = (vars: import('../../shared/types').ProfileVariable[]): Record<string, string> =>
       Object.fromEntries(
         vars.map((v) => {
@@ -122,7 +124,9 @@ export class Replayer {
 
     // Pass the resolved sub-flow profile ID as the nested Replayer's activeProfileId so it
     // can resolve its own sub-flow mappings — this enables correct N-level nesting
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? undefined, this.activeEnvironmentId, this.envVars, this.activeProjectId, this.pages)
+    // Pass the same-project-gated env vars so the nested flow's domain substitution only
+    // applies when the sub-flow belongs to the active project (v1: no cross-project domain).
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? undefined, this.activeEnvironmentId, subFlowEnvVars, this.activeProjectId, this.pages)
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId!,
@@ -171,7 +175,9 @@ export class Replayer {
   }
 
   private substituteOrigin(url: string): string {
-    const domainOverride = this.profileVars['domain']
+    // The domain override is a project environment variable ({{domain}}) resolved for the
+    // active environment. Strip any trailing slash so it concatenates cleanly with pathname.
+    const domainOverride = (this.envVars[DOMAIN_ENV_KEY] ?? '').replace(/\/+$/, '')
     if (!domainOverride || !this.baseOrigin) return url
     try {
       const parsed = new URL(url)

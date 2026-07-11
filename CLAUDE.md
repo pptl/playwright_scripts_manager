@@ -61,13 +61,14 @@ Singletons `browserController`, `recorder`, `replayer` are module-level in `ipcH
 - **`ProfileVariable`** — `{ key, value, description?, envValues?: Record<envId, string> }`. `value` is the fallback; `envValues[activeEnvId] ?? value` is the per-environment resolution.
 - **`FlowProfile`** — `{ id, name, vars: ProfileVariable[] }` — a named environment configuration
 - **`ProjectEnvironment`** — `{ id, name }`
-- **`Project`** — `{ id, name, environments: ProjectEnvironment[], createdAt, updatedAt }` — stored separately under `projects/`
+- **`ProjectEnvVar`** — `{ key, values: Record<envId, string>, description? }` — a project env var with one value per environment (`values[activeEnvId]`). The reserved `domain` key drives goto-URL origin substitution.
+- **`Project`** — `{ id, name, environments: ProjectEnvironment[], envVars?: ProjectEnvVar[], createdAt, updatedAt }` — stored separately under `projects/`. Reserved default project: `DEFAULT_PROJECT_ID = '__default__'` / `DEFAULT_PROJECT_NAME = '未分類'`. Domain constants: `DOMAIN_ENV_KEY = 'domain'`, `DEFAULT_ENV_NAME = 'DEV'`, `DEFAULT_DOMAIN = 'http://localhost:3000/'`.
 - **`Flow`** — `nodes: FlowNode[]`, `rootNodeId`, `baseURL`, `profiles?: FlowProfile[]`, `groups?: FlowGroup[]`, `projectId?` (project membership), `positionsFinalized?` (true once layout is materialized / first manual drag), metadata. `domains?: string[]` is deprecated (migrated to profiles on load)
 - **`FlowListItem`** — lightweight summary from `FLOW_LIST` with `refCount` (how many callFlow nodes across all other flows reference this flow as a sub-flow; >0 = it's a reusable sub-flow, 0 = top-level test case) and `projectId`
 - **`ReplaySpeed`** — `'fast' | 'normal' | 'slow'` mapped to 100 / 500 / 1000 ms (`REPLAY_SPEED_MS`)
-- **`RecordingStartPayload`** — `baseURL`, optional branch-recording fields (`branchFromNodeId`, `branchNodes`, `replaySpeed`), `profileVars?`, `activeProfileId?`, `activeEnvironmentId?`
-- **`ExportConfig`** — `outputDir`, `helperFunctions`, `useTestStep`, `profileVars?` (active profile's flat key-value map), `activeProfileId?`, `activeEnvironmentId?`
-- **`ReplayToNodePayload`** — `nodes`, `targetNodeId`, `speed`, `baseURL?`, `profileVars?`, `activeProfileId?`, `activeEnvironmentId?`
+- **`RecordingStartPayload`** — `baseURL`, optional branch-recording fields (`branchFromNodeId`, `branchNodes`, `replaySpeed`), `profileVars?`, `activeProfileId?`, `activeEnvironmentId?`, `envVars?`, `activeProjectId?`
+- **`ExportConfig`** — `outputDir`, `helperFunctions`, `useTestStep`, `profileVars?` (active profile's flat key-value map), `activeProfileId?`, `activeEnvironmentId?`, `envVars?` (flattened project env vars for the active env), `activeProjectId?`
+- **`ReplayToNodePayload`** — `nodes`, `targetNodeId`, `speed`, `baseURL?`, `profileVars?`, `activeProfileId?`, `activeEnvironmentId?`, `envVars?`, `activeProjectId?`
 - **`LocatorOption` / `LocatorPickPayload`** — Cell-vs-Row locator alternatives for repeated table/list items
 
 ### IPC channels (`src/shared/types.ts` → `IPC_CHANNELS`)
@@ -111,7 +112,7 @@ Assertion picking is driven by an **in-browser dock** injected during recording 
 
 `Replayer.replayToNode()` walks `parentId` pointers from the target node up to the root (cycle-guarded) to build an ordered path, then executes each `Action` sequentially. A yellow cursor-highlight dot is injected (`getCursorHighlightScript`). Assertions support `text`, `visible`, `url`, `count` with a 10 s timeout. Each step fires `REPLAY_NODE_START` / `REPLAY_NODE_COMPLETE` to drive canvas status badges.
 
-`Replayer` constructor: `(page, baseURL = '', profileVars?, activeProfileId?, activeEnvironmentId?)`. The `domain` profile variable drives goto URL origin substitution — if a goto URL's origin matches `baseURL`'s origin, it is replaced with `profileVars['domain']`. `activeProfileId` + `activeEnvironmentId` let the replayer resolve `subFlowProfileMapping` and `envValues` on `callFlow` nodes at any nesting depth. `executeCallFlow()` loads the sub-flow, resolves its profile, builds a nested `Replayer`, and merges captured session vars back up.
+`Replayer` constructor: `(page, baseURL = '', profileVars?, activeProfileId?, activeEnvironmentId?, envVars?, activeProjectId?, sharedPages?)`. The **project environment variable** `domain` (`envVars['domain']`, trailing slash stripped) drives goto URL origin substitution — if a goto URL's origin matches `baseURL`'s origin, it is replaced with that domain. `activeProfileId` + `activeEnvironmentId` let the replayer resolve `subFlowProfileMapping` and `envValues` on `callFlow` nodes at any nesting depth; `activeProjectId` gates env-var resolution to the active project. `executeCallFlow()` loads the sub-flow, resolves its profile, builds a nested `Replayer` (passing same-project-gated `envVars`), and merges captured session vars back up.
 
 ### Branch recording pipeline
 
@@ -130,11 +131,12 @@ When the user picks "從此節點分支錄製" from node N's context menu:
 
 ### Variable system (`src/shared/variableResolver.ts`)
 
-Three kinds of `{{...}}` placeholders, resolved in priority order **session > profile > built-in**:
+Kinds of `{{...}}` placeholders, resolved in priority order **session > profile > project-env > built-in**:
 
 1. **Session variables** (highest) — any action node can set `action.captureAs = "varName"`. `Replayer` captures the resolved value into `this.sessionVars`; `ScriptExporter` emits a `const varName = ...` declaration.
-2. **Environment profile variables** — the active `FlowProfile`'s `vars[]` resolved by key, with `envValues[activeEnvId] ?? value`. The `domain` key also substitutes goto URL origins matching `flow.baseURL`'s origin.
-3. **Built-in variables** (5): `{{randomText}}` (8-char string), `{{randomNumber}}` (8-digit), `{{randomOneText}}` (one A–Z letter), `{{randomOneNumber}}` (one 0–9 digit), `{{timestamp}}` (`yyyyMMddHHmmssSSS`).
+2. **Environment profile variables** — the active `FlowProfile`'s `vars[]` resolved by key, with `envValues[activeEnvId] ?? value`. A profile value may itself reference a project env var via `{{key}}`.
+3. **Project environment variables** — the active project's `envVars[]` flattened for the active environment (`flattenProjectEnvVars`). The reserved `domain` key drives goto URL origin substitution (origins matching `flow.baseURL` are swapped for the active environment's `domain`); see the Projects & Environments section.
+4. **Built-in variables** (5): `{{randomText}}` (8-char string), `{{randomNumber}}` (8-digit), `{{randomOneText}}` (one A–Z letter), `{{randomOneNumber}}` (one 0–9 digit), `{{timestamp}}` (`yyyyMMddHHmmssSSS`).
 
 `resolveValue` / `resolveValueWithSession` resolve at runtime. For codegen: `valueToCodeExpr(value, profileVarKeys?)` → TS literal (profile keys become `${_ftProf_key}`); `sessionAwareValueToCodeExpr()` additionally treats session vars as bare identifiers; `locatorExprToCode()` rewrites `{{...}}` inside locator expression string arguments; `emitProfileVarDecls()` emits `const _ftProf_key = '...'`; `VARIABLE_HELPERS_CODE` injects `_ftRandomText` / `_ftRandomNumber` / `_ftRandomOneLetter` / `_ftRandomOneDigit` / `_ftTimestamp` when needed.
 
@@ -152,23 +154,26 @@ Each flow has `profiles?: FlowProfile[]`. A profile is a named set of `ProfileVa
 
 **Key invariant:** all profiles within a flow share the same variable keys — only `value`/`description`/`envValues` differ per profile. The store enforces this with three cross-profile mutation actions: `addVarToAllProfiles()`, `updateVarKeyInAllProfiles(index, newKey)`, `deleteVarFromAllProfiles(index)`. Per-profile mutations (`value`, `description`, `name`) use `updateProfile(id, updates)`.
 
-A new flow starts with one profile named `錄製` holding `{ key: 'domain', value: <baseURL origin> }`.
+A new flow starts with `profiles: []` (no profiles). `domain` is **not** a profile variable — it lives on the project's environments (see Projects & Environments). `flow.baseURL` is not entered by the user; it is derived from the target project's first-environment `domain` at flow creation and refreshed to the active environment's `domain` at each fresh recording start (the origin-substitution basis).
 
-**Migration:** old flows with `domains?: string[]` but no `profiles` are migrated in memory on load (`migrateDomainsToProfiles()`), no disk write.
+**Migration:** legacy flows with `domains?: string[]` but no `profiles` are migrated in memory on load (`migrateDomainsToProfiles()`), no disk write; any resulting `domain` profile var is now ignored by origin substitution (which reads the project env var).
 
-**Code generation:** profile vars emit as `const _ftProf_key = '...'` at top of spec. Goto URLs with domain substitution emit parameterized: `` `${_ftProf_domain}/path` `` (parent flow) or baked-in literals (inlined sub-flows).
+**Code generation:** profile vars emit as `const _ftProf_key = '...'` at top of spec. Goto URLs whose origin matches `flow.baseURL` are emitted with the active environment's `domain` **baked in as a literal** (`await page.goto('<domain>/path')`) — export is environment-specific; there is no `_ftProf_domain` reference.
 
 **UI:** Toolbar `⚙` profile selector → dropdown → "管理配置…" opens `ProfileEditorModal`. Right sidebar `ProfileVarList` (amber) shows the active profile's vars; click to copy `{{key}}`.
 
 ### Projects & Environments system
 
-Projects add a layer **above** flows for managing environment-specific variable values. A `Project` has named `environments` (e.g. `DEV` / `UAT` / `PRD`); a `Flow` joins a project via `projectId`.
+Projects add a layer **above** flows for managing environment-specific variable values. A `Project` has named `environments` (e.g. `DEV` / `UAT` / `PRD`) plus project-level `envVars?: ProjectEnvVar[]`; a `Flow` joins a project via `projectId`. **Every flow belongs to a project**: a flow with no (or an unknown) `projectId` is treated as belonging to the reserved default project `未分類` (`DEFAULT_PROJECT_ID = '__default__'`, normalized via `?? DEFAULT_PROJECT_ID` everywhere), which cannot be deleted or renamed and is pinned to the bottom of `FlowList`.
 
-- A `ProfileVariable` can carry `envValues: Record<envId, string>` — per-environment overrides of its base `value`. Resolution everywhere is `envValues[activeEnvironmentId] ?? value`.
-- The **active environment** (`activeEnvironmentId` in the store) is threaded through replay, branch recording, and export as `activeEnvironmentId`, and is used by `Replayer`/`ScriptExporter`/`usePlaywright`/`Toolbar` when building `profileVars`.
+- **Every project has ≥1 environment.** `createProject(name, envName='DEV', domain=DEFAULT_DOMAIN)` seeds one environment plus a `domain` env var. `未分類` is materialized on disk by `ProjectStorage.ensureDefault()` (called from `list()`/`load()`) with a `DEV` env and `domain = 'http://localhost:3000/'` — this gives its environment a **stable id**.
+- **`domain` is a reserved project env var** (`DOMAIN_ENV_KEY = 'domain'`, constants in `types.ts`): seeded into every project, **non-deletable and non-renamable** in `ProjectEnvVarModal` (rendered with a 🔒 lock). Its per-environment value drives goto-URL origin substitution in `Replayer` and `ScriptExporter` (trailing slash stripped).
+- A `ProfileVariable` can carry `envValues: Record<envId, string>` — per-environment overrides of its base `value`. Resolution everywhere is `envValues[activeEnvironmentId] ?? value`; profile values may reference project env vars via `{{key}}`.
+- `ProjectEnvVar` = `{ key, values: Record<envId, string>, description? }`, flattened for the active environment by `flattenProjectEnvVars`.
+- The **active environment** (`activeEnvironmentId` in the store) + **active project** (`activeProjectId` = `currentProject.id`) are threaded through replay, branch recording, and export, and used by `Replayer`/`ScriptExporter`/`usePlaywright`/`Toolbar` when building `profileVars`/`envVars`. Env-var references resolve only when the flow belongs to the active project (v1: no cross-project references).
 - Storage: projects live as `projects/{id}.json` (`ProjectStorage`), separate from flows.
-- Store actions: `createProject`, `addEnvironmentToProject`, `renameEnvironment`, `deleteEnvironment`, `deleteProject`, `assignFlowToProject`, `setActiveEnvironment`, `setCurrentProject`. `openFlow` loads the owning project and picks a sensible active environment.
-- **UI:** `FlowList` groups flows by project (📁 headers + "未分類"), with a per-flow right-click menu to move between projects, rename, duplicate (建立副本), delete, or "加入當前流程中" (embed as sub-flow). The Toolbar shows a 🌐 environment selector whenever the current flow belongs to a project.
+- Store actions: `createProject`, `addEnvironmentToProject`, `renameEnvironment`, `deleteEnvironment`, `deleteProject`, `assignFlowToProject`, `setActiveEnvironment`, `setCurrentProject`, and project-env-var actions `addProjectEnvVar` / `renameProjectEnvVarKey` / `deleteProjectEnvVar` / `setProjectEnvVarValue`. `openFlow` loads the owning project (default if none) and picks a sensible active environment (first env by default).
+- **UI:** `FlowList` groups flows by project (📁 headers, 未分類 last); the "新增專案" dialog collects 專案名稱 + 環境名稱 (DEV) + domain. The "新增流程" dialog collects 歸類至專案 (first) + 流程名稱 (second) — there is **no 目標URL field** (baseURL is derived from the project's `domain`). The Toolbar shows a 🌐 environment selector and "🔧 管理環境變數…" (`ProjectEnvVarModal`) for the current flow's project.
 
 ### Sub-flow system
 
@@ -230,16 +235,16 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 | `src/main/playwright/codegenCapture.ts` | Multi-page recorder: injects scripts (initScript + DOM capture + cursor + assertion dock), exposes report/assert/locator-resolved functions, filters navigation, buffers input clicks, drives in-browser locator picker |
 | `src/main/playwright/actionCapture.ts` | Single-page variant of CodegenCapture (supports stop/restart without re-injection; not active in main flow) |
 | `src/main/playwright/captureShared.ts` | Shared utilities: extracts InjectedScript from coreBundle.js, DOM event capture (blacklist, Shadow DOM-aware), locator builder, nav-suppression logic, assertion dock + pick overlay scripts, in-browser locator-picker script, cursor highlight, `buildAction` |
-| `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events; constructor `(page, baseURL, profileVars?, activeProfileId?, activeEnvironmentId?)`; resolves subFlowProfileMapping + envValues for callFlow at any depth |
+| `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events; constructor `(page, baseURL, profileVars?, activeProfileId?, activeEnvironmentId?, envVars?, activeProjectId?, sharedPages?)`; `substituteOrigin` swaps goto origin for the project env var `domain`; resolves subFlowProfileMapping + envValues for callFlow at any depth |
 | `src/main/storage/flowStorage.ts` | Flow CRUD; `list()` computes `refCount`; sorts by updatedAt |
-| `src/main/storage/projectStorage.ts` | Project CRUD under `projects/` |
-| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` codegen; emits `_ftProf_*` decls; threads activeProfileId/activeEnvironmentId through recursive sub-flow expansion; hoists captureAs vars in useTestStep mode; `filter({ hasText })` for session-var assertText |
-| `src/shared/types.ts` | All shared types + `IPC_CHANNELS`; `isCallFlowAction` guard; `REPLAY_SPEED_MS` |
+| `src/main/storage/projectStorage.ts` | Project CRUD under `projects/`; `ensureDefault()` materializes the reserved `未分類` project (DEV env + `domain`) with a stable env id; `delete()` protects `__default__` |
+| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` codegen; emits `_ftProf_*` decls; bakes each flow's active-env `domain` literal into matching gotos (`resolveFlowDomain`, per-step `domain`); threads activeProfileId/activeEnvironmentId/envVars/activeProjectId through recursive sub-flow expansion; hoists captureAs vars in useTestStep mode; `filter({ hasText })` for session-var assertText |
+| `src/shared/types.ts` | All shared types + `IPC_CHANNELS`; `isCallFlowAction` guard; `REPLAY_SPEED_MS`; `DEFAULT_PROJECT_ID`/`DEFAULT_PROJECT_NAME`/`DOMAIN_ENV_KEY`/`DEFAULT_ENV_NAME`/`DEFAULT_DOMAIN` |
 | `src/shared/variableResolver.ts` | Variable system: 5 built-ins, `resolveValue(WithSession)`, `valueToCodeExpr`, `sessionAwareValueToCodeExpr`, `locatorExprToCode`, `emitProfileVarDecls`, `VARIABLE_HELPERS_CODE` |
 | `src/preload/index.ts` | contextBridge — exposes typed `window.electronAPI` (incl. project + report + locator-pick wrappers) |
 | `src/renderer/App.tsx` | Root — calls `usePlaywrightEvents()` + `useUndoRedo()`; renders Toolbar + FlowList + FlowCanvas + PropertyPanel + right sidebar (VariableList / ProfileVarList / SessionVarList) |
 | `src/renderer/stores/flowStore.ts` | Zustand store — flow/node/profile/project/environment state + actions; undo/redo history subscription; group actions; layout actions; domain + callFlow-profile migrations |
-| `src/renderer/components/Toolbar/Toolbar.tsx` | Action bar: new-flow, undo/redo, record/stop, relayout, export, run-tests, replay-speed, environment selector (🌐), profile selector (⚙), status pills; new-flow dialog |
+| `src/renderer/components/Toolbar/Toolbar.tsx` | Action bar: new-flow, undo/redo, record/stop, relayout, export, run-tests, replay-speed, environment selector (🌐), profile selector (⚙), status pills; new-flow dialog (歸類至專案 + 流程名稱, no 目標URL) |
 | `src/renderer/components/Toolbar/TestOutputModal.tsx` | Streams live `TEST_OUTPUT` lines during `RUN_TESTS` |
 | `src/renderer/components/Canvas/FlowCanvas.tsx` | ReactFlow canvas: node/edge derivation (incl. groups), drag-reposition with debounced save, connect/disconnect, multi-select, context menu, modals (CallFlow / ExtractSubflow / GroupName); one-time layout materialization |
 | `src/renderer/components/Canvas/ActionNode.tsx` | Custom node: type icon/color, description, selector, replay-status border, page-nav border, callFlow profile badge |
@@ -250,16 +255,17 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 | `src/renderer/components/Canvas/NodeContextMenu.tsx` | Node context menu: replay, branch-record, group/extract (multi-select), insert/append callFlow, capture-as variable, disconnect, delete-only, delete+subtree |
 | `src/renderer/components/Canvas/CanvasStatusBar.tsx` | Multi-select status banner |
 | `src/renderer/components/Canvas/ExtractSubflowModal.tsx` | Name + confirm dialog for extracting a selection into a sub-flow |
-| `src/renderer/components/FlowList/FlowList.tsx` | Sidebar: flows grouped by project + 未分類; collapsible 子流程 subsection (refCount>0); right-click menu (move project / rename / duplicate / delete / add as sub-flow); new-project + rename dialogs |
+| `src/renderer/components/FlowList/FlowList.tsx` | Sidebar: flows grouped by project (未分類 = reserved default, pinned last, no rename/delete); collapsible 子流程 subsection (refCount>0); right-click menu (move project / rename / duplicate / delete / add as sub-flow); new-project dialog (name + 環境名稱 + domain) + rename dialogs |
 | `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | Bottom panel: edit description/selector/locator/value for selected node; assertText/assertValue value fields; callFlow "配置對應" mapping grid (loads sub-flow profiles via `FLOW_GET`) |
 | `src/renderer/components/ProfileEditor/ProfileEditorModal.tsx` | Two-column modal: profile list (add/rename/delete) + variable table (key synced across profiles; value/description per-profile) |
+| `src/renderer/components/ProjectEnvVar/ProjectEnvVarModal.tsx` | Project-level env-var editor (one key per row, value per selected environment); `domain` row is key-locked and non-deletable (🔒) |
 | `src/renderer/components/CallFlowModal/CallFlowModal.tsx` | 2–3 step modal to embed a sub-flow: select flow (cycle-checked) → exit node → profile mapping |
 | `src/renderer/components/LocatorPickerModal/LocatorPickerModal.tsx` | **Legacy** — Cell-vs-Row picker (now rendered in-browser by CodegenCapture) |
 | `src/renderer/components/VariableList/VariableList.tsx` | Sidebar: 5 built-in variables; click to copy |
 | `src/renderer/components/ProfileVarList/ProfileVarList.tsx` | Sidebar: active profile's variables (amber); click to copy `{{key}}` |
 | `src/renderer/components/SessionVarList/SessionVarList.tsx` | Sidebar: session variables from `captureAs` nodes; click to copy, trash to delete |
 | `src/renderer/hooks/usePlaywrightEvents.ts` | IPC event subscriptions: ACTION_CAPTURED, REPLAY_NODE_*, REPLAY_FINISHED/ERROR, ASSERTION_PICK_CANCELLED, LOCATOR_PICK_NEEDED |
-| `src/renderer/hooks/usePlaywright.ts` | IPC invocation wrappers: startRecording, startBranchRecording, stopRecording, replayToNode (builds env-aware profileVars) |
+| `src/renderer/hooks/usePlaywright.ts` | IPC invocation wrappers: startRecording (navigates to the active env's `domain`, persists it as `flow.baseURL`), startBranchRecording, stopRecording, replayToNode (builds env-aware profileVars + envVars) |
 | `src/renderer/hooks/useUndoRedo.ts` | Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z keyboard shortcuts |
 | `src/renderer/hooks/useRecording.ts` | Branch-recording state helpers |
 | `src/renderer/hooks/useFlowStore.ts` | `useFlowManager`: refreshFlowList/refreshProjectList, openFlow (+ loads project), newFlow, saveCurrentFlow, deleteCurrentFlow |

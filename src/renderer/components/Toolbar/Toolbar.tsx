@@ -6,6 +6,7 @@ import { TestOutputModal } from './TestOutputModal'
 import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
 import { ProjectEnvVarModal } from '../ProjectEnvVar/ProjectEnvVarModal'
 import type { ExportConfig, TestFinishedPayload } from '../../../shared/types'
+import { DEFAULT_PROJECT_ID } from '../../../shared/types'
 import { flattenProjectEnvVars, resolveValue } from '../../../shared/variableResolver'
 
 const btn = (label: string, onClick: () => void, disabled = false, danger = false) => (
@@ -52,7 +53,6 @@ export function Toolbar() {
   const { newFlow } = useFlowManager()
   const [showNewFlowDialog, setShowNewFlowDialog] = useState(false)
   const [newName, setNewName] = useState('')
-  const [newURL, setNewURL] = useState('')
   const [newProjectId, setNewProjectId] = useState('')
   const [isRunningTests, setIsRunningTests] = useState(false)
   const [showTestModal, setShowTestModal] = useState(false)
@@ -143,11 +143,10 @@ export function Toolbar() {
   const selectedLabel = selectedNode?.action.description ?? null
 
   const handleNewFlow = async () => {
-    if (!newName || !newURL) return
-    await newFlow(newName, newURL, undefined, newProjectId || undefined)
+    if (!newName) return
+    await newFlow(newName, newProjectId || undefined)
     setShowNewFlowDialog(false)
     setNewName('')
-    setNewURL('')
     setNewProjectId('')
   }
 
@@ -271,8 +270,9 @@ export function Toolbar() {
         ))}
       </div>
 
-      {/* Env selector — visible whenever flow belongs to a project (even with 0 envs, so user can add the first one) */}
-      {currentFlow?.projectId && (() => {
+      {/* Env selector — visible whenever a flow's project is loaded (every flow belongs to a
+          project now, incl. the reserved 未分類; even with 0 envs, so user can add the first one) */}
+      {currentFlow && currentProject && (() => {
         const environments = currentProject?.environments ?? []
         const activeEnvName = environments.find((e) => e.id === activeEnvironmentId)?.name
         return (
@@ -564,48 +564,37 @@ export function Toolbar() {
           >
             <h2 style={{ marginBottom: 16, fontSize: 18, color: '#e2e8f0' }}>新增流程</h2>
             <label style={{ display: 'block', marginBottom: 12, color: '#94a3b8', fontSize: 13 }}>
+              歸類至專案
+              <select
+                value={newProjectId}
+                onChange={(e) => setNewProjectId(e.target.value)}
+                style={{ ...inputStyle, marginTop: 6 }}
+              >
+                <option value="">未分類</option>
+                {projects.filter((p) => p.id !== DEFAULT_PROJECT_ID).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </label>
+            <label style={{ display: 'block', marginBottom: 20, color: '#94a3b8', fontSize: 13 }}>
               流程名稱
               <input
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && newName) handleNewFlow() }}
                 placeholder="例：簽核流程"
                 style={inputStyle}
                 autoFocus
               />
             </label>
-            <label style={{ display: 'block', marginBottom: 12, color: '#94a3b8', fontSize: 13 }}>
-              目標 URL
-              <input
-                value={newURL}
-                onChange={(e) => setNewURL(e.target.value)}
-                placeholder="https://example.com"
-                style={inputStyle}
-              />
-            </label>
-            {projects.length > 0 && (
-              <label style={{ display: 'block', marginBottom: 20, color: '#94a3b8', fontSize: 13 }}>
-                歸類至專案
-                <select
-                  value={newProjectId}
-                  onChange={(e) => setNewProjectId(e.target.value)}
-                  style={{ ...inputStyle, marginTop: 6 }}
-                >
-                  <option value="">— 不歸類 —</option>
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </label>
-            )}
-            {projects.length === 0 && <div style={{ marginBottom: 20 }} />}
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button onClick={() => { setShowNewFlowDialog(false); setNewProjectId('') }} style={cancelBtnStyle}>
+              <button onClick={() => { setShowNewFlowDialog(false); setNewName(''); setNewProjectId('') }} style={cancelBtnStyle}>
                 取消
               </button>
               <button
                 onClick={handleNewFlow}
-                disabled={!newName || !newURL}
-                style={confirmBtnStyle(!newName || !newURL)}
+                disabled={!newName}
+                style={confirmBtnStyle(!newName)}
               >
                 建立
               </button>

@@ -4,6 +4,7 @@ import { useFlowStore } from '../../stores/flowStore'
 import { useFlowManager } from '../../hooks/useFlowStore'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import type { Action } from '@shared/types'
+import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN } from '@shared/types'
 
 export function FlowList() {
   const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, renameCurrentFlow } = useFlowStore()
@@ -14,11 +15,13 @@ export function FlowList() {
   const [addSubFlowFlowId, setAddSubFlowFlowId] = useState<string | null>(null)
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
+  const [newProjectEnvName, setNewProjectEnvName] = useState(DEFAULT_ENV_NAME)
+  const [newProjectDomain, setNewProjectDomain] = useState(DEFAULT_DOMAIN)
   const [renameTarget, setRenameTarget] = useState<{ flowId: string; name: string } | null>(null)
   const [renameProjectTarget, setRenameProjectTarget] = useState<{ projectId: string; name: string } | null>(null)
-  // Which groups' "子流程" subsections are expanded (key = projectId or '__unassigned__'); default collapsed
+  // Which groups' "子流程" subsections are expanded (key = projectId); default collapsed
   const [expandedSubFlows, setExpandedSubFlows] = useState<Set<string>>(new Set())
-  // Which project folders are collapsed (key = projectId or '__unassigned__'); default expanded (empty set)
+  // Which project folders are collapsed (key = projectId); default expanded (empty set)
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set())
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const projectMenuRef = useRef<HTMLDivElement>(null)
@@ -92,8 +95,12 @@ export function FlowList() {
   const handleCreateProject = async () => {
     const name = newProjectName.trim()
     if (!name) return
-    await createProject(name)
+    const envName = newProjectEnvName.trim() || DEFAULT_ENV_NAME
+    const domain = newProjectDomain.trim() || DEFAULT_DOMAIN
+    await createProject(name, envName, domain)
     setNewProjectName('')
+    setNewProjectEnvName(DEFAULT_ENV_NAME)
+    setNewProjectDomain(DEFAULT_DOMAIN)
     setShowNewProjectDialog(false)
   }
 
@@ -140,19 +147,22 @@ export function FlowList() {
     setContextMenu(null)
   }
 
-  // Group flows by projectId; treat flows whose project no longer exists as unassigned
+  // Group flows by projectId; flows with no projectId — or one pointing to a project that
+  // no longer exists — fall back to the reserved default project ("未分類").
   const knownProjectIds = new Set(projects.map((p) => p.id))
   const flowsByProject = new Map<string, typeof flows>()
-  const unassignedFlows: typeof flows = []
   flows.forEach((flow) => {
-    if (flow.projectId && knownProjectIds.has(flow.projectId)) {
-      const arr = flowsByProject.get(flow.projectId) ?? []
-      arr.push(flow)
-      flowsByProject.set(flow.projectId, arr)
-    } else {
-      unassignedFlows.push(flow)
-    }
+    const pid = flow.projectId && knownProjectIds.has(flow.projectId) ? flow.projectId : DEFAULT_PROJECT_ID
+    const arr = flowsByProject.get(pid) ?? []
+    arr.push(flow)
+    flowsByProject.set(pid, arr)
   })
+
+  // Render order: regular projects (as listed), with 未分類 pinned to the bottom.
+  const orderedProjects = [
+    ...projects.filter((p) => p.id !== DEFAULT_PROJECT_ID),
+    ...projects.filter((p) => p.id === DEFAULT_PROJECT_ID),
+  ]
 
   const renderFlowItem = (flow: typeof flows[0], indent = 14) => {
     const isActive = currentFlow?.id === flow.id
@@ -318,10 +328,11 @@ export function FlowList() {
           <div style={{ padding: '16px 14px', color: '#64748b', fontSize: 12 }}>尚無流程</div>
         )}
 
-        {/* Projects */}
-        {projects.map((proj) => {
+        {/* Projects (未分類 pinned to the bottom) */}
+        {orderedProjects.map((proj) => {
           const projFlows = flowsByProject.get(proj.id) ?? []
           const collapsed = collapsedProjects.has(proj.id)
+          const isDefault = proj.id === DEFAULT_PROJECT_ID
           return (
             <div key={proj.id}>
               <div
@@ -329,6 +340,8 @@ export function FlowList() {
                 onContextMenu={(e) => {
                   e.preventDefault()
                   e.stopPropagation()
+                  // 未分類 cannot be renamed or deleted — no context menu.
+                  if (isDefault) return
                   setProjectMenu({ projectId: proj.id, name: proj.name, x: e.clientX, y: e.clientY })
                 }}
                 style={{
@@ -364,49 +377,6 @@ export function FlowList() {
             </div>
           )
         })}
-
-        {/* Unassigned flows */}
-        {unassignedFlows.length > 0 && (
-          (() => {
-            // When there are no projects, show unassigned flows flat (no 未分類 folder).
-            if (projects.length === 0) {
-              return <div>{renderGroupBody('__unassigned__', unassignedFlows, 18)}</div>
-            }
-            const collapsed = collapsedProjects.has('__unassigned__')
-            return (
-              <div>
-                <div
-                  onClick={() => toggleProject('__unassigned__')}
-                  style={{
-                    padding: '6px 12px 6px 8px',
-                    fontSize: 12,
-                    color: '#94a3b8',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    userSelect: 'none',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                  }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#243449' }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-                >
-                  <span style={{ width: 10, flexShrink: 0, color: '#64748b' }}>{collapsed ? '▸' : '▾'}</span>
-                  <span style={{ flexShrink: 0 }}>📁</span>
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    未分類
-                  </span>
-                  <span style={{ color: '#475569', fontSize: 11, fontWeight: 500 }}>({unassignedFlows.length})</span>
-                </div>
-                {!collapsed && (
-                  <div style={{ marginLeft: 13 }}>
-                    {renderGroupBody('__unassigned__', unassignedFlows, 18)}
-                  </div>
-                )}
-              </div>
-            )
-          })()
-        )}
       </div>
 
       {/* Project context menu */}
@@ -479,7 +449,7 @@ export function FlowList() {
           >
             移至專案
           </div>
-          {projects.map((proj) => (
+          {orderedProjects.map((proj) => (
             <div
               key={proj.id}
               onClick={() => handleAssign(contextMenu.flowId, proj.id)}
@@ -495,23 +465,6 @@ export function FlowList() {
               📁 {proj.name}
             </div>
           ))}
-          {projects.length > 0 && (
-            <div
-              onClick={() => handleAssign(contextMenu.flowId, null)}
-              style={{
-                padding: '7px 12px',
-                cursor: 'pointer',
-                color: '#94a3b8',
-                fontSize: 12,
-                borderTop: '1px solid #334155',
-                marginTop: 2,
-              }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-            >
-              從專案中移除
-            </div>
-          )}
           <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
           {(() => {
             const disabled = !currentFlow || contextMenu.flowId === currentFlow.id
@@ -616,32 +569,49 @@ export function FlowList() {
             <h2 style={{ fontSize: 16, color: '#e2e8f0', marginBottom: 14, margin: '0 0 14px' }}>
               新增專案
             </h2>
-            <input
-              autoFocus
-              value={newProjectName}
-              onChange={(e) => setNewProjectName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleCreateProject()
-                if (e.key === 'Escape') setShowNewProjectDialog(false)
-              }}
-              placeholder="專案名稱"
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '8px 10px',
-                background: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: 6,
-                color: '#e2e8f0',
-                fontSize: 13,
-                outline: 'none',
-                marginBottom: 16,
-                boxSizing: 'border-box',
-              }}
-            />
+            <label style={newProjectLabelStyle}>
+              專案名稱
+              <input
+                autoFocus
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleCreateProject()
+                  if (e.key === 'Escape') setShowNewProjectDialog(false)
+                }}
+                placeholder="例：簽核系統"
+                style={newProjectInputStyle}
+              />
+            </label>
+            <label style={newProjectLabelStyle}>
+              環境名稱
+              <input
+                value={newProjectEnvName}
+                onChange={(e) => setNewProjectEnvName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleCreateProject()
+                  if (e.key === 'Escape') setShowNewProjectDialog(false)
+                }}
+                placeholder="例：DEV / UAT / PRD"
+                style={newProjectInputStyle}
+              />
+            </label>
+            <label style={{ ...newProjectLabelStyle, marginBottom: 16 }}>
+              domain
+              <input
+                value={newProjectDomain}
+                onChange={(e) => setNewProjectDomain(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleCreateProject()
+                  if (e.key === 'Escape') setShowNewProjectDialog(false)
+                }}
+                placeholder="http://localhost:3000/"
+                style={newProjectInputStyle}
+              />
+            </label>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button
-                onClick={() => { setShowNewProjectDialog(false); setNewProjectName('') }}
+                onClick={() => { setShowNewProjectDialog(false); setNewProjectName(''); setNewProjectEnvName(DEFAULT_ENV_NAME); setNewProjectDomain(DEFAULT_DOMAIN) }}
                 style={{
                   padding: '6px 16px',
                   borderRadius: 6,
@@ -841,4 +811,25 @@ export function FlowList() {
       )}
     </div>
   )
+}
+
+const newProjectLabelStyle: React.CSSProperties = {
+  display: 'block',
+  marginBottom: 12,
+  color: '#94a3b8',
+  fontSize: 13,
+}
+
+const newProjectInputStyle: React.CSSProperties = {
+  display: 'block',
+  width: '100%',
+  marginTop: 6,
+  padding: '8px 10px',
+  background: '#0f172a',
+  border: '1px solid #334155',
+  borderRadius: 6,
+  color: '#e2e8f0',
+  fontSize: 13,
+  outline: 'none',
+  boxSizing: 'border-box',
 }

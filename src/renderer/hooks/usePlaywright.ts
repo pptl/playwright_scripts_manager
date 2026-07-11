@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
 import type { Flow, Project } from '../../../shared/types'
 import { flattenProjectEnvVars, resolveValue } from '@shared/variableResolver'
+import { DOMAIN_ENV_KEY } from '@shared/types'
 
 function buildProfileVars(
   flow: Flow | null,
@@ -35,11 +36,20 @@ export function usePlaywright() {
   const { setIsRecording, setIsReplaying, clearReplayStatus } = useFlowStore()
 
   const startRecording = useCallback(async () => {
-    const flow = useFlowStore.getState().currentFlow
+    const { currentFlow: flow, currentProject, activeEnvironmentId } = useFlowStore.getState()
     if (!flow) return
+    // The recording origin is the active environment's `domain` env var (falling back to the
+    // flow's existing baseURL). Persist it as baseURL so replay/export origin substitution
+    // matches the origin recorded against.
+    const domain = getEnvVars(currentProject, activeEnvironmentId)[DOMAIN_ENV_KEY] || flow.baseURL
     setIsRecording(true)
     try {
-      await window.electronAPI.startRecording({ baseURL: flow.baseURL })
+      await window.electronAPI.startRecording({ baseURL: domain })
+      if (domain && domain !== flow.baseURL) {
+        const updated: Flow = { ...flow, baseURL: domain }
+        useFlowStore.setState({ currentFlow: updated })
+        await window.electronAPI.saveFlow(updated).catch(console.error)
+      }
     } catch (err) {
       setIsRecording(false)
       console.error('Failed to start recording:', err)

@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
+import { DOMAIN_ENV_KEY } from '@shared/types'
 
 interface ProjectEnvVarModalProps {
   onClose: () => void
@@ -151,7 +152,11 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                 <span />
               </div>
 
-              {envVars.map((v) => (
+              {envVars.map((v) => {
+                // `domain` is a reserved env var (drives goto-URL origin substitution) — its key
+                // is locked and it cannot be deleted; only its per-environment value is editable.
+                const isDomain = v.key === DOMAIN_ENV_KEY
+                return (
                 <div
                   key={v.key}
                   style={{
@@ -164,14 +169,15 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                 >
                   <input
                     defaultValue={v.key}
-                    onBlur={(e) => {
+                    readOnly={isDomain}
+                    onBlur={isDomain ? undefined : (e) => {
                       const next = e.target.value.trim()
                       if (next && next !== v.key) renameProjectEnvVarKey(v.key, next)
                       else e.target.value = v.key
                     }}
                     placeholder="key"
-                    style={cellInputStyle}
-                    title="變數名稱（配置以 {{key}} 引用）"
+                    style={isDomain ? { ...cellInputStyle, color: '#94a3b8', cursor: 'not-allowed' } : cellInputStyle}
+                    title={isDomain ? 'domain 為保留變數，無法改名或刪除' : '變數名稱（配置以 {{key}} 引用）'}
                   />
                   <input
                     value={(selectedEnv && v.values[selectedEnv.id]) ?? ''}
@@ -181,27 +187,32 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     placeholder="(空)"
                     style={{ ...cellInputStyle, borderColor: '#166534' }}
                   />
-                  <button
-                    onClick={() => deleteProjectEnvVar(v.key)}
-                    title="刪除此變數"
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      cursor: 'pointer',
-                      color: '#f87171',
-                      fontSize: 16,
-                      padding: '2px',
-                      borderRadius: 3,
-                      lineHeight: 1,
-                      opacity: 0.7,
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '1' }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.7' }}
-                  >
-                    🗑
-                  </button>
+                  {isDomain ? (
+                    <span title="domain 為保留變數，無法刪除" style={{ textAlign: 'center', color: '#475569', fontSize: 13 }}>🔒</span>
+                  ) : (
+                    <button
+                      onClick={() => deleteProjectEnvVar(v.key)}
+                      title="刪除此變數"
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: '#f87171',
+                        fontSize: 16,
+                        padding: '2px',
+                        borderRadius: 3,
+                        lineHeight: 1,
+                        opacity: 0.7,
+                      }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '1' }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.7' }}
+                    >
+                      🗑
+                    </button>
+                  )}
                 </div>
-              ))}
+                )
+              })}
 
               {envVars.length === 0 && (
                 <div style={{ padding: '16px', color: '#64748b', fontSize: 12 }}>

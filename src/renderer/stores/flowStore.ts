@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
+import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN, DOMAIN_ENV_KEY } from '../../shared/types'
 import { computeGroupAwareLayout } from '../utils/groups'
 
 const NODE_VERTICAL_GAP = 80
@@ -117,7 +118,7 @@ interface FlowStore {
   setProjects: (projects: FlowStore['projects']) => void
   setCurrentProject: (project: Project | null) => void
   setActiveEnvironment: (envId: string | null) => void
-  createProject: (name: string) => Promise<Project>
+  createProject: (name: string, envName?: string, domain?: string) => Promise<Project>
   addEnvironmentToProject: (name: string) => Promise<void>
   renameEnvironment: (envId: string, name: string) => Promise<void>
   deleteEnvironment: (envId: string) => Promise<void>
@@ -224,7 +225,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     // Clear project context if the new flow belongs to a different project
     // (project loading happens async in useFlowStore.openFlow after setCurrentFlow)
     const { currentProject } = get()
-    const changingProject = flow.projectId !== currentProject?.id
+    const changingProject = (flow.projectId ?? DEFAULT_PROJECT_ID) !== currentProject?.id
     set({
       currentFlow: migratedFlow,
       selectedNodeId: null,
@@ -746,11 +747,14 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setCurrentProject: (project) => set({ currentProject: project }),
   setActiveEnvironment: (envId) => set({ activeEnvironmentId: envId }),
 
-  createProject: async (name) => {
+  createProject: async (name, envName = DEFAULT_ENV_NAME, domain = DEFAULT_DOMAIN) => {
+    // Every project starts with one environment holding the fixed `domain` env var.
+    const env: ProjectEnvironment = { id: uuidv4(), name: envName }
     const project: Project = {
       id: uuidv4(),
       name,
-      environments: [],
+      environments: [env],
+      envVars: [{ key: DOMAIN_ENV_KEY, values: { [env.id]: domain } }],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }

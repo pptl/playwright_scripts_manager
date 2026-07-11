@@ -7192,6 +7192,13 @@ function v4(options, buf, offset) {
   rnds[8] = rnds[8] & 63 | 128;
   return unsafeStringify(rnds);
 }
+function isCallFlowAction(action) {
+  return action.type === "callFlow" && typeof action.subFlowId === "string" && typeof action.subFlowExitNodeId === "string";
+}
+const DEFAULT_PROJECT_ID = "__default__";
+const DOMAIN_ENV_KEY = "domain";
+const DEFAULT_ENV_NAME = "DEV";
+const DEFAULT_DOMAIN = "http://localhost:3000/";
 const NODE_WIDTH = 200;
 const NODE_HEIGHT = 70;
 const H_MARGIN = 25;
@@ -7479,7 +7486,7 @@ const useFlowStore = create$1((set2, get2) => ({
     const withDomainsMigrated = profiles !== flow.profiles ? { ...flow, profiles } : flow;
     const migratedFlow = migrateCallFlowProfiles(withDomainsMigrated);
     const { currentProject } = get2();
-    const changingProject = flow.projectId !== currentProject?.id;
+    const changingProject = (flow.projectId ?? DEFAULT_PROJECT_ID) !== currentProject?.id;
     set2({
       currentFlow: migratedFlow,
       selectedNodeId: null,
@@ -7930,11 +7937,13 @@ const useFlowStore = create$1((set2, get2) => ({
   setProjects: (projects) => set2({ projects }),
   setCurrentProject: (project) => set2({ currentProject: project }),
   setActiveEnvironment: (envId) => set2({ activeEnvironmentId: envId }),
-  createProject: async (name) => {
+  createProject: async (name, envName = DEFAULT_ENV_NAME, domain = DEFAULT_DOMAIN) => {
+    const env = { id: v4(), name: envName };
     const project = {
       id: v4(),
       name,
-      environments: [],
+      environments: [env],
+      envVars: [{ key: DOMAIN_ENV_KEY, values: { [env.id]: domain } }],
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
@@ -8163,11 +8172,17 @@ function getEnvVars(currentProject, activeEnvironmentId) {
 function usePlaywright() {
   const { setIsRecording, setIsReplaying, clearReplayStatus } = useFlowStore();
   const startRecording = reactExports.useCallback(async () => {
-    const flow = useFlowStore.getState().currentFlow;
+    const { currentFlow: flow, currentProject, activeEnvironmentId } = useFlowStore.getState();
     if (!flow) return;
+    const domain = getEnvVars(currentProject, activeEnvironmentId)[DOMAIN_ENV_KEY] || flow.baseURL;
     setIsRecording(true);
     try {
-      await window.electronAPI.startRecording({ baseURL: flow.baseURL });
+      await window.electronAPI.startRecording({ baseURL: domain });
+      if (domain && domain !== flow.baseURL) {
+        const updated = { ...flow, baseURL: domain };
+        useFlowStore.setState({ currentFlow: updated });
+        await window.electronAPI.saveFlow(updated).catch(console.error);
+      }
     } catch (err) {
       setIsRecording(false);
       console.error("Failed to start recording:", err);
@@ -8259,23 +8274,22 @@ function useFlowManager() {
       if (!flow) return;
       setCurrentFlow(flow);
       const store = useFlowStore.getState();
-      if (flow.projectId) {
-        const project = await window.electronAPI.loadProject(flow.projectId);
-        store.setCurrentProject(project);
-        const sameProject = store.currentProject?.id === flow.projectId;
-        const envStillValid = sameProject && !!store.activeEnvironmentId && !!project?.environments.some((e) => e.id === store.activeEnvironmentId);
-        store.setActiveEnvironment(
-          envStillValid ? store.activeEnvironmentId : project?.environments[0]?.id ?? null
-        );
-      } else {
-        store.setCurrentProject(null);
-        store.setActiveEnvironment(null);
-      }
+      const pid = flow.projectId ?? DEFAULT_PROJECT_ID;
+      const project = await window.electronAPI.loadProject(pid);
+      store.setCurrentProject(project);
+      const sameProject = store.currentProject?.id === pid;
+      const envStillValid = sameProject && !!store.activeEnvironmentId && !!project?.environments.some((e) => e.id === store.activeEnvironmentId);
+      store.setActiveEnvironment(
+        envStillValid ? store.activeEnvironmentId : project?.environments[0]?.id ?? null
+      );
     },
     [setCurrentFlow]
   );
   const newFlow = reactExports.useCallback(
-    async (name, baseURL, description, projectId) => {
+    async (name, projectId, description) => {
+      const pid = projectId ?? DEFAULT_PROJECT_ID;
+      const project = await window.electronAPI.loadProject(pid);
+      const baseURL = flattenProjectEnvVars(project?.envVars, project?.environments[0]?.id)[DOMAIN_ENV_KEY] || DEFAULT_DOMAIN;
       const flow = createFlow(name, baseURL, description);
       const savedFlow = projectId ? { ...flow, projectId } : flow;
       if (projectId) useFlowStore.getState().setCurrentFlow(savedFlow);
@@ -9119,7 +9133,7 @@ function ProjectEnvVarModal({ onClose }) {
                 ]
               }
             ),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflowY: "auto", flex: 1, padding: "8px 0" }, children: environments.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: 24, color: "#f59e0b", fontSize: 13 }, children: "此專案尚無環境。請先在工具列的 🌐 環境選單新增環境（如 esd / rde），才能填寫各環境的值。" }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflowY: "auto", flex: 1, padding: "8px 0" }, children: environments.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: 24, color: "#f59e0b", fontSize: 13 }, children: "此專案尚無環境。請先在工具列的 🌐 環境選單新增環境（如 DEV / UAT / PRD），才能填寫各環境的值。" }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs(
                 "div",
                 {
@@ -9140,71 +9154,75 @@ function ProjectEnvVarModal({ onClose }) {
                   ]
                 }
               ),
-              envVars.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "div",
-                {
-                  style: {
-                    display: "grid",
-                    gridTemplateColumns: gridCols,
-                    gap: 8,
-                    padding: "5px 16px",
-                    alignItems: "center"
+              envVars.map((v2) => {
+                const isDomain = v2.key === DOMAIN_ENV_KEY;
+                return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "div",
+                  {
+                    style: {
+                      display: "grid",
+                      gridTemplateColumns: gridCols,
+                      gap: 8,
+                      padding: "5px 16px",
+                      alignItems: "center"
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "input",
+                        {
+                          defaultValue: v2.key,
+                          readOnly: isDomain,
+                          onBlur: isDomain ? void 0 : (e) => {
+                            const next = e.target.value.trim();
+                            if (next && next !== v2.key) renameProjectEnvVarKey(v2.key, next);
+                            else e.target.value = v2.key;
+                          },
+                          placeholder: "key",
+                          style: isDomain ? { ...cellInputStyle, color: "#94a3b8", cursor: "not-allowed" } : cellInputStyle,
+                          title: isDomain ? "domain 為保留變數，無法改名或刪除" : "變數名稱（配置以 {{key}} 引用）"
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "input",
+                        {
+                          value: (selectedEnv && v2.values[selectedEnv.id]) ?? "",
+                          onChange: (e) => {
+                            if (selectedEnv) setProjectEnvVarValue(v2.key, selectedEnv.id, e.target.value);
+                          },
+                          placeholder: "(空)",
+                          style: { ...cellInputStyle, borderColor: "#166534" }
+                        }
+                      ),
+                      isDomain ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: "domain 為保留變數，無法刪除", style: { textAlign: "center", color: "#475569", fontSize: 13 }, children: "🔒" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "button",
+                        {
+                          onClick: () => deleteProjectEnvVar(v2.key),
+                          title: "刪除此變數",
+                          style: {
+                            background: "transparent",
+                            border: "none",
+                            cursor: "pointer",
+                            color: "#f87171",
+                            fontSize: 16,
+                            padding: "2px",
+                            borderRadius: 3,
+                            lineHeight: 1,
+                            opacity: 0.7
+                          },
+                          onMouseEnter: (e) => {
+                            e.currentTarget.style.opacity = "1";
+                          },
+                          onMouseLeave: (e) => {
+                            e.currentTarget.style.opacity = "0.7";
+                          },
+                          children: "🗑"
+                        }
+                      )
+                    ]
                   },
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(
-                      "input",
-                      {
-                        defaultValue: v2.key,
-                        onBlur: (e) => {
-                          const next = e.target.value.trim();
-                          if (next && next !== v2.key) renameProjectEnvVarKey(v2.key, next);
-                          else e.target.value = v2.key;
-                        },
-                        placeholder: "key",
-                        style: cellInputStyle,
-                        title: "變數名稱（配置以 {{key}} 引用）"
-                      }
-                    ),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(
-                      "input",
-                      {
-                        value: (selectedEnv && v2.values[selectedEnv.id]) ?? "",
-                        onChange: (e) => {
-                          if (selectedEnv) setProjectEnvVarValue(v2.key, selectedEnv.id, e.target.value);
-                        },
-                        placeholder: "(空)",
-                        style: { ...cellInputStyle, borderColor: "#166534" }
-                      }
-                    ),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(
-                      "button",
-                      {
-                        onClick: () => deleteProjectEnvVar(v2.key),
-                        title: "刪除此變數",
-                        style: {
-                          background: "transparent",
-                          border: "none",
-                          cursor: "pointer",
-                          color: "#f87171",
-                          fontSize: 16,
-                          padding: "2px",
-                          borderRadius: 3,
-                          lineHeight: 1,
-                          opacity: 0.7
-                        },
-                        onMouseEnter: (e) => {
-                          e.currentTarget.style.opacity = "1";
-                        },
-                        onMouseLeave: (e) => {
-                          e.currentTarget.style.opacity = "0.7";
-                        },
-                        children: "🗑"
-                      }
-                    )
-                  ]
-                },
-                v2.key
-              )),
+                  v2.key
+                );
+              }),
               envVars.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無環境變數。點擊下方「新增變數」。" })
             ] }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: 12, borderTop: "1px solid #334155", flexShrink: 0, display: "flex", gap: 8, alignItems: "center" }, children: [
@@ -9322,7 +9340,6 @@ function Toolbar() {
   const { newFlow } = useFlowManager();
   const [showNewFlowDialog, setShowNewFlowDialog] = reactExports.useState(false);
   const [newName, setNewName] = reactExports.useState("");
-  const [newURL, setNewURL] = reactExports.useState("");
   const [newProjectId, setNewProjectId] = reactExports.useState("");
   const [isRunningTests, setIsRunningTests] = reactExports.useState(false);
   const [showTestModal, setShowTestModal] = reactExports.useState(false);
@@ -9394,11 +9411,10 @@ function Toolbar() {
   const selectedNode = currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
   const selectedLabel = selectedNode?.action.description ?? null;
   const handleNewFlow = async () => {
-    if (!newName || !newURL) return;
-    await newFlow(newName, newURL, void 0, newProjectId || void 0);
+    if (!newName) return;
+    await newFlow(newName, newProjectId || void 0);
     setShowNewFlowDialog(false);
     setNewName("");
-    setNewURL("");
     setNewProjectId("");
   };
   const handleRelayout = () => {
@@ -9499,7 +9515,7 @@ ${path}`);
             label
           ))
         ] }),
-        currentFlow?.projectId && (() => {
+        currentFlow && currentProject && (() => {
           const environments = currentProject?.environments ?? [];
           const activeEnvName = environments.find((e) => e.id === activeEnvironmentId)?.name;
           return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: envMenuRef, style: { position: "relative", marginLeft: 8 }, children: [
@@ -9629,7 +9645,7 @@ ${path}`);
                             setNewEnvName("");
                           }
                         },
-                        placeholder: "環境名稱",
+                        placeholder: "環境名稱，例如 DEV / UAT / PRD",
                         style: {
                           flex: 1,
                           padding: "3px 6px",
@@ -9855,31 +9871,6 @@ ${path}`);
                 children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { marginBottom: 16, fontSize: 18, color: "#e2e8f0" }, children: "新增流程" }),
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "block", marginBottom: 12, color: "#94a3b8", fontSize: 13 }, children: [
-                    "流程名稱",
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(
-                      "input",
-                      {
-                        value: newName,
-                        onChange: (e) => setNewName(e.target.value),
-                        placeholder: "例：簽核流程",
-                        style: inputStyle$1,
-                        autoFocus: true
-                      }
-                    )
-                  ] }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "block", marginBottom: 12, color: "#94a3b8", fontSize: 13 }, children: [
-                    "目標 URL",
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(
-                      "input",
-                      {
-                        value: newURL,
-                        onChange: (e) => setNewURL(e.target.value),
-                        placeholder: "https://example.com",
-                        style: inputStyle$1
-                      }
-                    )
-                  ] }),
-                  projects.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "block", marginBottom: 20, color: "#94a3b8", fontSize: 13 }, children: [
                     "歸類至專案",
                     /* @__PURE__ */ jsxRuntimeExports.jsxs(
                       "select",
@@ -9888,24 +9879,40 @@ ${path}`);
                         onChange: (e) => setNewProjectId(e.target.value),
                         style: { ...inputStyle$1, marginTop: 6 },
                         children: [
-                          /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "", children: "— 不歸類 —" }),
-                          projects.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: p2.id, children: p2.name }, p2.id))
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "", children: "未分類" }),
+                          projects.filter((p2) => p2.id !== DEFAULT_PROJECT_ID).map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: p2.id, children: p2.name }, p2.id))
                         ]
                       }
                     )
                   ] }),
-                  projects.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginBottom: 20 } }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "block", marginBottom: 20, color: "#94a3b8", fontSize: 13 }, children: [
+                    "流程名稱",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "input",
+                      {
+                        value: newName,
+                        onChange: (e) => setNewName(e.target.value),
+                        onKeyDown: (e) => {
+                          if (e.key === "Enter" && newName) handleNewFlow();
+                        },
+                        placeholder: "例：簽核流程",
+                        style: inputStyle$1,
+                        autoFocus: true
+                      }
+                    )
+                  ] }),
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, justifyContent: "flex-end" }, children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => {
                       setShowNewFlowDialog(false);
+                      setNewName("");
                       setNewProjectId("");
                     }, style: cancelBtnStyle, children: "取消" }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx(
                       "button",
                       {
                         onClick: handleNewFlow,
-                        disabled: !newName || !newURL,
-                        style: confirmBtnStyle(!newName || !newURL),
+                        disabled: !newName,
+                        style: confirmBtnStyle(!newName),
                         children: "建立"
                       }
                     )
@@ -18659,6 +18666,8 @@ function FlowList() {
   const [addSubFlowFlowId, setAddSubFlowFlowId] = reactExports.useState(null);
   const [showNewProjectDialog, setShowNewProjectDialog] = reactExports.useState(false);
   const [newProjectName, setNewProjectName] = reactExports.useState("");
+  const [newProjectEnvName, setNewProjectEnvName] = reactExports.useState(DEFAULT_ENV_NAME);
+  const [newProjectDomain, setNewProjectDomain] = reactExports.useState(DEFAULT_DOMAIN);
   const [renameTarget, setRenameTarget] = reactExports.useState(null);
   const [renameProjectTarget, setRenameProjectTarget] = reactExports.useState(null);
   const [expandedSubFlows, setExpandedSubFlows] = reactExports.useState(/* @__PURE__ */ new Set());
@@ -18727,8 +18736,12 @@ function FlowList() {
   const handleCreateProject = async () => {
     const name = newProjectName.trim();
     if (!name) return;
-    await createProject(name);
+    const envName = newProjectEnvName.trim() || DEFAULT_ENV_NAME;
+    const domain = newProjectDomain.trim() || DEFAULT_DOMAIN;
+    await createProject(name, envName, domain);
     setNewProjectName("");
+    setNewProjectEnvName(DEFAULT_ENV_NAME);
+    setNewProjectDomain(DEFAULT_DOMAIN);
     setShowNewProjectDialog(false);
   };
   const handleRename = async () => {
@@ -18773,16 +18786,16 @@ function FlowList() {
   };
   const knownProjectIds = new Set(projects.map((p2) => p2.id));
   const flowsByProject = /* @__PURE__ */ new Map();
-  const unassignedFlows = [];
   flows.forEach((flow) => {
-    if (flow.projectId && knownProjectIds.has(flow.projectId)) {
-      const arr = flowsByProject.get(flow.projectId) ?? [];
-      arr.push(flow);
-      flowsByProject.set(flow.projectId, arr);
-    } else {
-      unassignedFlows.push(flow);
-    }
+    const pid = flow.projectId && knownProjectIds.has(flow.projectId) ? flow.projectId : DEFAULT_PROJECT_ID;
+    const arr = flowsByProject.get(pid) ?? [];
+    arr.push(flow);
+    flowsByProject.set(pid, arr);
   });
+  const orderedProjects = [
+    ...projects.filter((p2) => p2.id !== DEFAULT_PROJECT_ID),
+    ...projects.filter((p2) => p2.id === DEFAULT_PROJECT_ID)
+  ];
   const renderFlowItem = (flow, indent = 14) => {
     const isActive = currentFlow?.id === flow.id;
     return /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -18960,9 +18973,10 @@ function FlowList() {
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { overflowY: "auto", flex: 1 }, children: [
           flows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px 14px", color: "#64748b", fontSize: 12 }, children: "尚無流程" }),
-          projects.map((proj) => {
+          orderedProjects.map((proj) => {
             const projFlows = flowsByProject.get(proj.id) ?? [];
             const collapsed = collapsedProjects.has(proj.id);
+            const isDefault = proj.id === DEFAULT_PROJECT_ID;
             return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs(
                 "div",
@@ -18971,6 +18985,7 @@ function FlowList() {
                   onContextMenu: (e) => {
                     e.preventDefault();
                     e.stopPropagation();
+                    if (isDefault) return;
                     setProjectMenu({ projectId: proj.id, name: proj.name, x: e.clientX, y: e.clientY });
                   },
                   style: {
@@ -19004,49 +19019,7 @@ function FlowList() {
               ),
               !collapsed && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginLeft: 13 }, children: projFlows.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "6px 14px 6px 18px", fontSize: 11, color: "#475569" }, children: "（空）" }) : renderGroupBody(proj.id, projFlows, 18) })
             ] }, proj.id);
-          }),
-          unassignedFlows.length > 0 && (() => {
-            if (projects.length === 0) {
-              return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: renderGroupBody("__unassigned__", unassignedFlows, 18) });
-            }
-            const collapsed = collapsedProjects.has("__unassigned__");
-            return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "div",
-                {
-                  onClick: () => toggleProject("__unassigned__"),
-                  style: {
-                    padding: "6px 12px 6px 8px",
-                    fontSize: 12,
-                    color: "#94a3b8",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                    userSelect: "none",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 5
-                  },
-                  onMouseEnter: (e) => {
-                    e.currentTarget.style.background = "#243449";
-                  },
-                  onMouseLeave: (e) => {
-                    e.currentTarget.style.background = "transparent";
-                  },
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { width: 10, flexShrink: 0, color: "#64748b" }, children: collapsed ? "▸" : "▾" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { flexShrink: 0 }, children: "📁" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: "未分類" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#475569", fontSize: 11, fontWeight: 500 }, children: [
-                      "(",
-                      unassignedFlows.length,
-                      ")"
-                    ] })
-                  ]
-                }
-              ),
-              !collapsed && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginLeft: 13 }, children: renderGroupBody("__unassigned__", unassignedFlows, 18) })
-            ] });
-          })()
+          })
         ] }),
         projectMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "div",
@@ -19134,7 +19107,7 @@ function FlowList() {
                   children: "移至專案"
                 }
               ),
-              projects.map((proj) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              orderedProjects.map((proj) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
                 "div",
                 {
                   onClick: () => handleAssign(contextMenu.flowId, proj.id),
@@ -19157,27 +19130,6 @@ function FlowList() {
                 },
                 proj.id
               )),
-              projects.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "div",
-                {
-                  onClick: () => handleAssign(contextMenu.flowId, null),
-                  style: {
-                    padding: "7px 12px",
-                    cursor: "pointer",
-                    color: "#94a3b8",
-                    fontSize: 12,
-                    borderTop: "1px solid #334155",
-                    marginTop: 2
-                  },
-                  onMouseEnter: (e) => {
-                    e.currentTarget.style.background = "#0f172a";
-                  },
-                  onMouseLeave: (e) => {
-                    e.currentTarget.style.background = "transparent";
-                  },
-                  children: "從專案中移除"
-                }
-              ),
               /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { borderTop: "1px solid #334155", margin: "4px 0" } }),
               (() => {
                 const disabled = !currentFlow || contextMenu.flowId === currentFlow.id;
@@ -19304,32 +19256,55 @@ function FlowList() {
                 },
                 children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: 16, color: "#e2e8f0", marginBottom: 14, margin: "0 0 14px" }, children: "新增專案" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(
-                    "input",
-                    {
-                      autoFocus: true,
-                      value: newProjectName,
-                      onChange: (e) => setNewProjectName(e.target.value),
-                      onKeyDown: (e) => {
-                        if (e.key === "Enter") handleCreateProject();
-                        if (e.key === "Escape") setShowNewProjectDialog(false);
-                      },
-                      placeholder: "專案名稱",
-                      style: {
-                        display: "block",
-                        width: "100%",
-                        padding: "8px 10px",
-                        background: "#0f172a",
-                        border: "1px solid #334155",
-                        borderRadius: 6,
-                        color: "#e2e8f0",
-                        fontSize: 13,
-                        outline: "none",
-                        marginBottom: 16,
-                        boxSizing: "border-box"
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: newProjectLabelStyle, children: [
+                    "專案名稱",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "input",
+                      {
+                        autoFocus: true,
+                        value: newProjectName,
+                        onChange: (e) => setNewProjectName(e.target.value),
+                        onKeyDown: (e) => {
+                          if (e.key === "Enter") handleCreateProject();
+                          if (e.key === "Escape") setShowNewProjectDialog(false);
+                        },
+                        placeholder: "例：簽核系統",
+                        style: newProjectInputStyle
                       }
-                    }
-                  ),
+                    )
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: newProjectLabelStyle, children: [
+                    "環境名稱",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "input",
+                      {
+                        value: newProjectEnvName,
+                        onChange: (e) => setNewProjectEnvName(e.target.value),
+                        onKeyDown: (e) => {
+                          if (e.key === "Enter") handleCreateProject();
+                          if (e.key === "Escape") setShowNewProjectDialog(false);
+                        },
+                        placeholder: "例：DEV / UAT / PRD",
+                        style: newProjectInputStyle
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { ...newProjectLabelStyle, marginBottom: 16 }, children: [
+                    "domain",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "input",
+                      {
+                        value: newProjectDomain,
+                        onChange: (e) => setNewProjectDomain(e.target.value),
+                        onKeyDown: (e) => {
+                          if (e.key === "Enter") handleCreateProject();
+                          if (e.key === "Escape") setShowNewProjectDialog(false);
+                        },
+                        placeholder: "http://localhost:3000/",
+                        style: newProjectInputStyle
+                      }
+                    )
+                  ] }),
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" }, children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx(
                       "button",
@@ -19337,6 +19312,8 @@ function FlowList() {
                         onClick: () => {
                           setShowNewProjectDialog(false);
                           setNewProjectName("");
+                          setNewProjectEnvName(DEFAULT_ENV_NAME);
+                          setNewProjectDomain(DEFAULT_DOMAIN);
                         },
                         style: {
                           padding: "6px 16px",
@@ -19557,6 +19534,25 @@ function FlowList() {
     }
   );
 }
+const newProjectLabelStyle = {
+  display: "block",
+  marginBottom: 12,
+  color: "#94a3b8",
+  fontSize: 13
+};
+const newProjectInputStyle = {
+  display: "block",
+  width: "100%",
+  marginTop: 6,
+  padding: "8px 10px",
+  background: "#0f172a",
+  border: "1px solid #334155",
+  borderRadius: 6,
+  color: "#e2e8f0",
+  fontSize: 13,
+  outline: "none",
+  boxSizing: "border-box"
+};
 function VariableList() {
   const [copiedName, setCopiedName] = reactExports.useState(null);
   const copyToClipboard = (placeholder, name) => {
@@ -19864,9 +19860,6 @@ const saveBtnStyle = {
   fontSize: 12,
   fontWeight: 600
 };
-function isCallFlowAction(action) {
-  return action.type === "callFlow" && typeof action.subFlowId === "string" && typeof action.subFlowExitNodeId === "string";
-}
 function SessionVarList() {
   const { currentFlow, updateNode } = useFlowStore();
   const [copiedName, setCopiedName] = reactExports.useState(null);

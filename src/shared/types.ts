@@ -135,6 +135,20 @@ export interface ProjectEnvVar {
   description?: string
 }
 
+/** Reserved default project ("未分類"). Any flow with no projectId — or a projectId
+ *  pointing to a project that no longer exists — is treated as belonging to it.
+ *  It cannot be deleted or renamed. */
+export const DEFAULT_PROJECT_ID = '__default__'
+export const DEFAULT_PROJECT_NAME = '未分類'
+
+/** The reserved project environment variable that drives goto-URL origin substitution.
+ *  Every project seeds one; it cannot be deleted or renamed. */
+export const DOMAIN_ENV_KEY = 'domain'
+/** Default environment name seeded into every new project. */
+export const DEFAULT_ENV_NAME = 'DEV'
+/** Default value for the seeded `domain` environment variable. */
+export const DEFAULT_DOMAIN = 'http://localhost:3000/'
+
 export interface Project {
   id: string
   name: string

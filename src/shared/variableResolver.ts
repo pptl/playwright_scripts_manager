@@ -259,8 +259,8 @@ export function locatorExprToCode(
 
 /**
  * Emit top-level const declarations for profile variables.
- * e.g. { domain: 'https://prod.com', admin_name: 'admin' }
- *   → "const _ftProf_domain = 'https://prod.com';\nconst _ftProf_admin_name = 'admin';"
+ * e.g. { admin_name: 'admin', region: 'apac' }
+ *   → "const _ftProf_admin_name = 'admin';\nconst _ftProf_region = 'apac';"
  */
 export function emitProfileVarDecls(profileVars: Record<string, string>): string {
   return Object.entries(profileVars)

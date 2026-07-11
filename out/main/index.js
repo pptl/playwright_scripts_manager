@@ -7,6 +7,7 @@ const uuid = require("uuid");
 const fs = require("fs");
 const vm = require("vm");
 const module$1 = require("module");
+const crypto = require("crypto");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -29,6 +30,11 @@ const vm__namespace = /* @__PURE__ */ _interopNamespaceDefault(vm);
 function isCallFlowAction(action) {
   return action.type === "callFlow" && typeof action.subFlowId === "string" && typeof action.subFlowExitNodeId === "string";
 }
+const DEFAULT_PROJECT_ID = "__default__";
+const DEFAULT_PROJECT_NAME = "未分類";
+const DOMAIN_ENV_KEY = "domain";
+const DEFAULT_ENV_NAME = "DEV";
+const DEFAULT_DOMAIN = "http://localhost:3000/";
 const IPC_CHANNELS = {
   // Renderer → Main
   BROWSER_LAUNCH: "browser:launch",
@@ -1428,7 +1434,7 @@ class Replayer {
     if (action.subFlowProfileMapping && this.activeProfileId && this.activeProfileId in action.subFlowProfileMapping) {
       resolvedSubProfileId = action.subFlowProfileMapping[this.activeProfileId];
     }
-    const subFlowEnvVars = this.activeProjectId && subFlow.projectId === this.activeProjectId ? this.envVars : {};
+    const subFlowEnvVars = this.activeProjectId && (subFlow.projectId ?? DEFAULT_PROJECT_ID) === this.activeProjectId ? this.envVars : {};
     const resolveVars = (vars) => Object.fromEntries(
       vars.map((v) => {
         const raw = (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value;
@@ -1446,7 +1452,7 @@ class Replayer {
       subProfileVars = resolveVars(firstProfile.vars);
       resolvedSubProfileId = firstProfile.id;
     }
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0, this.activeEnvironmentId, this.envVars, this.activeProjectId, this.pages);
+    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? void 0, this.activeEnvironmentId, subFlowEnvVars, this.activeProjectId, this.pages);
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId,
@@ -1487,7 +1493,7 @@ class Replayer {
     return scope.locator(action.selector);
   }
   substituteOrigin(url) {
-    const domainOverride = this.profileVars["domain"];
+    const domainOverride = (this.envVars[DOMAIN_ENV_KEY] ?? "").replace(/\/+$/, "");
     if (!domainOverride || !this.baseOrigin) return url;
     try {
       const parsed = new URL(url);
@@ -1634,12 +1640,37 @@ class ProjectStorage {
   static filePath(projectId) {
     return path.join(projectsDir(), `${projectId}.json`);
   }
+  /** Materialize the reserved default project ("未分類") on disk if it doesn't exist yet,
+   *  seeded with a DEV environment and a fixed `domain` env var. Writing it to a file (rather
+   *  than returning a synthetic object) gives its environment a stable id across loads. */
+  static async ensureDefault() {
+    await ProjectStorage.ensureDir();
+    try {
+      await fs.promises.access(ProjectStorage.filePath(DEFAULT_PROJECT_ID));
+      return;
+    } catch {
+    }
+    const envId = crypto.randomUUID();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const project = {
+      id: DEFAULT_PROJECT_ID,
+      name: DEFAULT_PROJECT_NAME,
+      environments: [{ id: envId, name: DEFAULT_ENV_NAME }],
+      envVars: [{ key: DOMAIN_ENV_KEY, values: { [envId]: DEFAULT_DOMAIN } }],
+      createdAt: now,
+      updatedAt: now
+    };
+    await fs.promises.writeFile(ProjectStorage.filePath(DEFAULT_PROJECT_ID), JSON.stringify(project, null, 2), "utf-8");
+  }
   static async save(project) {
     await ProjectStorage.ensureDir();
     project.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     await fs.promises.writeFile(ProjectStorage.filePath(project.id), JSON.stringify(project, null, 2), "utf-8");
   }
   static async load(projectId) {
+    if (projectId === DEFAULT_PROJECT_ID) {
+      await ProjectStorage.ensureDefault();
+    }
     try {
       const raw = await fs.promises.readFile(ProjectStorage.filePath(projectId), "utf-8");
       return JSON.parse(raw);
@@ -1648,7 +1679,7 @@ class ProjectStorage {
     }
   }
   static async list() {
-    await ProjectStorage.ensureDir();
+    await ProjectStorage.ensureDefault();
     const files = await fs.promises.readdir(projectsDir());
     const results = [];
     for (const file of files) {
@@ -1660,9 +1691,11 @@ class ProjectStorage {
       } catch {
       }
     }
-    return results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return results;
   }
   static async delete(projectId) {
+    if (projectId === DEFAULT_PROJECT_ID) return;
     try {
       await fs.promises.unlink(ProjectStorage.filePath(projectId));
     } catch {
@@ -1671,6 +1704,10 @@ class ProjectStorage {
 }
 function exportsDir() {
   return electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "exports") : path.join(process.cwd(), "exports");
+}
+function resolveFlowDomain(flow, envVars, activeProjectId) {
+  const gated = activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? envVars ?? {} : {};
+  return (gated[DOMAIN_ENV_KEY] ?? "").replace(/\/+$/, "");
 }
 class ScriptExporter {
   static async export(flow, config) {
@@ -1714,7 +1751,7 @@ class ScriptExporter {
   static resolveProfileVars(flow, profileId, activeEnvironmentId, envVars, activeProjectId) {
     const profile = profileId ? (flow.profiles ?? []).find((p) => p.id === profileId) : (flow.profiles ?? [])[0];
     if (!profile) return {};
-    const flowEnvVars = activeProjectId && flow.projectId === activeProjectId ? envVars ?? {} : {};
+    const flowEnvVars = activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? envVars ?? {} : {};
     return Object.fromEntries(
       profile.vars.map((v) => {
         const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value;
@@ -1730,7 +1767,7 @@ class ScriptExporter {
     }
     return action.subFlowProfileId ?? null;
   }
-  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin, activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
+  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subDomain, activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]));
     const path2 = [];
     const visited = /* @__PURE__ */ new Set();
@@ -1749,16 +1786,17 @@ class ScriptExporter {
               return "";
             }
           })();
-          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
+          const nestedDomain = resolveFlowDomain(nested, envVars, activeProjectId);
+          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedDomain, nestedProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
         }
       } else {
-        path2.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true });
+        path2.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true, domain: subDomain });
       }
       cur = cur.parentId ? nodeMap.get(cur.parentId) : void 0;
     }
     return path2;
   }
-  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "", activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
+  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "", defaultDomain = "", activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
     const result = [];
     for (const id of nodeIds) {
       const node = nodeMap.get(id);
@@ -1775,10 +1813,11 @@ class ScriptExporter {
               return "";
             }
           })();
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
+          const subDomain = resolveFlowDomain(subFlow, envVars, activeProjectId);
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subDomain, subProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
         }
       } else {
-        result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false });
+        result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false, domain: defaultDomain });
       }
     }
     return result;
@@ -1818,20 +1857,21 @@ class ScriptExporter {
         return "";
       }
     })();
+    const flowDomain = resolveFlowDomain(flow, config.envVars, config.activeProjectId);
     const usesVariables = flow.nodes.some(
       (n) => n.action.value && hasVariables(n.action.value) || n.action.locatorExpr && hasVariables(n.action.locatorExpr)
     );
     let usesPopupHoist = false;
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
-      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId);
+      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, flowDomain, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const hoistedVars = config.useTestStep ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       const hoistedPages = config.useTestStep ? new Set(steps.map(({ node }) => node.action.opensPage).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       if (hoistedPages.size > 0) usesPopupHoist = true;
       const hoistDecls = (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "") + (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join("\n") + "\n" : "");
-      const stepCode = steps.map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars }) => {
-        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars);
+      const stepCode = steps.map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
+        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain);
         if (node.action.opensPage) {
           const alias = node.action.opensPage;
           const pageRef = node.action.pageAlias || "page";
@@ -1869,7 +1909,7 @@ ${emitProfileVarDecls(profileVars)}` : "",
       "});"
     ].filter((line) => line !== void 0).join("\n");
   }
-  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false, hoistedVars = /* @__PURE__ */ new Set()) {
+  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false, hoistedVars = /* @__PURE__ */ new Set(), domainOverride = "") {
     const { action } = node;
     const pageRef = action.pageAlias || "page";
     const frameChain = (action.framePath ?? []).map((f) => `.${f}.contentFrame()`).join("");
@@ -1917,16 +1957,12 @@ ${emitProfileVarDecls(profileVars)}` : "",
     switch (action.type) {
       case "goto": {
         let gotoVal = action.value ?? "";
-        const domainOverride = profileVars["domain"];
         if (domainOverride && baseOrigin) {
           try {
             const parsed = new URL(gotoVal);
             if (parsed.origin === baseOrigin) {
               const rest = parsed.pathname + parsed.search + parsed.hash;
-              if (inlineVars) {
-                return `${captureDecl}await ${pageRef}.goto('${domainOverride}${rest}');`;
-              }
-              return `${captureDecl}await ${pageRef}.goto(\`\${_ftProf_domain}${rest}\`);`;
+              return `${captureDecl}await ${pageRef}.goto('${domainOverride}${rest}');`;
             }
           } catch {
           }

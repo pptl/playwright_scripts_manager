@@ -17,6 +17,10 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     currentProject,
     activeEnvironmentId,
     setActiveEnvironment,
+    addEnvironmentToProject,
+    renameEnvironment,
+    duplicateEnvironment,
+    deleteEnvironment,
     addProjectEnvVar,
     renameProjectEnvVarKey,
     deleteProjectEnvVar,
@@ -33,6 +37,10 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
 
   const [newKey, setNewKey] = useState('')
   const [adding, setAdding] = useState(false)
+  const [renamingEnv, setRenamingEnv] = useState(false)
+  const [envRenameValue, setEnvRenameValue] = useState('')
+  const [addingEnv, setAddingEnv] = useState(false)
+  const [newEnvName, setNewEnvName] = useState('')
 
   const handleAdd = async () => {
     const key = newKey.trim()
@@ -42,7 +50,48 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     setAdding(false)
   }
 
+  const startRenameEnv = () => {
+    if (!selectedEnv) return
+    setEnvRenameValue(selectedEnv.name)
+    setRenamingEnv(true)
+  }
+
+  const commitRenameEnv = async () => {
+    const name = envRenameValue.trim()
+    if (selectedEnv && name && name !== selectedEnv.name) await renameEnvironment(selectedEnv.id, name)
+    setRenamingEnv(false)
+  }
+
+  const handleDuplicateEnv = async () => {
+    if (selectedEnv) await duplicateEnvironment(selectedEnv.id)
+  }
+
+  const commitAddEnv = async () => {
+    const name = newEnvName.trim()
+    if (!name) return
+    await addEnvironmentToProject(name)
+    setNewEnvName('')
+    setAddingEnv(false)
+  }
+
+  const handleDeleteEnv = async () => {
+    if (!selectedEnv) return
+    if (environments.length <= 1) return
+    if (!window.confirm(`刪除環境「${selectedEnv.name}」？\n此環境在所有環境變數上的值將一併移除。`)) return
+    await deleteEnvironment(selectedEnv.id)
+  }
+
   const gridCols = '1fr 1fr 32px'
+  const envBtnStyle: React.CSSProperties = {
+    background: 'transparent',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    color: '#cbd5e1',
+    fontSize: 12,
+    padding: '2px 8px',
+    cursor: 'pointer',
+    lineHeight: 1.4,
+  }
 
   return (
     <div
@@ -106,24 +155,82 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
             }}
           >
             <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>環境:</span>
-            <select
-              value={selectedEnv?.id ?? ''}
-              onChange={(e) => setActiveEnvironment(e.target.value || null)}
-              style={{
-                background: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: 4,
-                color: '#e2e8f0',
-                fontSize: 12,
-                padding: '2px 6px',
-                cursor: 'pointer',
-                outline: 'none',
-              }}
-            >
-              {environments.map((env) => (
-                <option key={env.id} value={env.id}>{env.name}</option>
-              ))}
-            </select>
+            {addingEnv ? (
+              <>
+                <input
+                  autoFocus
+                  value={newEnvName}
+                  onChange={(e) => setNewEnvName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitAddEnv()
+                    if (e.key === 'Escape') { setAddingEnv(false); setNewEnvName('') }
+                  }}
+                  placeholder="環境名稱，例如 DEV / UAT / PRD"
+                  style={{ ...cellInputStyle, width: 200, border: '1px solid #3b82f6' }}
+                />
+                <button onClick={commitAddEnv} title="確認" style={{ ...envBtnStyle, borderColor: '#3b82f6', color: '#93c5fd' }}>✓</button>
+                <button onClick={() => { setAddingEnv(false); setNewEnvName('') }} title="取消" style={envBtnStyle}>✕</button>
+              </>
+            ) : renamingEnv ? (
+              <>
+                <input
+                  autoFocus
+                  value={envRenameValue}
+                  onChange={(e) => setEnvRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRenameEnv()
+                    if (e.key === 'Escape') setRenamingEnv(false)
+                  }}
+                  style={{ ...cellInputStyle, width: 160, border: '1px solid #3b82f6' }}
+                />
+                <button onClick={commitRenameEnv} title="確認" style={{ ...envBtnStyle, borderColor: '#3b82f6', color: '#93c5fd' }}>✓</button>
+                <button onClick={() => setRenamingEnv(false)} title="取消" style={envBtnStyle}>✕</button>
+              </>
+            ) : (
+              <>
+                <select
+                  value={selectedEnv?.id ?? ''}
+                  onChange={(e) => setActiveEnvironment(e.target.value || null)}
+                  style={{
+                    background: '#0f172a',
+                    border: '1px solid #334155',
+                    borderRadius: 4,
+                    color: '#e2e8f0',
+                    fontSize: 12,
+                    padding: '2px 6px',
+                    cursor: 'pointer',
+                    outline: 'none',
+                  }}
+                >
+                  {environments.map((env) => (
+                    <option key={env.id} value={env.id}>{env.name}</option>
+                  ))}
+                </select>
+                <div style={{ flex: 1 }} />
+                <button onClick={startRenameEnv} disabled={!selectedEnv} title="重新命名環境" style={envBtnStyle}>✎ 改名</button>
+                <button onClick={handleDuplicateEnv} disabled={!selectedEnv} title="建立此環境的副本" style={envBtnStyle}>⧉ 副本</button>
+                <button
+                  onClick={handleDeleteEnv}
+                  disabled={!selectedEnv || environments.length <= 1}
+                  title={environments.length <= 1 ? '至少需保留一個環境' : '刪除此環境'}
+                  style={{
+                    ...envBtnStyle,
+                    color: environments.length <= 1 ? '#475569' : '#f87171',
+                    borderColor: environments.length <= 1 ? '#334155' : '#7f1d1d',
+                    cursor: environments.length <= 1 ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  🗑 刪除
+                </button>
+                <button
+                  onClick={() => { setNewEnvName(''); setAddingEnv(true) }}
+                  title="新增環境"
+                  style={{ ...envBtnStyle, borderColor: '#3b82f6', color: '#93c5fd' }}
+                >
+                  ＋ 新增
+                </button>
+              </>
+            )}
           </div>
         )}
 

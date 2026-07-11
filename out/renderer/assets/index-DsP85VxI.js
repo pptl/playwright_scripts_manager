@@ -7970,6 +7970,24 @@ const useFlowStore = create$1((set2, get2) => ({
     await window.electronAPI.saveProject(updatedProject);
     set2({ currentProject: updatedProject });
   },
+  duplicateEnvironment: async (envId) => {
+    const project = get2().currentProject;
+    if (!project) return;
+    const source = project.environments.find((e) => e.id === envId);
+    if (!source) return;
+    const newEnv = { id: v4(), name: `${source.name}-副本` };
+    const updatedProject = {
+      ...project,
+      environments: [...project.environments, newEnv],
+      // Copy the source environment's value for every env var into the new environment.
+      envVars: (project.envVars ?? []).map((v2) => ({
+        ...v2,
+        values: { ...v2.values, [newEnv.id]: v2.values[envId] ?? "" }
+      }))
+    };
+    await window.electronAPI.saveProject(updatedProject);
+    set2({ currentProject: updatedProject, activeEnvironmentId: newEnv.id });
+  },
   deleteEnvironment: async (envId) => {
     const project = get2().currentProject;
     if (!project) return;
@@ -9023,6 +9041,10 @@ function ProjectEnvVarModal({ onClose }) {
     currentProject,
     activeEnvironmentId,
     setActiveEnvironment,
+    addEnvironmentToProject,
+    renameEnvironment,
+    duplicateEnvironment,
+    deleteEnvironment,
     addProjectEnvVar,
     renameProjectEnvVarKey,
     deleteProjectEnvVar,
@@ -9033,6 +9055,10 @@ function ProjectEnvVarModal({ onClose }) {
   const selectedEnv = environments.find((e) => e.id === activeEnvironmentId) ?? environments[0] ?? null;
   const [newKey, setNewKey] = reactExports.useState("");
   const [adding, setAdding] = reactExports.useState(false);
+  const [renamingEnv, setRenamingEnv] = reactExports.useState(false);
+  const [envRenameValue, setEnvRenameValue] = reactExports.useState("");
+  const [addingEnv, setAddingEnv] = reactExports.useState(false);
+  const [newEnvName, setNewEnvName] = reactExports.useState("");
   const handleAdd = async () => {
     const key = newKey.trim();
     if (!key) return;
@@ -9040,7 +9066,44 @@ function ProjectEnvVarModal({ onClose }) {
     setNewKey("");
     setAdding(false);
   };
+  const startRenameEnv = () => {
+    if (!selectedEnv) return;
+    setEnvRenameValue(selectedEnv.name);
+    setRenamingEnv(true);
+  };
+  const commitRenameEnv = async () => {
+    const name = envRenameValue.trim();
+    if (selectedEnv && name && name !== selectedEnv.name) await renameEnvironment(selectedEnv.id, name);
+    setRenamingEnv(false);
+  };
+  const handleDuplicateEnv = async () => {
+    if (selectedEnv) await duplicateEnvironment(selectedEnv.id);
+  };
+  const commitAddEnv = async () => {
+    const name = newEnvName.trim();
+    if (!name) return;
+    await addEnvironmentToProject(name);
+    setNewEnvName("");
+    setAddingEnv(false);
+  };
+  const handleDeleteEnv = async () => {
+    if (!selectedEnv) return;
+    if (environments.length <= 1) return;
+    if (!window.confirm(`刪除環境「${selectedEnv.name}」？
+此環境在所有環境變數上的值將一併移除。`)) return;
+    await deleteEnvironment(selectedEnv.id);
+  };
   const gridCols = "1fr 1fr 32px";
+  const envBtnStyle = {
+    background: "transparent",
+    border: "1px solid #334155",
+    borderRadius: 4,
+    color: "#cbd5e1",
+    fontSize: 12,
+    padding: "2px 8px",
+    cursor: "pointer",
+    lineHeight: 1.4
+  };
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
     "div",
     {
@@ -9112,24 +9175,95 @@ function ProjectEnvVarModal({ onClose }) {
                 },
                 children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }, children: "環境:" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(
-                    "select",
-                    {
-                      value: selectedEnv?.id ?? "",
-                      onChange: (e) => setActiveEnvironment(e.target.value || null),
-                      style: {
-                        background: "#0f172a",
-                        border: "1px solid #334155",
-                        borderRadius: 4,
-                        color: "#e2e8f0",
-                        fontSize: 12,
-                        padding: "2px 6px",
-                        cursor: "pointer",
-                        outline: "none"
-                      },
-                      children: environments.map((env) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: env.id, children: env.name }, env.id))
-                    }
-                  )
+                  addingEnv ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "input",
+                      {
+                        autoFocus: true,
+                        value: newEnvName,
+                        onChange: (e) => setNewEnvName(e.target.value),
+                        onKeyDown: (e) => {
+                          if (e.key === "Enter") commitAddEnv();
+                          if (e.key === "Escape") {
+                            setAddingEnv(false);
+                            setNewEnvName("");
+                          }
+                        },
+                        placeholder: "環境名稱，例如 DEV / UAT / PRD",
+                        style: { ...cellInputStyle, width: 200, border: "1px solid #3b82f6" }
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: commitAddEnv, title: "確認", style: { ...envBtnStyle, borderColor: "#3b82f6", color: "#93c5fd" }, children: "✓" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => {
+                      setAddingEnv(false);
+                      setNewEnvName("");
+                    }, title: "取消", style: envBtnStyle, children: "✕" })
+                  ] }) : renamingEnv ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "input",
+                      {
+                        autoFocus: true,
+                        value: envRenameValue,
+                        onChange: (e) => setEnvRenameValue(e.target.value),
+                        onKeyDown: (e) => {
+                          if (e.key === "Enter") commitRenameEnv();
+                          if (e.key === "Escape") setRenamingEnv(false);
+                        },
+                        style: { ...cellInputStyle, width: 160, border: "1px solid #3b82f6" }
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: commitRenameEnv, title: "確認", style: { ...envBtnStyle, borderColor: "#3b82f6", color: "#93c5fd" }, children: "✓" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setRenamingEnv(false), title: "取消", style: envBtnStyle, children: "✕" })
+                  ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "select",
+                      {
+                        value: selectedEnv?.id ?? "",
+                        onChange: (e) => setActiveEnvironment(e.target.value || null),
+                        style: {
+                          background: "#0f172a",
+                          border: "1px solid #334155",
+                          borderRadius: 4,
+                          color: "#e2e8f0",
+                          fontSize: 12,
+                          padding: "2px 6px",
+                          cursor: "pointer",
+                          outline: "none"
+                        },
+                        children: environments.map((env) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: env.id, children: env.name }, env.id))
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1 } }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: startRenameEnv, disabled: !selectedEnv, title: "重新命名環境", style: envBtnStyle, children: "✎ 改名" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleDuplicateEnv, disabled: !selectedEnv, title: "建立此環境的副本", style: envBtnStyle, children: "⧉ 副本" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: handleDeleteEnv,
+                        disabled: !selectedEnv || environments.length <= 1,
+                        title: environments.length <= 1 ? "至少需保留一個環境" : "刪除此環境",
+                        style: {
+                          ...envBtnStyle,
+                          color: environments.length <= 1 ? "#475569" : "#f87171",
+                          borderColor: environments.length <= 1 ? "#334155" : "#7f1d1d",
+                          cursor: environments.length <= 1 ? "not-allowed" : "pointer"
+                        },
+                        children: "🗑 刪除"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: () => {
+                          setNewEnvName("");
+                          setAddingEnv(true);
+                        },
+                        title: "新增環境",
+                        style: { ...envBtnStyle, borderColor: "#3b82f6", color: "#93c5fd" },
+                        children: "＋ 新增"
+                      }
+                    )
+                  ] })
                 ]
               }
             ),

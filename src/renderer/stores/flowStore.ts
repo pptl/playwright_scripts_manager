@@ -121,6 +121,7 @@ interface FlowStore {
   createProject: (name: string, envName?: string, domain?: string) => Promise<Project>
   addEnvironmentToProject: (name: string) => Promise<void>
   renameEnvironment: (envId: string, name: string) => Promise<void>
+  duplicateEnvironment: (envId: string) => Promise<void>
   deleteEnvironment: (envId: string) => Promise<void>
   deleteProject: (projectId: string) => Promise<void>
   renameProject: (projectId: string, name: string) => Promise<void>
@@ -782,6 +783,25 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
     await window.electronAPI.saveProject(updatedProject)
     set({ currentProject: updatedProject })
+  },
+
+  duplicateEnvironment: async (envId) => {
+    const project = get().currentProject
+    if (!project) return
+    const source = project.environments.find((e) => e.id === envId)
+    if (!source) return
+    const newEnv: ProjectEnvironment = { id: uuidv4(), name: `${source.name}-副本` }
+    const updatedProject: Project = {
+      ...project,
+      environments: [...project.environments, newEnv],
+      // Copy the source environment's value for every env var into the new environment.
+      envVars: (project.envVars ?? []).map((v) => ({
+        ...v,
+        values: { ...v.values, [newEnv.id]: v.values[envId] ?? '' },
+      })),
+    }
+    await window.electronAPI.saveProject(updatedProject)
+    set({ currentProject: updatedProject, activeEnvironmentId: newEnv.id })
   },
 
   deleteEnvironment: async (envId) => {

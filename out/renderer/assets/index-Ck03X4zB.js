@@ -8028,6 +8028,46 @@ const useFlowStore = create$1((set2, get2) => ({
       ...currentProject?.id === projectId ? { currentProject: updated } : {}
     });
   },
+  duplicateProject: async (projectId) => {
+    const full = await window.electronAPI.loadProject(projectId);
+    if (!full) return;
+    const now2 = (/* @__PURE__ */ new Date()).toISOString();
+    const newProject = {
+      ...full,
+      id: v4(),
+      name: `${full.name}-副本`,
+      environments: full.environments.map((e) => ({ ...e })),
+      envVars: (full.envVars ?? []).map((v2) => ({ ...v2, values: { ...v2.values } })),
+      createdAt: now2,
+      updatedAt: now2
+    };
+    await window.electronAPI.saveProject(newProject);
+    const all = await window.electronAPI.listFlows();
+    const sourceFlows = all.filter((f2) => f2.projectId === projectId);
+    const idMap = /* @__PURE__ */ new Map();
+    sourceFlows.forEach((f2) => idMap.set(f2.id, v4()));
+    for (const item of sourceFlows) {
+      const flow = await window.electronAPI.getFlow(item.id);
+      if (!flow) continue;
+      const copy = {
+        ...flow,
+        id: idMap.get(item.id),
+        projectId: newProject.id,
+        createdAt: now2,
+        updatedAt: now2,
+        // Rewrite callFlow references that point at a sibling flow copied in this batch,
+        // so the copies call each other instead of the originals.
+        nodes: flow.nodes.map((node) => {
+          if (isCallFlowAction(node.action) && idMap.has(node.action.subFlowId)) {
+            return { ...node, action: { ...node.action, subFlowId: idMap.get(node.action.subFlowId) } };
+          }
+          return node;
+        })
+      };
+      await window.electronAPI.saveFlow(copy);
+    }
+    set2({ projects: await window.electronAPI.listProjects() });
+  },
   assignFlowToProject: async (flowId, projectId) => {
     const flowData = await window.electronAPI.getFlow(flowId);
     if (!flowData) return;
@@ -18793,7 +18833,7 @@ function FlowCanvas() {
   return /* @__PURE__ */ jsxRuntimeExports.jsx(ReactFlowProvider, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(FlowCanvasInner, {}) });
 }
 function FlowList() {
-  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, renameCurrentFlow } = useFlowStore();
+  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, duplicateProject, renameCurrentFlow } = useFlowStore();
   const { refreshFlowList, refreshProjectList, openFlow, deleteCurrentFlow } = useFlowManager();
   const [contextMenu, setContextMenu] = reactExports.useState(null);
   const [projectMenu, setProjectMenu] = reactExports.useState(null);
@@ -18866,6 +18906,12 @@ function FlowList() {
 此專案中的流程將移至「未分類」。`)) return;
     await deleteProject(projectId);
     await refreshFlowList();
+  };
+  const handleDuplicateProject = async (projectId) => {
+    await duplicateProject(projectId);
+    await refreshProjectList();
+    await refreshFlowList();
+    setProjectMenu(null);
   };
   const handleCreateProject = async () => {
     const name = newProjectName.trim();
@@ -19187,6 +19233,22 @@ function FlowList() {
                     e.currentTarget.style.background = "transparent";
                   },
                   children: "✎ 重新命名"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "div",
+                {
+                  onClick: () => {
+                    handleDuplicateProject(projectMenu.projectId);
+                  },
+                  style: { padding: "7px 12px", cursor: "pointer", color: "#cbd5e1", fontSize: 13 },
+                  onMouseEnter: (e) => {
+                    e.currentTarget.style.background = "#0f172a";
+                  },
+                  onMouseLeave: (e) => {
+                    e.currentTarget.style.background = "transparent";
+                  },
+                  children: "⧉ 建立副本"
                 }
               ),
               /* @__PURE__ */ jsxRuntimeExports.jsx(

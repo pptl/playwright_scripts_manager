@@ -7,7 +7,7 @@ import type { Action } from '@shared/types'
 import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN } from '@shared/types'
 
 export function FlowList() {
-  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, renameCurrentFlow } = useFlowStore()
+  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, duplicateProject, renameCurrentFlow } = useFlowStore()
   const { refreshFlowList, refreshProjectList, openFlow, deleteCurrentFlow } = useFlowManager()
 
   const [contextMenu, setContextMenu] = useState<{ flowId: string; x: number; y: number } | null>(null)
@@ -90,6 +90,13 @@ export function FlowList() {
     if (!window.confirm(`刪除專案「${projectName}」？\n此專案中的流程將移至「未分類」。`)) return
     await deleteProject(projectId)
     await refreshFlowList()
+  }
+
+  const handleDuplicateProject = async (projectId: string) => {
+    await duplicateProject(projectId)
+    await refreshProjectList()
+    await refreshFlowList()
+    setProjectMenu(null)
   }
 
   const handleCreateProject = async () => {
@@ -406,6 +413,16 @@ export function FlowList() {
             onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
           >
             ✎ 重新命名
+          </div>
+          <div
+            onClick={() => {
+              handleDuplicateProject(projectMenu.projectId)
+            }}
+            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+          >
+            ⧉ 建立副本
           </div>
           <div
             onClick={() => {

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
-import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN, DOMAIN_ENV_KEY } from '../../shared/types'
+import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN, DOMAIN_ENV_KEY, isCallFlowAction } from '../../shared/types'
 import { computeGroupAwareLayout } from '../utils/groups'
 
 const NODE_VERTICAL_GAP = 80
@@ -125,6 +125,8 @@ interface FlowStore {
   deleteEnvironment: (envId: string) => Promise<void>
   deleteProject: (projectId: string) => Promise<void>
   renameProject: (projectId: string, name: string) => Promise<void>
+  /** Duplicate a project together with all flows that belong to it. */
+  duplicateProject: (projectId: string) => Promise<void>
   /** Assign any flow (by ID) to a project. Pass null to detach. */
   assignFlowToProject: (flowId: string, projectId: string | null) => Promise<void>
   // Project-level environment variables (shared across flows in the project)
@@ -848,6 +850,54 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       projects: list,
       ...(currentProject?.id === projectId ? { currentProject: updated } : {}),
     })
+  },
+
+  duplicateProject: async (projectId) => {
+    const full = await window.electronAPI.loadProject(projectId)
+    if (!full) return
+    const now = new Date().toISOString()
+    // New project id (else saveProject overwrites the original). Environment ids are
+    // kept verbatim so envVars.values maps and flow profile envValues stay aligned.
+    const newProject: Project = {
+      ...full,
+      id: uuidv4(),
+      name: `${full.name}-副本`,
+      environments: full.environments.map((e) => ({ ...e })),
+      envVars: (full.envVars ?? []).map((v) => ({ ...v, values: { ...v.values } })),
+      createdAt: now,
+      updatedAt: now,
+    }
+    await window.electronAPI.saveProject(newProject)
+
+    // Copy every flow belonging to the source project. Node/profile ids are kept verbatim
+    // (so subFlowExitNodeId / subFlowProfileMapping stay valid); only flow ids change.
+    const all = await window.electronAPI.listFlows()
+    const sourceFlows = all.filter((f) => f.projectId === projectId)
+    const idMap = new Map<string, string>()
+    sourceFlows.forEach((f) => idMap.set(f.id, uuidv4()))
+
+    for (const item of sourceFlows) {
+      const flow = await window.electronAPI.getFlow(item.id)
+      if (!flow) continue
+      const copy: Flow = {
+        ...flow,
+        id: idMap.get(item.id)!,
+        projectId: newProject.id,
+        createdAt: now,
+        updatedAt: now,
+        // Rewrite callFlow references that point at a sibling flow copied in this batch,
+        // so the copies call each other instead of the originals.
+        nodes: flow.nodes.map((node) => {
+          if (isCallFlowAction(node.action) && idMap.has(node.action.subFlowId)) {
+            return { ...node, action: { ...node.action, subFlowId: idMap.get(node.action.subFlowId)! } }
+          }
+          return node
+        }),
+      }
+      await window.electronAPI.saveFlow(copy)
+    }
+
+    set({ projects: await window.electronAPI.listProjects() })
   },
 
   assignFlowToProject: async (flowId, projectId) => {

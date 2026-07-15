@@ -48,6 +48,9 @@ interface FlowStore {
 
   // Node management
   addActionNode: (action: Action, parentId?: string | null, branchLabel?: string) => FlowNode
+  /** Add a standalone floating node at an explicit canvas position (no parent, no children).
+   *  Used by the "加入節點" dialog; the user wires it up manually afterwards. */
+  addNodeAt: (action: Action, position: NodePosition) => FlowNode
   updateNode: (nodeId: string, updates: Partial<FlowNode>) => void
   deleteNode: (nodeId: string) => void
   /** Delete the given nodes WITHOUT deleting their subtrees. Each deleted node's
@@ -330,6 +333,32 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
 
     set({ currentFlow: updatedFlow, recordingHeadId: node.id })
+    return node
+  },
+
+  addNodeAt: (action, position) => {
+    const flow = get().currentFlow
+    if (!flow) throw new Error('No active flow')
+    if (flow.nodes.some((n) => n.id === action.id)) return {} as FlowNode
+
+    const node: FlowNode = {
+      id: action.id,
+      action,
+      position,
+      parentId: null,
+      childIds: [],
+    }
+
+    const updatedFlow: Flow = {
+      ...flow,
+      nodes: [...flow.nodes, node],
+      // Only becomes root if the flow is empty; otherwise it's a floating node
+      // the user connects manually.
+      rootNodeId: flow.rootNodeId || node.id,
+      updatedAt: new Date().toISOString(),
+    }
+
+    set({ currentFlow: updatedFlow })
     return node
   },
 

@@ -1,9 +1,29 @@
 import { Page, Locator, FrameLocator } from 'playwright-core'
+import { createRequire } from 'module'
 import type { Action, FlowNode } from '../../shared/types'
 import { isCallFlowAction, DEFAULT_PROJECT_ID, DOMAIN_ENV_KEY } from '../../shared/types'
 import { resolveValueWithSession, resolveValue } from '../../shared/variableResolver'
 import { getCursorHighlightScript } from './captureShared'
 import { FlowStorage } from '../storage/flowStorage'
+
+// Async function constructor — used to run a code node's body with (page, expect, vars) in scope.
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+  ...args: string[]
+) => (...callArgs: unknown[]) => Promise<void>
+
+// Lazily resolve @playwright/test's `expect` at runtime (it's not bundled into the main
+// process). Same createRequire pattern captureShared uses for playwright-core.
+let _expectFn: unknown = null
+function getExpect(): unknown {
+  if (_expectFn !== null) return _expectFn
+  try {
+    const req = createRequire(import.meta.url)
+    _expectFn = req('@playwright/test').expect
+  } catch {
+    _expectFn = undefined
+  }
+  return _expectFn
+}
 
 type NodeStartCallback = (nodeId: string) => void
 type NodeCompleteCallback = (nodeId: string, success: boolean, error?: string) => void
@@ -248,6 +268,11 @@ export class Replayer {
       case 'wait':
         await this.getLocator(action).waitFor({ state: 'visible' })
         break
+      case 'code': {
+        const fn = new AsyncFunction('page', 'expect', 'vars', action.code ?? '')
+        await fn(this.pageFor(action), getExpect(), this.buildCodeVars())
+        break
+      }
       case 'callFlow':
         break
     }
@@ -261,6 +286,18 @@ export class Replayer {
     if (action.captureAs && val != null) {
       this.sessionVars.set(action.captureAs, val)
     }
+  }
+
+  /** Build the `vars` object injected into a code node.
+   *  Priority (highest last so it wins): env vars < profile vars < session vars.
+   *  Built-in random/timestamp variables are exposed as functions (fresh value per call). */
+  private buildCodeVars(): Record<string, unknown> {
+    const vars: Record<string, unknown> = { ...this.envVars, ...this.profileVars }
+    for (const [k, v] of this.sessionVars) vars[k] = v
+    for (const name of ['randomText', 'randomNumber', 'randomOneText', 'randomOneNumber', 'timestamp']) {
+      if (!(name in vars)) vars[name] = () => resolveValue(`{{${name}}}`)
+    }
+    return vars
   }
 
   private async executeAssertion(action: Action): Promise<void> {

@@ -7573,6 +7573,28 @@ const useFlowStore = create$1((set2, get2) => ({
     set2({ currentFlow: updatedFlow, recordingHeadId: node.id });
     return node;
   },
+  addNodeAt: (action, position) => {
+    const flow = get2().currentFlow;
+    if (!flow) throw new Error("No active flow");
+    if (flow.nodes.some((n2) => n2.id === action.id)) return {};
+    const node = {
+      id: action.id,
+      action,
+      position,
+      parentId: null,
+      childIds: []
+    };
+    const updatedFlow = {
+      ...flow,
+      nodes: [...flow.nodes, node],
+      // Only becomes root if the flow is empty; otherwise it's a floating node
+      // the user connects manually.
+      rootNodeId: flow.rootNodeId || node.id,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    set2({ currentFlow: updatedFlow });
+    return node;
+  },
   updateNode: (nodeId, updates) => {
     const flow = get2().currentFlow;
     if (!flow) return;
@@ -16991,7 +17013,8 @@ const TYPE_COLORS = {
   assertVisible: "#22c55e",
   assertText: "#22c55e",
   assertValue: "#22c55e",
-  callFlow: "#f59e0b"
+  callFlow: "#f59e0b",
+  code: "#64748b"
 };
 const TYPE_ICONS = {
   goto: "🌐",
@@ -17006,7 +17029,8 @@ const TYPE_ICONS = {
   assertVisible: "👁",
   assertText: "📝",
   assertValue: "🔢",
-  callFlow: "⛓"
+  callFlow: "⛓",
+  code: "</>"
 };
 function ActionNodeComponent({ data, selected }) {
   const { flowNode } = data;
@@ -17019,7 +17043,7 @@ function ActionNodeComponent({ data, selected }) {
   if (nodeStatus === "success") borderColor = "#22c55e";
   if (nodeStatus === "error") borderColor = "#ef4444";
   const borderWidth = action.isPageNavigation ? 3 : 1.5;
-  const borderStyle = action.type === "callFlow" ? "dashed" : "solid";
+  const borderStyle = action.type === "callFlow" || action.type === "code" ? "dashed" : "solid";
   const animation = isReplaying ? "pulse 0.8s infinite" : "none";
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(
     "div",
@@ -17149,6 +17173,28 @@ function ActionNodeComponent({ data, selected }) {
             }
           );
         })(),
+        action.type === "code" && action.code && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "pre",
+          {
+            style: {
+              fontSize: 10,
+              color: "#94a3b8",
+              marginTop: 4,
+              marginBottom: 0,
+              padding: "4px 6px",
+              background: "#0f172a",
+              border: "1px solid #334155",
+              borderRadius: 4,
+              maxHeight: 54,
+              overflow: "hidden",
+              fontFamily: 'Consolas, "Courier New", monospace',
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all"
+            },
+            title: action.code,
+            children: action.code.split("\n").slice(0, 3).join("\n")
+          }
+        ),
         action.type !== "callFlow" && action.selector && /* @__PURE__ */ jsxRuntimeExports.jsx(
           "div",
           {
@@ -18246,6 +18292,238 @@ function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }) {
     ] })
   ] }) });
 }
+const CODE_PLACEHOLDER = `// 以 page / expect / vars 撰寫道地的 Playwright 程式碼
+// 例：讀取動態清單並逐項處理
+const rows = await page.locator('table tbody tr').allTextContents();
+for (const row of rows) {
+  console.log(row);
+}`;
+function AddNodeModal({ onConfirm, onClose }) {
+  const [kind, setKind] = reactExports.useState("code");
+  const [code, setCode] = reactExports.useState("");
+  const [copied, setCopied] = reactExports.useState(null);
+  const currentFlow = useFlowStore((s) => s.currentFlow);
+  const activeProfileId = useFlowStore((s) => s.activeProfileId);
+  const currentProject = useFlowStore((s) => s.currentProject);
+  const varRefs = reactExports.useMemo(() => {
+    const refs = [];
+    for (const v2 of BUILT_IN_VARIABLES) {
+      refs.push({ label: `vars.${v2.name}()`, snippet: `vars.${v2.name}()`, group: "內建" });
+    }
+    const profile = currentFlow?.profiles?.find((p2) => p2.id === activeProfileId) ?? currentFlow?.profiles?.[0];
+    for (const pv of profile?.vars ?? []) {
+      if (pv.key) refs.push({ label: `vars.${pv.key}`, snippet: `vars.${pv.key}`, group: "環境配置" });
+    }
+    for (const ev of currentProject?.envVars ?? []) {
+      if (ev.key) refs.push({ label: `vars.${ev.key}`, snippet: `vars.${ev.key}`, group: "專案環境" });
+    }
+    const seen = /* @__PURE__ */ new Set();
+    for (const n2 of currentFlow?.nodes ?? []) {
+      const key = n2.action.captureAs;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        refs.push({ label: `vars.${key}`, snippet: `vars.${key}`, group: "區域變數" });
+      }
+    }
+    return refs;
+  }, [currentFlow, activeProfileId, currentProject]);
+  const copySnippet = (snippet) => {
+    navigator.clipboard.writeText(snippet).then(() => {
+      setCopied(snippet);
+      setTimeout(() => setCopied(null), 1500);
+    });
+  };
+  const canConfirm = code.trim().length > 0;
+  const confirm = () => {
+    if (!canConfirm) return;
+    const action = {
+      id: v4(),
+      type: "code",
+      selector: "",
+      code,
+      description: "程式碼",
+      timestamp: Date.now(),
+      url: "",
+      isPageNavigation: false
+    };
+    onConfirm(action);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 3e3
+      },
+      onMouseDown: onClose,
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            background: "#1e293b",
+            border: "1px solid #334155",
+            borderRadius: 12,
+            padding: 24,
+            width: 720,
+            maxWidth: "92vw",
+            maxHeight: "88vh",
+            display: "flex",
+            flexDirection: "column"
+          },
+          onMouseDown: (e) => e.stopPropagation(),
+          onKeyDown: (e) => {
+            if (e.key === "Escape") onClose();
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: 16, color: "#e2e8f0", margin: "0 0 16px" }, children: "加入節點" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 6, display: "block" }, children: "節點類型" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "select",
+              {
+                value: kind,
+                onChange: (e) => setKind(e.target.value),
+                style: {
+                  display: "block",
+                  width: "100%",
+                  padding: "8px 10px",
+                  background: "#0f172a",
+                  border: "1px solid #334155",
+                  borderRadius: 6,
+                  color: "#e2e8f0",
+                  fontSize: 13,
+                  outline: "none",
+                  marginBottom: 16,
+                  boxSizing: "border-box"
+                },
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "code", children: "程式碼 Code" })
+              }
+            ),
+            kind === "code" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 16, minHeight: 0, flex: 1 }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 6 }, children: [
+                  "程式碼（可用 ",
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "page" }),
+                  "、",
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "expect" }),
+                  "、",
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "vars" }),
+                  "）"
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "textarea",
+                  {
+                    autoFocus: true,
+                    value: code,
+                    onChange: (e) => setCode(e.target.value),
+                    placeholder: CODE_PLACEHOLDER,
+                    spellCheck: false,
+                    style: {
+                      width: "100%",
+                      minHeight: 320,
+                      resize: "vertical",
+                      padding: "10px 12px",
+                      background: "#0f172a",
+                      border: "1px solid #334155",
+                      borderRadius: 6,
+                      color: "#e2e8f0",
+                      fontSize: 12.5,
+                      lineHeight: 1.5,
+                      fontFamily: 'Consolas, "Courier New", monospace',
+                      outline: "none",
+                      boxSizing: "border-box",
+                      tabSize: 2
+                    }
+                  }
+                )
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { width: 200, display: "flex", flexDirection: "column", minHeight: 0 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { fontSize: 12, color: "#94a3b8", marginBottom: 6 }, children: "可用變數" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "div",
+                  {
+                    style: {
+                      flex: 1,
+                      overflowY: "auto",
+                      background: "#0f172a",
+                      border: "1px solid #334155",
+                      borderRadius: 6,
+                      padding: 6
+                    },
+                    children: [
+                      varRefs.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#475569", padding: 6 }, children: "（無可用變數）" }),
+                      varRefs.map((r2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                        "div",
+                        {
+                          onClick: () => copySnippet(r2.snippet),
+                          title: `點擊複製 ${r2.snippet}`,
+                          style: {
+                            padding: "5px 7px",
+                            cursor: "pointer",
+                            borderRadius: 4,
+                            userSelect: "none",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 6
+                          },
+                          children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontSize: 11, color: "#7dd3fc" }, children: r2.label }),
+                            copied === r2.snippet ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 9, color: "#4ade80" }, children: "已複製" }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 9, color: "#475569" }, children: r2.group })
+                          ]
+                        },
+                        `${r2.snippet}-${i}`
+                      ))
+                    ]
+                  }
+                )
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: onClose,
+                  style: {
+                    padding: "6px 16px",
+                    borderRadius: 6,
+                    border: "1px solid #475569",
+                    background: "transparent",
+                    color: "#94a3b8",
+                    cursor: "pointer",
+                    fontSize: 12
+                  },
+                  children: "取消"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: confirm,
+                  disabled: !canConfirm,
+                  style: {
+                    padding: "6px 16px",
+                    borderRadius: 6,
+                    border: "none",
+                    background: canConfirm ? "#3b82f6" : "#334155",
+                    color: canConfirm ? "#fff" : "#64748b",
+                    cursor: canConfirm ? "pointer" : "not-allowed",
+                    fontSize: 12
+                  },
+                  children: "確認"
+                }
+              )
+            ] })
+          ]
+        }
+      )
+    }
+  );
+}
 function validateExtraction(allNodes, selectedIds) {
   if (selectedIds.size < 2) {
     return { valid: false, error: "請至少選取 2 個節點" };
@@ -18382,11 +18660,15 @@ function FlowCanvasInner() {
     disconnectNode,
     createGroup,
     toggleGroupCollapsed,
-    ungroupGroup
+    ungroupGroup,
+    addNodeAt
   } = useFlowStore();
   const { replayToNode, startBranchRecording } = usePlaywright();
+  const { screenToFlowPosition } = useReactFlow();
   const [contextMenu, setContextMenu] = reactExports.useState(null);
   const [callFlowModal, setCallFlowModal] = reactExports.useState(null);
+  const [paneMenu, setPaneMenu] = reactExports.useState(null);
+  const [addNodeModal, setAddNodeModal] = reactExports.useState(null);
   const [selectedNodeIds, setSelectedNodeIds] = reactExports.useState(/* @__PURE__ */ new Set());
   const [extractModal, setExtractModal] = reactExports.useState(false);
   const [extractionInfo, setExtractionInfo] = reactExports.useState(null);
@@ -18554,8 +18836,18 @@ function FlowCanvasInner() {
   const onPaneClick = reactExports.useCallback(() => {
     selectNode(null);
     setContextMenu(null);
+    setPaneMenu(null);
     setSelectedNodeIds(/* @__PURE__ */ new Set());
   }, [selectNode]);
+  const onPaneContextMenu = reactExports.useCallback(
+    (event) => {
+      event.preventDefault();
+      setContextMenu(null);
+      const flow = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      setPaneMenu({ x: event.clientX, y: event.clientY, flowX: flow.x, flowY: flow.y });
+    },
+    [screenToFlowPosition]
+  );
   const onNodeContextMenu = reactExports.useCallback(
     (event, node) => {
       event.preventDefault();
@@ -18740,6 +19032,70 @@ function FlowCanvasInner() {
         onClose: () => setGroupModal(false)
       }
     ),
+    paneMenu && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        style: { position: "fixed", inset: 0, zIndex: 1e3 },
+        onMouseDown: () => setPaneMenu(null),
+        onContextMenu: (e) => e.preventDefault(),
+        children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              position: "absolute",
+              left: paneMenu.x,
+              top: paneMenu.y,
+              background: "#1e293b",
+              border: "1px solid #334155",
+              borderRadius: 8,
+              padding: 4,
+              minWidth: 140,
+              boxShadow: "0 8px 24px rgba(0,0,0,0.4)"
+            },
+            onMouseDown: (e) => e.stopPropagation(),
+            children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                onClick: () => {
+                  setAddNodeModal({ flowX: paneMenu.flowX, flowY: paneMenu.flowY });
+                  setPaneMenu(null);
+                },
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 10px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  color: "#e2e8f0",
+                  fontSize: 13,
+                  userSelect: "none"
+                },
+                onMouseEnter: (e) => e.currentTarget.style.background = "#334155",
+                onMouseLeave: (e) => e.currentTarget.style.background = "transparent",
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "➕" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "加入節點" })
+                ]
+              }
+            )
+          }
+        )
+      }
+    ),
+    addNodeModal && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      AddNodeModal,
+      {
+        onClose: () => setAddNodeModal(null),
+        onConfirm: async (action) => {
+          addNodeAt(action, { x: addNodeModal.flowX, y: addNodeModal.flowY });
+          selectNode(action.id);
+          setAddNodeModal(null);
+          const updated = useFlowStore.getState().currentFlow;
+          if (updated) await window.electronAPI.saveFlow(updated).catch(console.error);
+        }
+      }
+    ),
     isRecording && /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "div",
       {
@@ -18788,6 +19144,7 @@ function FlowCanvasInner() {
         onNodeClick,
         onNodeContextMenu,
         onPaneClick,
+        onPaneContextMenu,
         onSelectionChange,
         onConnect,
         onNodesDelete: () => {
@@ -19831,6 +20188,7 @@ function PropertyPanel() {
   const [selector2, setSelector] = reactExports.useState("");
   const [locatorExpr, setLocatorExpr] = reactExports.useState("");
   const [value, setValue] = reactExports.useState("");
+  const [code, setCode] = reactExports.useState("");
   const [subFlowProfiles, setSubFlowProfiles] = reactExports.useState([]);
   const [profileMapping, setProfileMapping] = reactExports.useState({});
   const [subFlowLoading, setSubFlowLoading] = reactExports.useState(false);
@@ -19840,6 +20198,7 @@ function PropertyPanel() {
       setSelector(selectedNode.action.selector);
       setLocatorExpr(selectedNode.action.locatorExpr ?? "");
       setValue(selectedNode.action.value ?? "");
+      setCode(selectedNode.action.code ?? "");
     }
   }, [selectedNodeId, selectedNode]);
   reactExports.useEffect(() => {
@@ -19897,6 +20256,7 @@ function PropertyPanel() {
         value: value || void 0,
         // Multi-select nodes keep values[] in sync with the comma-joined value field
         ...selectedNode.action.values ? { values: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+        ...selectedNode.action.type === "code" ? { code } : {},
         ...callFlowUpdates
       }
     });
@@ -19925,7 +20285,7 @@ function PropertyPanel() {
             style: inputStyle
           }
         ) }),
-        selectedNode.action.type !== "goto" && selectedNode.action.type !== "press" && selectedNode.action.type !== "callFlow" && /* @__PURE__ */ jsxRuntimeExports.jsx(Field, { label: "Selector", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        selectedNode.action.type !== "goto" && selectedNode.action.type !== "press" && selectedNode.action.type !== "callFlow" && selectedNode.action.type !== "code" && /* @__PURE__ */ jsxRuntimeExports.jsx(Field, { label: "Selector", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
           "input",
           {
             value: selector2,
@@ -19960,6 +20320,46 @@ function PropertyPanel() {
             "可插入變數，如 ",
             /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "{{randomText}}" })
           ] }) })
+        ] }),
+        selectedNode.action.type === "code" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { width: "100%" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase" }, children: "程式碼" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "textarea",
+            {
+              value: code,
+              onChange: (e) => setCode(e.target.value),
+              spellCheck: false,
+              style: {
+                display: "block",
+                width: "100%",
+                minHeight: 120,
+                resize: "vertical",
+                marginTop: 4,
+                padding: "8px 10px",
+                background: "#0f172a",
+                border: "1px solid #334155",
+                borderRadius: 5,
+                color: "#e2e8f0",
+                fontSize: 12,
+                lineHeight: 1.5,
+                fontFamily: 'Consolas, "Courier New", monospace',
+                outline: "none",
+                boxSizing: "border-box",
+                tabSize: 2
+              }
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: [
+            "可用 ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "page" }),
+            "、",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "expect" }),
+            "、",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "vars" }),
+            "（如 ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "vars.account" }),
+            "）"
+          ] })
         ] }),
         showMappingSection && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { width: "100%", marginTop: 8 }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {

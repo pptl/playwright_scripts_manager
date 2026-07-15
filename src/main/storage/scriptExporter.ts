@@ -241,7 +241,9 @@ export class ScriptExporter {
 
     const usesVariables = flow.nodes.some((n) =>
       (n.action.value && hasVariables(n.action.value)) ||
-      (n.action.locatorExpr && hasVariables(n.action.locatorExpr))
+      (n.action.locatorExpr && hasVariables(n.action.locatorExpr)) ||
+      // code nodes emit `const vars = { randomText: _ftRandomText, … }`, so the helpers are needed
+      n.action.type === 'code'
     )
 
     let usesPopupHoist = false
@@ -270,7 +272,7 @@ export class ScriptExporter {
 
         const stepCode = steps
           .map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
-            let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain)
+            let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, config.envVars ?? {})
             // Popup-opening action: wrap in the official waitForEvent('popup') pattern
             if (node.action.opensPage) {
               const alias = node.action.opensPage
@@ -320,6 +322,7 @@ export class ScriptExporter {
     inlineVars = false,
     hoistedVars: Set<string> = new Set(),
     domainOverride = '',
+    envVars: Record<string, string> = {},
   ): string {
     const { action } = node
     // Popup actions target their page alias ('page1', 'page2'…); absent = the initial 'page'.
@@ -455,6 +458,42 @@ export class ScriptExporter {
         const files = (action.value ?? '').split(',').map((s) => s.trim()).filter(Boolean)
         const arg = files.length === 1 ? va(files[0]) : `[${files.map((f) => va(f)).join(', ')}]`
         return `${captureDecl}await ${loc}.setInputFiles(${arg});`
+      }
+      case 'code': {
+        // Emit `const vars = { … }` then inline the user's code verbatim.
+        // Parity with Replayer.buildCodeVars: env < profile < session (session wins),
+        // built-ins exposed as functions. Profile vars reference _ftProf_* (or literals
+        // when inlineVars), env/session use literals/identifiers.
+        const used = new Set<string>()
+        const entries: string[] = []
+        for (const key of Object.keys(profileVars)) {
+          if (used.has(key)) continue
+          used.add(key)
+          entries.push(`${JSON.stringify(key)}: ${inlineVars ? JSON.stringify(profileVars[key]) : `_ftProf_${key}`}`)
+        }
+        for (const [key, v] of Object.entries(envVars)) {
+          if (used.has(key)) continue
+          used.add(key)
+          entries.push(`${JSON.stringify(key)}: ${JSON.stringify(v)}`)
+        }
+        for (const name of sessionVarsDefined) {
+          if (used.has(name)) continue
+          used.add(name)
+          entries.push(`${JSON.stringify(name)}: ${name}`)
+        }
+        const builtins: Array<[string, string]> = [
+          ['randomText', '_ftRandomText'],
+          ['randomNumber', '_ftRandomNumber'],
+          ['randomOneText', '_ftRandomOneLetter'],
+          ['randomOneNumber', '_ftRandomOneDigit'],
+          ['timestamp', '_ftTimestamp'],
+        ]
+        for (const [name, fn] of builtins) {
+          if (used.has(name)) continue
+          entries.push(`${name}: ${fn}`)
+        }
+        const varsDecl = `const vars = { ${entries.join(', ')} };`
+        return `${varsDecl}\n${action.code ?? ''}`
       }
       case 'wait':
         return `await ${loc}.waitFor({ state: 'visible' });`

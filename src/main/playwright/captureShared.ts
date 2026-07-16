@@ -235,6 +235,32 @@ export function getDOMCaptureScript(): () => void {
     }
 
     const focusValues = new WeakMap<Element, string>()
+    // The value as of the most recent real 'input' event (actual keystrokes/paste),
+    // as opposed to the live DOM value which can also change programmatically — e.g.
+    // MUI Autocomplete overwrites the input's displayed value to the selected option's
+    // label via a React state update (no native 'input' event) once you click an
+    // option. Diffing against the raw DOM value at blur time would misread that
+    // programmatic rewrite as a second, bogus fill. Diffing against this map instead
+    // reflects only what the user actually typed.
+    const lastTypedValues = new WeakMap<Element, string>()
+    // Tracks the text input/contentEditable that currently holds focus, so a click
+    // elsewhere can flush its pending value even when no blur event fires — e.g. MUI
+    // Autocomplete calls preventDefault() on its popup's mousedown to keep the field
+    // focused while you pick an option, so typing the search text ("BZD") never hits
+    // the blur-based fill capture below and is silently lost.
+    let currentFocusedInput: Element | null = null
+
+    function flushPendingFill(): void {
+      const el = currentFocusedInput
+      if (!el) return
+      const initial = focusValues.get(el)
+      const current = lastTypedValues.get(el)
+      if (initial === undefined || current === undefined || current === initial) return
+      const locatorExpr = getLocatorExpr(el)
+      report({ kind: 'fill', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href })
+      // Keep the entry but sync it, so the later blur (if any) sees no diff and stays silent.
+      focusValues.set(el, current)
+    }
 
     // ── Click / DblClick / Right-click / Middle-click ─────────────────────
     // Blacklist approach matching Playwright's _shouldIgnoreMouseEvent:
@@ -251,6 +277,12 @@ export function getDOMCaptureScript(): () => void {
     function handleMouseAction(e: MouseEvent, button: 'left' | 'right' | 'middle', clickCount: number): void {
       let el = getTarget(e) as Element
       if (!el?.tagName) return
+
+      // A click on anything other than the currently-focused input means that
+      // input's value is "final" from the user's perspective, even if focus was
+      // deliberately kept (e.g. clicking an Autocomplete option) — flush it first
+      // so replay sees the search text typed before the option that depended on it.
+      if (currentFocusedInput && currentFocusedInput !== el) flushPendingFill()
 
       const tag = el.tagName.toLowerCase()
       const type = ((el as HTMLInputElement).type || '').toLowerCase()
@@ -375,18 +407,32 @@ export function getDOMCaptureScript(): () => void {
         ? (el as HTMLElement).innerText
         : (el as HTMLInputElement).value ?? ''
       focusValues.set(el, value)
+      lastTypedValues.set(el, value)
+      currentFocusedInput = el
+    }, true)
+
+    // Real user edits only — programmatic value changes (e.g. a framework setting
+    // the DOM value from state) don't dispatch this event.
+    document.addEventListener('input', (e: Event) => {
+      const el = getTarget(e) as Element
+      if (!el?.tagName) return
+      if (!isTextInput(el) && !isContentEditable(el)) return
+      const value = isContentEditable(el)
+        ? (el as HTMLElement).innerText
+        : (el as HTMLInputElement).value ?? ''
+      lastTypedValues.set(el, value)
     }, true)
 
     document.addEventListener('blur', (e: FocusEvent) => {
       const el = getTarget(e) as Element
       if (!el?.tagName) return
       if (!isTextInput(el) && !isContentEditable(el)) return
+      if (currentFocusedInput === el) currentFocusedInput = null
       const initial = focusValues.get(el)
-      const current = isContentEditable(el)
-        ? (el as HTMLElement).innerText
-        : (el as HTMLInputElement).value ?? ''
+      const current = lastTypedValues.get(el)
       focusValues.delete(el)
-      if (initial === undefined || current === initial) return
+      lastTypedValues.delete(el)
+      if (initial === undefined || current === undefined || current === initial) return
       const locatorExpr = getLocatorExpr(el)
       report({ kind: 'fill', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href })
     }, true)
@@ -464,10 +510,8 @@ export function getDOMCaptureScript(): () => void {
       // fill entirely. Emitting it here fixes ordering and survives navigation.
       if (isTextInput(el) || isContentEditable(el)) {
         const initial = focusValues.get(el)
-        const current = isContentEditable(el)
-          ? (el as HTMLElement).innerText
-          : (el as HTMLInputElement).value ?? ''
-        if (initial !== undefined && current !== initial) {
+        const current = lastTypedValues.get(el)
+        if (initial !== undefined && current !== undefined && current !== initial) {
           const fillLocator = getLocatorExpr(el)
           report({ kind: 'fill', locatorExpr: fillLocator, selector: generateCSSSelector(el), label: extractLabel(fillLocator, el), value: current, timestamp: Date.now(), url: window.location.href })
           // Keep the entry but sync it, so the later blur sees no diff and stays silent.

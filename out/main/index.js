@@ -255,6 +255,18 @@ function getDOMCaptureScript() {
       }
     }
     const focusValues = /* @__PURE__ */ new WeakMap();
+    const lastTypedValues = /* @__PURE__ */ new WeakMap();
+    let currentFocusedInput = null;
+    function flushPendingFill() {
+      const el = currentFocusedInput;
+      if (!el) return;
+      const initial = focusValues.get(el);
+      const current = lastTypedValues.get(el);
+      if (initial === void 0 || current === void 0 || current === initial) return;
+      const locatorExpr = getLocatorExpr(el);
+      report({ kind: "fill", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href });
+      focusValues.set(el, current);
+    }
     function modifiersFor(e) {
       const m = [];
       if (e.altKey) m.push("Alt");
@@ -266,6 +278,7 @@ function getDOMCaptureScript() {
     function handleMouseAction(e, button, clickCount) {
       let el = getTarget(e);
       if (!el?.tagName) return;
+      if (currentFocusedInput && currentFocusedInput !== el) flushPendingFill();
       const tag = el.tagName.toLowerCase();
       const type = (el.type || "").toLowerCase();
       if (el.id?.startsWith("__ft_")) return;
@@ -353,15 +366,26 @@ function getDOMCaptureScript() {
       if (!isTextInput(el) && !isContentEditable(el)) return;
       const value = isContentEditable(el) ? el.innerText : el.value ?? "";
       focusValues.set(el, value);
+      lastTypedValues.set(el, value);
+      currentFocusedInput = el;
+    }, true);
+    document.addEventListener("input", (e) => {
+      const el = getTarget(e);
+      if (!el?.tagName) return;
+      if (!isTextInput(el) && !isContentEditable(el)) return;
+      const value = isContentEditable(el) ? el.innerText : el.value ?? "";
+      lastTypedValues.set(el, value);
     }, true);
     document.addEventListener("blur", (e) => {
       const el = getTarget(e);
       if (!el?.tagName) return;
       if (!isTextInput(el) && !isContentEditable(el)) return;
+      if (currentFocusedInput === el) currentFocusedInput = null;
       const initial = focusValues.get(el);
-      const current = isContentEditable(el) ? el.innerText : el.value ?? "";
+      const current = lastTypedValues.get(el);
       focusValues.delete(el);
-      if (initial === void 0 || current === initial) return;
+      lastTypedValues.delete(el);
+      if (initial === void 0 || current === void 0 || current === initial) return;
       const locatorExpr = getLocatorExpr(el);
       report({ kind: "fill", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href });
     }, true);
@@ -412,8 +436,8 @@ function getDOMCaptureScript() {
       if (e.key.length === 1 && !hasModifier) return;
       if (isTextInput(el) || isContentEditable(el)) {
         const initial = focusValues.get(el);
-        const current = isContentEditable(el) ? el.innerText : el.value ?? "";
-        if (initial !== void 0 && current !== initial) {
+        const current = lastTypedValues.get(el);
+        if (initial !== void 0 && current !== void 0 && current !== initial) {
           const fillLocator = getLocatorExpr(el);
           report({ kind: "fill", locatorExpr: fillLocator, selector: generateCSSSelector(el), label: extractLabel(fillLocator, el), value: current, timestamp: Date.now(), url: window.location.href });
           focusValues.set(el, current);

@@ -14,6 +14,7 @@ export type ActionType =
   | 'assertText'
   | 'assertValue'
   | 'callFlow'
+  | 'code'
 
 export interface Assertion {
   type: 'text' | 'visible' | 'url' | 'count'
@@ -64,6 +65,9 @@ export interface Action {
    *  Takes precedence over subFlowProfileId at runtime. Enables dynamic profile resolution
    *  when the parent flow switches environments, including N-level nesting. */
   subFlowProfileMapping?: Record<string, string | null>
+  /** code only: raw Playwright/JS body executed with (page, expect, vars) in scope.
+   *  Runs verbatim at replay (via AsyncFunction) and is inlined into the exported spec. */
+  code?: string
 }
 
 export function isCallFlowAction(action: Action): action is Action & {

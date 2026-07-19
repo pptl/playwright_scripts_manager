@@ -255,6 +255,18 @@ function getDOMCaptureScript() {
       }
     }
     const focusValues = /* @__PURE__ */ new WeakMap();
+    const lastTypedValues = /* @__PURE__ */ new WeakMap();
+    let currentFocusedInput = null;
+    function flushPendingFill() {
+      const el = currentFocusedInput;
+      if (!el) return;
+      const initial = focusValues.get(el);
+      const current = lastTypedValues.get(el);
+      if (initial === void 0 || current === void 0 || current === initial) return;
+      const locatorExpr = getLocatorExpr(el);
+      report({ kind: "fill", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href });
+      focusValues.set(el, current);
+    }
     function modifiersFor(e) {
       const m = [];
       if (e.altKey) m.push("Alt");
@@ -266,6 +278,7 @@ function getDOMCaptureScript() {
     function handleMouseAction(e, button, clickCount) {
       let el = getTarget(e);
       if (!el?.tagName) return;
+      if (currentFocusedInput && currentFocusedInput !== el) flushPendingFill();
       const tag = el.tagName.toLowerCase();
       const type = (el.type || "").toLowerCase();
       if (el.id?.startsWith("__ft_")) return;
@@ -353,15 +366,26 @@ function getDOMCaptureScript() {
       if (!isTextInput(el) && !isContentEditable(el)) return;
       const value = isContentEditable(el) ? el.innerText : el.value ?? "";
       focusValues.set(el, value);
+      lastTypedValues.set(el, value);
+      currentFocusedInput = el;
+    }, true);
+    document.addEventListener("input", (e) => {
+      const el = getTarget(e);
+      if (!el?.tagName) return;
+      if (!isTextInput(el) && !isContentEditable(el)) return;
+      const value = isContentEditable(el) ? el.innerText : el.value ?? "";
+      lastTypedValues.set(el, value);
     }, true);
     document.addEventListener("blur", (e) => {
       const el = getTarget(e);
       if (!el?.tagName) return;
       if (!isTextInput(el) && !isContentEditable(el)) return;
+      if (currentFocusedInput === el) currentFocusedInput = null;
       const initial = focusValues.get(el);
-      const current = isContentEditable(el) ? el.innerText : el.value ?? "";
+      const current = lastTypedValues.get(el);
       focusValues.delete(el);
-      if (initial === void 0 || current === initial) return;
+      lastTypedValues.delete(el);
+      if (initial === void 0 || current === void 0 || current === initial) return;
       const locatorExpr = getLocatorExpr(el);
       report({ kind: "fill", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: current, timestamp: Date.now(), url: window.location.href });
     }, true);
@@ -412,8 +436,8 @@ function getDOMCaptureScript() {
       if (e.key.length === 1 && !hasModifier) return;
       if (isTextInput(el) || isContentEditable(el)) {
         const initial = focusValues.get(el);
-        const current = isContentEditable(el) ? el.innerText : el.value ?? "";
-        if (initial !== void 0 && current !== initial) {
+        const current = lastTypedValues.get(el);
+        if (initial !== void 0 && current !== void 0 && current !== initial) {
           const fillLocator = getLocatorExpr(el);
           report({ kind: "fill", locatorExpr: fillLocator, selector: generateCSSSelector(el), label: extractLabel(fillLocator, el), value: current, timestamp: Date.now(), url: window.location.href });
           focusValues.set(el, current);
@@ -1360,6 +1384,19 @@ class FlowStorage {
     }
   }
 }
+const AsyncFunction = Object.getPrototypeOf(async () => {
+}).constructor;
+let _expectFn = null;
+function getExpect() {
+  if (_expectFn !== null) return _expectFn;
+  try {
+    const req = module$1.createRequire(require("url").pathToFileURL(__filename).href);
+    _expectFn = req("@playwright/test").expect;
+  } catch {
+    _expectFn = void 0;
+  }
+  return _expectFn;
+}
 class Replayer {
   page;
   sessionVars = /* @__PURE__ */ new Map();
@@ -1552,6 +1589,11 @@ class Replayer {
       case "wait":
         await this.getLocator(action).waitFor({ state: "visible" });
         break;
+      case "code": {
+        const fn = new AsyncFunction("page", "expect", "vars", action.code ?? "");
+        await fn(this.pageFor(action), getExpect(), this.buildCodeVars());
+        break;
+      }
     }
     if (popupPromise && action.opensPage) {
       const newPage = await popupPromise;
@@ -1562,6 +1604,17 @@ class Replayer {
     if (action.captureAs && val != null) {
       this.sessionVars.set(action.captureAs, val);
     }
+  }
+  /** Build the `vars` object injected into a code node.
+   *  Priority (highest last so it wins): env vars < profile vars < session vars.
+   *  Built-in random/timestamp variables are exposed as functions (fresh value per call). */
+  buildCodeVars() {
+    const vars = { ...this.envVars, ...this.profileVars };
+    for (const [k, v] of this.sessionVars) vars[k] = v;
+    for (const name of ["randomText", "randomNumber", "randomOneText", "randomOneNumber", "timestamp"]) {
+      if (!(name in vars)) vars[name] = () => resolveValue(`{{${name}}}`);
+    }
+    return vars;
   }
   async executeAssertion(action) {
     const assertion = action.assertion;
@@ -1859,7 +1912,8 @@ class ScriptExporter {
     })();
     const flowDomain = resolveFlowDomain(flow, config.envVars, config.activeProjectId);
     const usesVariables = flow.nodes.some(
-      (n) => n.action.value && hasVariables(n.action.value) || n.action.locatorExpr && hasVariables(n.action.locatorExpr)
+      (n) => n.action.value && hasVariables(n.action.value) || n.action.locatorExpr && hasVariables(n.action.locatorExpr) || // code nodes emit `const vars = { randomText: _ftRandomText, … }`, so the helpers are needed
+      n.action.type === "code"
     );
     let usesPopupHoist = false;
     const tests = paths.map((path2, idx) => {
@@ -1871,7 +1925,7 @@ class ScriptExporter {
       if (hoistedPages.size > 0) usesPopupHoist = true;
       const hoistDecls = (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "") + (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join("\n") + "\n" : "");
       const stepCode = steps.map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
-        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain);
+        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, config.envVars ?? {});
         if (node.action.opensPage) {
           const alias = node.action.opensPage;
           const pageRef = node.action.pageAlias || "page";
@@ -1909,7 +1963,7 @@ ${emitProfileVarDecls(profileVars)}` : "",
       "});"
     ].filter((line) => line !== void 0).join("\n");
   }
-  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false, hoistedVars = /* @__PURE__ */ new Set(), domainOverride = "") {
+  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false, hoistedVars = /* @__PURE__ */ new Set(), domainOverride = "", envVars = {}) {
     const { action } = node;
     const pageRef = action.pageAlias || "page";
     const frameChain = (action.framePath ?? []).map((f) => `.${f}.contentFrame()`).join("");
@@ -1997,6 +2051,39 @@ ${emitProfileVarDecls(profileVars)}` : "",
         const files = (action.value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
         const arg = files.length === 1 ? va(files[0]) : `[${files.map((f) => va(f)).join(", ")}]`;
         return `${captureDecl}await ${loc}.setInputFiles(${arg});`;
+      }
+      case "code": {
+        const used = /* @__PURE__ */ new Set();
+        const entries = [];
+        for (const key of Object.keys(profileVars)) {
+          if (used.has(key)) continue;
+          used.add(key);
+          entries.push(`${JSON.stringify(key)}: ${inlineVars ? JSON.stringify(profileVars[key]) : `_ftProf_${key}`}`);
+        }
+        for (const [key, v] of Object.entries(envVars)) {
+          if (used.has(key)) continue;
+          used.add(key);
+          entries.push(`${JSON.stringify(key)}: ${JSON.stringify(v)}`);
+        }
+        for (const name of sessionVarsDefined) {
+          if (used.has(name)) continue;
+          used.add(name);
+          entries.push(`${JSON.stringify(name)}: ${name}`);
+        }
+        const builtins = [
+          ["randomText", "_ftRandomText"],
+          ["randomNumber", "_ftRandomNumber"],
+          ["randomOneText", "_ftRandomOneLetter"],
+          ["randomOneNumber", "_ftRandomOneDigit"],
+          ["timestamp", "_ftTimestamp"]
+        ];
+        for (const [name, fn] of builtins) {
+          if (used.has(name)) continue;
+          entries.push(`${name}: ${fn}`);
+        }
+        const varsDecl = `const vars = { ${entries.join(", ")} };`;
+        return `${varsDecl}
+${action.code ?? ""}`;
       }
       case "wait":
         return `await ${loc}.waitFor({ state: 'visible' });`;
@@ -2325,6 +2412,9 @@ function createWindow() {
   }
   win.on("ready-to-show", () => {
     win.show();
+    win.setAlwaysOnTop(true);
+    win.focus();
+    win.setAlwaysOnTop(false);
   });
   return win;
 }

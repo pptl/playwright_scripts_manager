@@ -10,6 +10,7 @@ export function PropertyPanel() {
   const [selector, setSelector] = useState('')
   const [locatorExpr, setLocatorExpr] = useState('')
   const [value, setValue] = useState('')
+  const [code, setCode] = useState('')
 
   // callFlow-specific state
   const [subFlowProfiles, setSubFlowProfiles] = useState<FlowProfile[]>([])
@@ -22,6 +23,7 @@ export function PropertyPanel() {
       setSelector(selectedNode.action.selector)
       setLocatorExpr(selectedNode.action.locatorExpr ?? '')
       setValue(selectedNode.action.value ?? '')
+      setCode(selectedNode.action.code ?? '')
     }
   }, [selectedNodeId, selectedNode])
 
@@ -89,6 +91,7 @@ export function PropertyPanel() {
         ...(selectedNode.action.values
           ? { values: value.split(',').map((s) => s.trim()).filter(Boolean) }
           : {}),
+        ...(selectedNode.action.type === 'code' ? { code } : {}),
         ...callFlowUpdates,
       },
     })
@@ -106,7 +109,7 @@ export function PropertyPanel() {
         borderTop: '1px solid #334155',
         padding: '12px 16px',
         flexShrink: 0,
-        maxHeight: 260,
+        maxHeight: 420,
         overflowY: 'auto',
       }}
     >
@@ -125,7 +128,8 @@ export function PropertyPanel() {
             {/* Selector — hidden for callFlow, goto, press */}
             {selectedNode.action.type !== 'goto' &&
               selectedNode.action.type !== 'press' &&
-              selectedNode.action.type !== 'callFlow' && (
+              selectedNode.action.type !== 'callFlow' &&
+              selectedNode.action.type !== 'code' && (
               <Field label="Selector">
                 <input
                   value={selector}
@@ -169,6 +173,43 @@ export function PropertyPanel() {
                     : <>可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code></>}
                 </div>
               </Field>
+            )}
+
+            {/* Code node body */}
+            {selectedNode.action.type === 'code' && (
+              <div style={{ width: '100%' }}>
+                <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase' }}>
+                  程式碼
+                </span>
+                <textarea
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  spellCheck={false}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    minHeight: 240,
+                    resize: 'vertical',
+                    marginTop: 4,
+                    padding: '8px 10px',
+                    background: '#0f172a',
+                    border: '1px solid #334155',
+                    borderRadius: 5,
+                    color: '#e2e8f0',
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    fontFamily: 'Consolas, "Courier New", monospace',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                    tabSize: 2,
+                  }}
+                />
+                <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
+                  可用 <code style={{ color: '#7dd3fc' }}>page</code>、
+                  <code style={{ color: '#7dd3fc' }}>expect</code>、
+                  <code style={{ color: '#7dd3fc' }}>vars</code>（如 <code style={{ color: '#7dd3fc' }}>vars.account</code>）
+                </div>
+              </div>
             )}
 
             {/* callFlow: Profile Mapping */}

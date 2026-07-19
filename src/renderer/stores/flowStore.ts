@@ -48,6 +48,9 @@ interface FlowStore {
 
   // Node management
   addActionNode: (action: Action, parentId?: string | null, branchLabel?: string) => FlowNode
+  /** Add a standalone floating node at an explicit canvas position (no parent, no children).
+   *  Used by the "加入節點" dialog; the user wires it up manually afterwards. */
+  addNodeAt: (action: Action, position: NodePosition) => FlowNode
   updateNode: (nodeId: string, updates: Partial<FlowNode>) => void
   deleteNode: (nodeId: string) => void
   /** Delete the given nodes WITHOUT deleting their subtrees. Each deleted node's
@@ -330,6 +333,32 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
 
     set({ currentFlow: updatedFlow, recordingHeadId: node.id })
+    return node
+  },
+
+  addNodeAt: (action, position) => {
+    const flow = get().currentFlow
+    if (!flow) throw new Error('No active flow')
+    if (flow.nodes.some((n) => n.id === action.id)) return {} as FlowNode
+
+    const node: FlowNode = {
+      id: action.id,
+      action,
+      position,
+      parentId: null,
+      childIds: [],
+    }
+
+    const updatedFlow: Flow = {
+      ...flow,
+      nodes: [...flow.nodes, node],
+      // Only becomes root if the flow is empty; otherwise it's a floating node
+      // the user connects manually.
+      rootNodeId: flow.rootNodeId || node.id,
+      updatedAt: new Date().toISOString(),
+    }
+
+    set({ currentFlow: updatedFlow })
     return node
   },
 
@@ -830,12 +859,27 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   },
 
   deleteProject: async (projectId) => {
+    // Deleting a project deletes every flow that belongs to it (no orphaned flows left behind).
+    const allFlows = await window.electronAPI.listFlows()
+    const flowsToDelete = allFlows.filter((f) => (f.projectId ?? DEFAULT_PROJECT_ID) === projectId)
+    for (const f of flowsToDelete) {
+      await window.electronAPI.deleteFlow(f.id)
+    }
     await window.electronAPI.deleteProject(projectId)
     const list = await window.electronAPI.listProjects()
-    const { currentProject } = get()
+    const { currentProject, currentFlow } = get()
+    const currentFlowDeleted =
+      !!currentFlow && (currentFlow.projectId ?? DEFAULT_PROJECT_ID) === projectId
+    // setCurrentFlow(null) already clears currentProject/activeEnvironmentId along with
+    // selection/replay/history state, so only handle the "project open but no flow" case separately.
+    if (currentFlowDeleted) {
+      get().setCurrentFlow(null)
+    }
     set({
       projects: list,
-      ...(currentProject?.id === projectId ? { currentProject: null, activeEnvironmentId: null } : {}),
+      ...(!currentFlowDeleted && currentProject?.id === projectId
+        ? { currentProject: null, activeEnvironmentId: null }
+        : {}),
     })
   },
 

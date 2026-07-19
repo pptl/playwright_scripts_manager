@@ -12,6 +12,7 @@ import ReactFlow, {
   ReactFlowProvider,
   Connection,
   OnSelectionChangeParams,
+  useReactFlow,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 import { v4 as uuidv4 } from 'uuid'
@@ -27,6 +28,7 @@ import { GroupNode } from './GroupNode'
 import { GroupBox } from './GroupBox'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
+import { AddNodeModal } from '../AddNodeModal/AddNodeModal'
 import type { Action } from '@shared/types'
 import { computeTreeLayout } from '../../utils/treeLayout'
 import { validateExtraction, extractSubflow } from '../../utils/subflowExtraction'
@@ -57,10 +59,15 @@ function FlowCanvasInner() {
     createGroup,
     toggleGroupCollapsed,
     ungroupGroup,
+    addNodeAt,
   } = useFlowStore()
   const { replayToNode, startBranchRecording } = usePlaywright()
+  const { screenToFlowPosition } = useReactFlow()
   const [contextMenu, setContextMenu] = useState<{ nodeId: string; x: number; y: number } | null>(null)
   const [callFlowModal, setCallFlowModal] = useState<{ mode: 'insertBefore' | 'appendAfter'; targetNodeId: string } | null>(null)
+  // Empty-canvas right-click menu + "加入節點" dialog. flowX/flowY = canvas coords where the node lands.
+  const [paneMenu, setPaneMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null)
+  const [addNodeModal, setAddNodeModal] = useState<{ flowX: number; flowY: number } | null>(null)
 
   // Multi-select state (local — PropertyPanel/context menu still use Zustand selectedNodeId)
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set())
@@ -274,8 +281,19 @@ function FlowCanvasInner() {
   const onPaneClick = useCallback(() => {
     selectNode(null)
     setContextMenu(null)
+    setPaneMenu(null)
     setSelectedNodeIds(new Set())
   }, [selectNode])
+
+  const onPaneContextMenu = useCallback(
+    (event: React.MouseEvent | MouseEvent) => {
+      event.preventDefault()
+      setContextMenu(null)
+      const flow = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      setPaneMenu({ x: event.clientX, y: event.clientY, flowX: flow.x, flowY: flow.y })
+    },
+    [screenToFlowPosition],
+  )
 
   const onNodeContextMenu = useCallback(
     (event: React.MouseEvent, node: Node) => {
@@ -476,6 +494,66 @@ function FlowCanvasInner() {
         />
       )}
 
+      {/* Empty-canvas right-click menu */}
+      {paneMenu && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 1000 }}
+          onMouseDown={() => setPaneMenu(null)}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              left: paneMenu.x,
+              top: paneMenu.y,
+              background: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: 8,
+              padding: 4,
+              minWidth: 140,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div
+              onClick={() => {
+                setAddNodeModal({ flowX: paneMenu.flowX, flowY: paneMenu.flowY })
+                setPaneMenu(null)
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '8px 10px',
+                borderRadius: 6,
+                cursor: 'pointer',
+                color: '#e2e8f0',
+                fontSize: 13,
+                userSelect: 'none',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = '#334155')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              <span>➕</span>
+              <span>加入節點</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {addNodeModal && (
+        <AddNodeModal
+          onClose={() => setAddNodeModal(null)}
+          onConfirm={async (action: Action) => {
+            addNodeAt(action, { x: addNodeModal.flowX, y: addNodeModal.flowY })
+            selectNode(action.id)
+            setAddNodeModal(null)
+            const updated = useFlowStore.getState().currentFlow
+            if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
+          }}
+        />
+      )}
+
       {/* Recording indicator */}
       {isRecording && (
         <div
@@ -523,6 +601,7 @@ function FlowCanvasInner() {
         onNodeClick={onNodeClick}
         onNodeContextMenu={onNodeContextMenu}
         onPaneClick={onPaneClick}
+        onPaneContextMenu={onPaneContextMenu}
         onSelectionChange={onSelectionChange}
         onConnect={onConnect}
         onNodesDelete={() => { /* no-op: node deletion only via context menu */ }}

@@ -31,7 +31,7 @@ export default function App() {
           {currentFlow && <PropertyPanel />}
         </div>
         {selectedNodeId && (
-          <div style={{ display: 'flex', flexDirection: 'column', width: 200, flexShrink: 0, borderLeft: '1px solid #334155', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', width: 200, flexShrink: 0, borderLeft: '1px solid #334155', overflowY: 'auto', overflowX: 'hidden' }}>
             <VariableList />
             <ProfileVarList />
             <ProjectEnvVarList />

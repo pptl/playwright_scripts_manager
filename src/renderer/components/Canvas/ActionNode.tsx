@@ -17,6 +17,7 @@ const TYPE_COLORS: Record<string, string> = {
   assertText: '#22c55e',
   assertValue: '#22c55e',
   callFlow: '#f59e0b',
+  code: '#64748b',
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -33,6 +34,7 @@ const TYPE_ICONS: Record<string, string> = {
   assertText: '📝',
   assertValue: '🔢',
   callFlow: '⛓',
+  code: '</>',
 }
 
 export interface ActionNodeData {
@@ -53,7 +55,7 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
   if (nodeStatus === 'error') borderColor = '#ef4444'
 
   const borderWidth = action.isPageNavigation ? 3 : 1.5
-  const borderStyle = action.type === 'callFlow' ? 'dashed' : 'solid'
+  const borderStyle = action.type === 'callFlow' || action.type === 'code' ? 'dashed' : 'solid'
   const animation = isReplaying ? 'pulse 0.8s infinite' : 'none'
 
   return (
@@ -168,6 +170,29 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
           </div>
         )
       })()}
+
+      {action.type === 'code' && action.code && (
+        <pre
+          style={{
+            fontSize: 10,
+            color: '#94a3b8',
+            marginTop: 4,
+            marginBottom: 0,
+            padding: '4px 6px',
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: 4,
+            maxHeight: 54,
+            overflow: 'hidden',
+            fontFamily: 'Consolas, "Courier New", monospace',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-all',
+          }}
+          title={action.code}
+        >
+          {action.code.split('\n').slice(0, 3).join('\n')}
+        </pre>
+      )}
 
       {action.type !== 'callFlow' && action.selector && (
         <div

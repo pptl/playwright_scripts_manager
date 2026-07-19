@@ -31,6 +31,13 @@ function createWindow(): BrowserWindow {
 
   win.on('ready-to-show', () => {
     win.show()
+    // Windows can deny SetForegroundWindow if too much time passed since the
+    // launching terminal's last keystroke (common on a cold boot, when GPU/AV
+    // warmup slows startup past the OS's foreground grace period). Toggling
+    // alwaysOnTop uses a different focus path that isn't subject to that lock.
+    win.setAlwaysOnTop(true)
+    win.focus()
+    win.setAlwaysOnTop(false)
   })
 
   return win

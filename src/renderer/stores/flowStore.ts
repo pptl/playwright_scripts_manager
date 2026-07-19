@@ -859,12 +859,27 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   },
 
   deleteProject: async (projectId) => {
+    // Deleting a project deletes every flow that belongs to it (no orphaned flows left behind).
+    const allFlows = await window.electronAPI.listFlows()
+    const flowsToDelete = allFlows.filter((f) => (f.projectId ?? DEFAULT_PROJECT_ID) === projectId)
+    for (const f of flowsToDelete) {
+      await window.electronAPI.deleteFlow(f.id)
+    }
     await window.electronAPI.deleteProject(projectId)
     const list = await window.electronAPI.listProjects()
-    const { currentProject } = get()
+    const { currentProject, currentFlow } = get()
+    const currentFlowDeleted =
+      !!currentFlow && (currentFlow.projectId ?? DEFAULT_PROJECT_ID) === projectId
+    // setCurrentFlow(null) already clears currentProject/activeEnvironmentId along with
+    // selection/replay/history state, so only handle the "project open but no flow" case separately.
+    if (currentFlowDeleted) {
+      get().setCurrentFlow(null)
+    }
     set({
       projects: list,
-      ...(currentProject?.id === projectId ? { currentProject: null, activeEnvironmentId: null } : {}),
+      ...(!currentFlowDeleted && currentProject?.id === projectId
+        ? { currentProject: null, activeEnvironmentId: null }
+        : {}),
     })
   },
 

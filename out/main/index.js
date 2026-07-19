@@ -2412,6 +2412,9 @@ function createWindow() {
   }
   win.on("ready-to-show", () => {
     win.show();
+    win.setAlwaysOnTop(true);
+    win.focus();
+    win.setAlwaysOnTop(false);
   });
   return win;
 }

@@ -1,5 +1,5 @@
 import type { FlowNode, FlowGroup, NodePosition } from '@shared/types'
-import { computeTreeLayout, computeAllRootsLayout, NODE_WIDTH, NODE_HEIGHT, type SizeOf } from './treeLayout'
+import { computeTreeLayout, computeAllRootsLayout, NODE_WIDTH, nodeHeightOf, type SizeOf } from './treeLayout'
 
 // Expanded-group box geometry — shared by the layout (space reservation) and the renderer
 // (GroupBox / FlowCanvas) so the drawn frame exactly matches the slot the layout reserves.
@@ -46,15 +46,16 @@ function layoutMembers(
   }))
   const positions = computeTreeLayout(memberNodes, boundary.entryId)
   if (positions.size === 0) return null
+  const memberById = new Map(members.map((m) => [m.id, m]))
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity
   let maxY = -Infinity
-  positions.forEach((p) => {
+  positions.forEach((p, id) => {
     minX = Math.min(minX, p.x)
     minY = Math.min(minY, p.y)
     maxX = Math.max(maxX, p.x + NODE_WIDTH)
-    maxY = Math.max(maxY, p.y + NODE_HEIGHT)
+    maxY = Math.max(maxY, p.y + nodeHeightOf(memberById.get(id)))
   })
   return { positions, minX, minY, width: maxX - minX, height: maxY - minY }
 }
@@ -70,7 +71,7 @@ export function groupBoxRect(members: FlowNode[]): Rect | null {
     minX = Math.min(minX, m.position.x)
     minY = Math.min(minY, m.position.y)
     maxX = Math.max(maxX, m.position.x + NODE_WIDTH)
-    maxY = Math.max(maxY, m.position.y + NODE_HEIGHT)
+    maxY = Math.max(maxY, m.position.y + nodeHeightOf(m))
   }
   const x = minX - GROUP_PAD_X
   const y = minY - GROUP_BOX_HEADER - GROUP_HEADER_GAP
@@ -161,7 +162,7 @@ export function computeGroupAwareLayout(
         }
       }
     }
-    return { width: NODE_WIDTH, height: NODE_HEIGHT }
+    return { width: NODE_WIDTH, height: nodeHeightOf(nodeById.get(id)) }
   }
 
   const viewPos = computeAllRootsLayout(view, sizeOf)

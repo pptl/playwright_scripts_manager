@@ -109,7 +109,7 @@ export function PropertyPanel() {
         borderTop: '1px solid #334155',
         padding: '12px 16px',
         flexShrink: 0,
-        maxHeight: 260,
+        maxHeight: 420,
         overflowY: 'auto',
       }}
     >
@@ -188,7 +188,7 @@ export function PropertyPanel() {
                   style={{
                     display: 'block',
                     width: '100%',
-                    minHeight: 120,
+                    minHeight: 240,
                     resize: 'vertical',
                     marginTop: 4,
                     padding: '8px 10px',

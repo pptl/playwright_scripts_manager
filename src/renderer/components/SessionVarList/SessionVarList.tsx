@@ -73,7 +73,8 @@ export function SessionVarList() {
         borderTop: '1px solid #334155',
         display: 'flex',
         flexDirection: 'column',
-        flex: 1,
+        flexShrink: 0,
+        maxHeight: 220,
         overflow: 'hidden',
       }}
     >

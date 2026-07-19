@@ -5,27 +5,38 @@ export const NODE_HEIGHT = 70
 export const H_MARGIN = 25
 export const V_GAP = 30
 
+/** Extra height to reserve for a `code` action node's inline code preview
+ *  (ActionNode renders a <pre> capped at 54px tall, plus its margin/padding/border) so
+ *  relayout doesn't place the next row on top of it. Keep in sync with ActionNode.tsx. */
+export const CODE_PREVIEW_EXTRA_HEIGHT = 68
+
+/** Node-content-aware height: taller for `code` nodes with a code preview, standard otherwise. */
+export function nodeHeightOf(node: FlowNode | undefined): number {
+  if (node?.action.type === 'code' && node.action.code) return NODE_HEIGHT + CODE_PREVIEW_EXTRA_HEIGHT
+  return NODE_HEIGHT
+}
+
 export interface NodeSize {
   width: number
   height: number
 }
 
-/** Per-node footprint used by the layout. Defaults to the standard action-node size.
+/** Per-node footprint used by the layout. Defaults to the content-aware action-node size.
  *  An expanded group passes its full box footprint here so the tree reserves space for it. */
 export type SizeOf = (nodeId: string) => NodeSize
-const defaultSizeOf: SizeOf = () => ({ width: NODE_WIDTH, height: NODE_HEIGHT })
 
 export function computeTreeLayout(
   nodes: FlowNode[],
   rootNodeId: string,
-  sizeOf: SizeOf = defaultSizeOf,
+  sizeOf?: SizeOf,
 ): Map<string, NodePosition> {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+  const resolvedSizeOf: SizeOf = sizeOf ?? ((id) => ({ width: NODE_WIDTH, height: nodeHeightOf(nodeMap.get(id)) }))
   const positions = new Map<string, NodePosition>()
 
   function subtreeWidth(nodeId: string): number {
     const node = nodeMap.get(nodeId)
-    const w = sizeOf(nodeId).width
+    const w = resolvedSizeOf(nodeId).width
     if (!node || node.childIds.length === 0) return w
     const childWidths = node.childIds.map(subtreeWidth)
     const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN
@@ -33,7 +44,7 @@ export function computeTreeLayout(
   }
 
   function place(nodeId: string, centerX: number, y: number) {
-    const { width, height } = sizeOf(nodeId)
+    const { width, height } = resolvedSizeOf(nodeId)
     positions.set(nodeId, { x: centerX - width / 2, y })
     const node = nodeMap.get(nodeId)
     if (!node || node.childIds.length === 0) return
@@ -64,8 +75,10 @@ export const TREE_H_GAP = 80
  */
 export function computeAllRootsLayout(
   nodes: FlowNode[],
-  sizeOf: SizeOf = defaultSizeOf,
+  sizeOf?: SizeOf,
 ): Map<string, NodePosition> {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]))
+  const resolvedSizeOf: SizeOf = sizeOf ?? ((id) => ({ width: NODE_WIDTH, height: nodeHeightOf(nodeMap.get(id)) }))
   const result = new Map<string, NodePosition>()
   const roots = nodes
     .filter((n) => n.parentId === null)
@@ -73,13 +86,13 @@ export function computeAllRootsLayout(
 
   let xCursor = 0
   const placeTree = (rootId: string) => {
-    const treePos = computeTreeLayout(nodes, rootId, sizeOf)
+    const treePos = computeTreeLayout(nodes, rootId, resolvedSizeOf)
     if (treePos.size === 0) return
     let minX = Infinity
     let maxRight = -Infinity
     treePos.forEach((p, id) => {
       if (p.x < minX) minX = p.x
-      const right = p.x + sizeOf(id).width
+      const right = p.x + resolvedSizeOf(id).width
       if (right > maxRight) maxRight = right
     })
     const shift = xCursor - minX

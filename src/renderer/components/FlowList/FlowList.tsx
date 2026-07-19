@@ -87,7 +87,7 @@ export function FlowList() {
   }
 
   const handleDeleteProject = async (projectId: string, projectName: string) => {
-    if (!window.confirm(`刪除專案「${projectName}」？\n此專案中的流程將移至「未分類」。`)) return
+    if (!window.confirm(`刪除專案「${projectName}」？\n此專案中的所有流程也將一併刪除，且無法復原。`)) return
     await deleteProject(projectId)
     await refreshFlowList()
   }

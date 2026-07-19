@@ -18,6 +18,8 @@ export function VariableList() {
         display: 'flex',
         flexDirection: 'column',
         flexShrink: 0,
+        maxHeight: 220,
+        overflow: 'hidden',
       }}
     >
       <div
@@ -29,12 +31,13 @@ export function VariableList() {
           fontWeight: 600,
           textTransform: 'uppercase',
           letterSpacing: '0.06em',
+          flexShrink: 0,
         }}
       >
         全域變數
       </div>
 
-      <div>
+      <div style={{ overflowY: 'auto', flex: 1 }}>
         {BUILT_IN_VARIABLES.map((v) => (
           <div
             key={v.name}

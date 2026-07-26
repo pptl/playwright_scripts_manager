@@ -1,5 +1,6 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
+import { DOMAIN_ENV_KEY } from '@shared/types'
 import type { FlowProfile } from '@shared/types'
 
 interface ProfileEditorModalProps {
@@ -34,10 +35,32 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameInput, setRenameInput] = useState('')
 
+  // Project env var reference popover (collapsed by default — never steals height from the table)
+  const [envPopoverAnchor, setEnvPopoverAnchor] = useState<DOMRect | null>(null)
+  const [envSearch, setEnvSearch] = useState('')
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const [copiedMode, setCopiedMode] = useState<'insert' | 'copy'>('copy')
+
+  const envBtnRef = useRef<HTMLButtonElement | null>(null)
+  const envPopoverRef = useRef<HTMLDivElement | null>(null)
+  const valueInputRefs = useRef<(HTMLInputElement | null)[]>([])
+  /** Caret position of the last-focused value input, so a picked env var can be inserted there.
+   *  Stamped with the owning profile so a pick can never land in a different profile's row. */
+  const lastValueCaret = useRef<{ profileId: string; index: number; start: number; end: number } | null>(null)
+
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId) ?? profiles[0] ?? null
   const activeEnvName = environments.find((e) => e.id === activeEnvironmentId)?.name
 
   // ── Profile list actions ──────────────────────────────────
+
+  /** Switching profiles invalidates the remembered caret — it points at the old profile's row.
+   *  Blur first: React rewrites the focused value input's `value` during the re-render, which
+   *  fires a `select` event that would otherwise re-arm the caret we just cleared. */
+  const selectProfile = (id: string) => {
+    if (document.activeElement instanceof HTMLInputElement) document.activeElement.blur()
+    lastValueCaret.current = null
+    setSelectedProfileId(id)
+  }
 
   const handleAddProfile = async () => {
     const name = newProfileName.trim()
@@ -45,7 +68,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     await addProfile(name)
     const updated = useFlowStore.getState().currentFlow?.profiles ?? []
     const last = updated[updated.length - 1]
-    if (last) setSelectedProfileId(last.id)
+    if (last) selectProfile(last.id)
     setNewProfileName('')
     setAddingProfile(false)
   }
@@ -61,14 +84,15 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     await duplicateProfile(id)
     const updated = useFlowStore.getState().currentFlow?.profiles ?? []
     const last = updated[updated.length - 1]
-    if (last) setSelectedProfileId(last.id)
+    if (last) selectProfile(last.id)
   }
 
   const handleDeleteProfile = async (id: string) => {
     const nextProfile = profiles.find((p) => p.id !== id)
     await deleteProfile(id)
+    lastValueCaret.current = null
     if (selectedProfileId === id && nextProfile) {
-      setSelectedProfileId(nextProfile.id)
+      selectProfile(nextProfile.id)
     }
   }
 
@@ -87,6 +111,83 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     })
     updateProfile(selectedProfile.id, { vars: newVars })
   }
+
+  // ── Project env var picker ────────────────────────────────
+
+  const rememberCaret = (index: number, el: HTMLInputElement) => {
+    if (!selectedProfile) return
+    lastValueCaret.current = {
+      profileId: selectedProfile.id,
+      index,
+      start: el.selectionStart ?? el.value.length,
+      end: el.selectionEnd ?? el.value.length,
+    }
+  }
+
+  const envVarValueFor = (ev: { values: Record<string, string> }) =>
+    activeEnvironmentId ? (ev.values[activeEnvironmentId] ?? '') : ''
+
+  const visibleEnvVars = (() => {
+    const q = envSearch.trim().toLowerCase()
+    if (!q) return projectEnvVars
+    return projectEnvVars.filter(
+      (ev) =>
+        ev.key.toLowerCase().includes(q) || envVarValueFor(ev).toLowerCase().includes(q),
+    )
+  })()
+
+  /** Insert {{key}} at the last-focused value input's caret; fall back to the clipboard. */
+  const handlePickEnvVar = (key: string) => {
+    const token = `{{${key}}}`
+    const caret = lastValueCaret.current
+    const vars = selectedProfile?.vars ?? []
+
+    if (caret && caret.profileId === selectedProfile?.id && caret.index < vars.length) {
+      const v = vars[caret.index]
+      const current = activeEnvironmentId ? (v.envValues?.[activeEnvironmentId] ?? '') : v.value
+      handleVarField(caret.index, 'value', current.slice(0, caret.start) + token + current.slice(caret.end))
+      const pos = caret.start + token.length
+      lastValueCaret.current = { index: caret.index, start: pos, end: pos }
+      requestAnimationFrame(() => {
+        const el = valueInputRefs.current[caret.index]
+        el?.focus()
+        el?.setSelectionRange(pos, pos)
+      })
+      setCopiedMode('insert')
+    } else {
+      navigator.clipboard?.writeText(token)
+      setCopiedMode('copy')
+    }
+    setCopiedKey(key)
+    setTimeout(() => setCopiedKey(null), 1500)
+  }
+
+  const closeEnvPopover = () => {
+    setEnvPopoverAnchor(null)
+    setEnvSearch('')
+  }
+
+  // Dismiss the popover on outside click / Escape (this modal has no Escape handler of its own)
+  useEffect(() => {
+    if (!envPopoverAnchor) return
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (envPopoverRef.current?.contains(target) || envBtnRef.current?.contains(target)) return
+      closeEnvPopover()
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        closeEnvPopover()
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [envPopoverAnchor])
 
   // ── Render ────────────────────────────────────────────────
 
@@ -107,7 +208,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
           background: '#1e293b',
           border: '1px solid #334155',
           borderRadius: 12,
-          width: 780,
+          width: 960,
           maxHeight: '80vh',
           display: 'flex',
           flexDirection: 'column',
@@ -167,7 +268,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                 return (
                   <div
                     key={p.id}
-                    onClick={() => { if (!isRenaming) setSelectedProfileId(p.id) }}
+                    onClick={() => { if (!isRenaming) selectProfile(p.id) }}
                     style={{
                       padding: '8px 12px',
                       background: isSelected ? '#1e3a5f' : 'transparent',
@@ -335,59 +436,149 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       的變數（可用 {'{{key}}'} 引用）
                     </span>
                   </div>
-                  <button
-                    onClick={() => {
-                      setActiveProfile(selectedProfile.id)
-                      onClose()
-                    }}
-                    style={{
-                      padding: '4px 12px',
-                      borderRadius: 4,
-                      border: 'none',
-                      background: activeProfileId === selectedProfile.id ? '#374151' : '#3b82f6',
-                      color: activeProfileId === selectedProfile.id ? '#6b7280' : '#fff',
-                      fontSize: 12,
-                      cursor: activeProfileId === selectedProfile.id ? 'default' : 'pointer',
-                    }}
-                  >
-                    {activeProfileId === selectedProfile.id ? '目前使用中' : '切換為此配置'}
-                  </button>
-                </div>
-
-                {/* Project env var reference hint — click a chip to copy {{key}} */}
-                {projectEnvVars.length > 0 && (
-                  <div
-                    style={{
-                      padding: '6px 16px',
-                      borderBottom: '1px solid #334155',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      flexWrap: 'wrap',
-                      flexShrink: 0,
-                    }}
-                  >
-                    <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>
-                      🌐 專案環境變數（點擊複製引用）:
-                    </span>
-                    {projectEnvVars.map((ev) => (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {projectEnvVars.length > 0 && (
                       <button
-                        key={ev.key}
-                        onClick={() => navigator.clipboard?.writeText(`{{${ev.key}}}`)}
-                        title={`複製 {{${ev.key}}}`}
+                        ref={envBtnRef}
+                        onClick={() =>
+                          envPopoverAnchor
+                            ? closeEnvPopover()
+                            : setEnvPopoverAnchor(envBtnRef.current?.getBoundingClientRect() ?? null)
+                        }
+                        title={`瀏覽專案環境變數，點擊插入或複製 ${'{{key}}'}`}
                         style={{
-                          padding: '2px 8px',
-                          borderRadius: 10,
-                          border: '1px solid #166534',
-                          background: '#14532d',
-                          color: '#4ade80',
-                          fontSize: 11,
-                          cursor: 'pointer',
+                          ...envRefBtnStyle,
+                          ...(envPopoverAnchor ? { borderColor: '#4ade80' } : {}),
                         }}
                       >
-                        {`{{${ev.key}}}`}
+                        🌐 專案環境變數 ({projectEnvVars.length}) {envPopoverAnchor ? '▴' : '▾'}
                       </button>
-                    ))}
+                    )}
+                    <button
+                      onClick={() => {
+                        setActiveProfile(selectedProfile.id)
+                        onClose()
+                      }}
+                      style={{
+                        padding: '4px 12px',
+                        borderRadius: 4,
+                        border: 'none',
+                        background: activeProfileId === selectedProfile.id ? '#374151' : '#3b82f6',
+                        color: activeProfileId === selectedProfile.id ? '#6b7280' : '#fff',
+                        fontSize: 12,
+                        cursor: activeProfileId === selectedProfile.id ? 'default' : 'pointer',
+                      }}
+                    >
+                      {activeProfileId === selectedProfile.id ? '目前使用中' : '切換為此配置'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Project env var picker — `fixed` so the right column's overflow:hidden can't clip it */}
+                {envPopoverAnchor && (
+                  <div
+                    ref={envPopoverRef}
+                    style={{
+                      position: 'fixed',
+                      top: envPopoverAnchor.bottom + 4,
+                      left: Math.max(8, envPopoverAnchor.right - 340),
+                      width: 340,
+                      zIndex: 2100,
+                      background: '#1e293b',
+                      border: '1px solid #334155',
+                      borderRadius: 8,
+                      boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: '8px 10px',
+                        borderBottom: '1px solid #334155',
+                        flexShrink: 0,
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        value={envSearch}
+                        onChange={(e) => setEnvSearch(e.target.value)}
+                        placeholder="🔍 搜尋變數…"
+                        style={cellInputStyle}
+                      />
+                      <div style={{ fontSize: 10, color: '#64748b', marginTop: 5 }}>
+                        {lastValueCaret.current?.profileId === selectedProfile.id
+                          ? '點擊插入至編輯中的「值」欄位'
+                          : `點擊複製 ${'{{key}}'}（先點一個「值」欄位可直接插入）`}
+                      </div>
+                    </div>
+
+                    <div style={{ overflowY: 'auto', maxHeight: 240 }}>
+                      {visibleEnvVars.map((ev) => {
+                        const value = envVarValueFor(ev)
+                        return (
+                          <div
+                            key={ev.key}
+                            onClick={() => handlePickEnvVar(ev.key)}
+                            title={`{{${ev.key}}}`}
+                            style={{
+                              padding: '6px 10px',
+                              cursor: 'pointer',
+                              borderBottom: '1px solid #0f172a',
+                              userSelect: 'none',
+                            }}
+                            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#08140c' }}
+                            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <code
+                                style={{
+                                  fontSize: 11,
+                                  background: '#0f172a',
+                                  color: '#4ade80',
+                                  padding: '1px 5px',
+                                  borderRadius: 3,
+                                  border: '1px solid #166534',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {`{{${ev.key}}}`}
+                              </code>
+                              {ev.key === DOMAIN_ENV_KEY && (
+                                <span style={{ fontSize: 10 }} title="保留變數">🔒</span>
+                              )}
+                              <div style={{ flex: 1 }} />
+                              {copiedKey === ev.key && (
+                                <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>
+                                  {copiedMode === 'insert' ? '已插入' : '已複製'}
+                                </span>
+                              )}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 10,
+                                color: value ? '#78716c' : '#475569',
+                                marginTop: 2,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {activeEnvironmentId ? (value || '(空)') : '—'}
+                            </div>
+                          </div>
+                        )
+                      })}
+
+                      {visibleEnvVars.length === 0 && (
+                        <div style={{ padding: 12, fontSize: 11, color: '#64748b' }}>
+                          找不到符合的變數
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -431,7 +622,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   <div
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: '1fr 1fr 1fr 32px',
+                      gridTemplateColumns: gridCols,
                       gap: 8,
                       padding: '4px 16px 8px',
                       borderBottom: '1px solid #0f172a',
@@ -454,7 +645,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       key={i}
                       style={{
                         display: 'grid',
-                        gridTemplateColumns: '1fr 1fr 1fr 32px',
+                        gridTemplateColumns: gridCols,
                         gap: 8,
                         padding: '5px 16px',
                         alignItems: 'center',
@@ -468,8 +659,11 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         title="修改參數名稱將同步至所有配置"
                       />
                       <input
+                        ref={(el) => { valueInputRefs.current[i] = el }}
                         value={displayValue}
-                        onChange={(e) => handleVarField(i, 'value', e.target.value)}
+                        onChange={(e) => { rememberCaret(i, e.currentTarget); handleVarField(i, 'value', e.target.value) }}
+                        onFocus={(e) => rememberCaret(i, e.currentTarget)}
+                        onSelect={(e) => rememberCaret(i, e.currentTarget)}
                         placeholder={activeEnvironmentId ? `預設: ${v.value || '(空)'}` : 'value'}
                         style={{
                           ...cellInputStyle,
@@ -554,6 +748,20 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
       </div>
     </div>
   )
+}
+
+/** 參數名稱 / 值 / 敘述 / 🗑 — the value column is weighted since it holds long URLs and tokens. */
+const gridCols = '1fr 1.3fr 1fr 32px'
+
+const envRefBtnStyle: React.CSSProperties = {
+  padding: '3px 10px',
+  borderRadius: 4,
+  border: '1px solid #166534',
+  background: '#14532d',
+  color: '#4ade80',
+  fontSize: 11,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
 }
 
 const inlineInputStyle: React.CSSProperties = {

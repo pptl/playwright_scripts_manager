@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **FlowTest** is an Electron desktop app that records user interactions as a visual branching flow graph, then generates Playwright `.spec.ts` test suites. The core innovation is "branch recording": silently replay to any previously-recorded node, then continue recording from that exact browser state — turning a 30-step flow into 5 new steps when testing a different path.
 
-Beyond recording, the app is a full visual flow editor: drag-to-reposition, drag-to-connect/disconnect nodes, multi-select, undo/redo, collapsible visual groups, sub-flow extraction/embedding, environment profiles, and project-level environment overrides.
+Beyond recording, the app is a full visual flow editor: drag-to-reposition, drag-to-connect/disconnect nodes, multi-select, undo/redo, collapsible visual groups, sub-flow extraction/embedding, environment profiles, project-level environment overrides, and hand-written `code` nodes as an escape hatch for anything recording can't express.
 
 ## Project Stage
 
@@ -37,6 +37,7 @@ ipcHandlers.ts                 preload/index.ts       App.tsx
   ├── CodegenCapture                                          useUndoRedo, useFlowStore, useRecording)
   ├── FlowStorage                                       Canvas utils (treeLayout, groups, subflowExtraction)
   ├── ProjectStorage
+  ├── FixtureStorage
   └── ScriptExporter
 ```
 
@@ -53,8 +54,14 @@ Singletons `browserController`, `recorder`, `replayer` are module-level in `ipcH
 
 ### Key data types (`src/shared/types.ts`)
 
-- **`ActionType`** — 13 variants: `goto | click | fill | selectOption | check | uncheck | press | upload | wait | assertVisible | assertText | assertValue | callFlow`
-- **`Action`** — one browser interaction: `type`, `locatorExpr` (high-quality Playwright locator), `selector` (CSS fallback), `value`, `captureAs` (optional session variable name), `description`, `url`, `isPageNavigation`, optional `assertion`. Upload actions carry `filePaths?: string[]` (authoritative over the comma-joined `value`). For `callFlow` actions: `subFlowId`, `subFlowExitNodeId`, `subFlowProfileMapping?: Record<parentProfileId, subFlowProfileId | null>`, legacy `subFlowProfileId` / `subFlowProfileName` (for single-parent badge display). `isCallFlowAction(action)` is a type guard.
+- **`ActionType`** — 14 variants: `goto | click | fill | selectOption | check | uncheck | press | upload | wait | assertVisible | assertText | assertValue | callFlow | code`
+- **`Action`** — one browser interaction: `type`, `locatorExpr` (high-quality Playwright locator), `selector` (CSS fallback), `value`, `captureAs` (optional session variable name), `description`, `url`, `isPageNavigation`, optional `assertion`. Type-specific fields:
+  - **click** — `button?: 'left'|'right'|'middle'`, `modifiers?: string[]` (Playwright names), `clickCount?` (2 = replayed/exported as `dblclick`)
+  - **selectOption** — `values?: string[]` for `<select multiple>` (takes precedence over `value`)
+  - **upload** — `filePaths?: string[]` (authoritative over the comma-joined `value`)
+  - **callFlow** — `subFlowId`, `subFlowExitNodeId`, `subFlowProfileMapping?: Record<parentProfileId, subFlowProfileId | null>`, legacy `subFlowProfileId` / `subFlowProfileName` (for single-parent badge display). `isCallFlowAction(action)` is a type guard.
+  - **code** — `code?: string`, a raw Playwright/JS body run with `(page, expect, vars)` in scope
+  - **multi-page / iframe (any type)** — `pageAlias?` (absent = initial page; popups get `page1`, `page2`…), `framePath?: string[]` (iframe locator expressions, top → innermost; scoped via `.contentFrame()` chains), `opensPage?` (the alias of the page this action opened)
 - **`Assertion`** — `type` (`text|visible|url|count`), optional `target` selector, `expected` value
 - **`FlowNode`** — `Action` + canvas `position` + `parentId` + `childIds[]` + optional `branchLabel` + optional `groupId` (membership in a visual group)
 - **`FlowGroup`** — `{ id, name, collapsed }` — an in-place collapsible group of contiguous nodes (single entry, single exit). **Pure canvas-display construct** — never creates a separate Flow, never enters the flow list. Membership recorded via `FlowNode.groupId`.
@@ -70,12 +77,13 @@ Singletons `browserController`, `recorder`, `replayer` are module-level in `ipcH
 - **`ExportConfig`** — `outputDir`, `helperFunctions`, `useTestStep`, `profileVars?` (active profile's flat key-value map), `activeProfileId?`, `activeEnvironmentId?`, `envVars?` (flattened project env vars for the active env), `activeProjectId?`
 - **`ReplayToNodePayload`** — `nodes`, `targetNodeId`, `speed`, `baseURL?`, `profileVars?`, `activeProfileId?`, `activeEnvironmentId?`, `envVars?`, `activeProjectId?`
 - **`LocatorOption` / `LocatorPickPayload`** — Cell-vs-Row locator alternatives for repeated table/list items
+- **`ActionUpdatedPayload`** — `{ actionId, updates: Partial<Action> }` — retroactively patches an already-captured action (used when a popup arrives after its triggering click was emitted)
 
 ### IPC channels (`src/shared/types.ts` → `IPC_CHANNELS`)
 
 **Renderer → Main (22):** `BROWSER_LAUNCH`, `BROWSER_CLOSE`, `RECORDING_START`, `RECORDING_STOP`, `REPLAY_TO_NODE`, `REPLAY_STOP`, `FLOW_SAVE`, `FLOW_LOAD`, `FLOW_LIST`, `FLOW_DELETE`, `FLOW_GET` (one flow JSON by ID), `FLOW_CHECK_CYCLE` (validate adding a callFlow won't create a circular reference — recursively walks the sub-flow's callFlow graph), `EXPORT_SCRIPTS`, `RUN_TESTS`, `SHOW_REPORT` (spawn `npx playwright show-report`; kills any process on port 9323 first), `PROJECT_SAVE`, `PROJECT_LOAD`, `PROJECT_LIST`, `PROJECT_DELETE`, `START_ASSERTION_PICK`, `LOCATOR_PICK_RESOLVED`, `PICK_FILES` (native open dialog; copies picks into `fixtures/` and returns their stored paths)
 
-**Main → Renderer (10):** `ACTION_CAPTURED`, `ACTION_REMOVED` (un-record a node — the click that opened a file chooser), `REPLAY_NODE_START`, `REPLAY_NODE_COMPLETE`, `REPLAY_FINISHED`, `REPLAY_ERROR`, `TEST_OUTPUT`, `TEST_FINISHED`, `ASSERTION_PICK_CANCELLED`, `LOCATOR_PICK_NEEDED` (legacy — the locator picker now renders in-browser)
+**Main → Renderer (11):** `ACTION_CAPTURED`, `ACTION_UPDATED` (retro-patch fields of an already-emitted action — e.g. stamping `opensPage` when the popup arrives late), `ACTION_REMOVED` (un-record a node — the click that opened a file chooser), `REPLAY_NODE_START`, `REPLAY_NODE_COMPLETE`, `REPLAY_FINISHED`, `REPLAY_ERROR`, `TEST_OUTPUT`, `TEST_FINISHED`, `ASSERTION_PICK_CANCELLED`, `LOCATOR_PICK_NEEDED` (legacy — the locator picker now renders in-browser)
 
 ### Recording pipeline
 
@@ -91,9 +99,22 @@ Singletons `browserController`, `recorder`, `replayer` are module-level in `ipcH
 - **Fill** — `focus`/`blur` pair captures final value on text inputs **and `contentEditable`** elements.
 - **SelectOption** — native `<select>` `change` event; captures `value` and display text.
 - **Press** — mirrors Playwright's `_shouldGenerateKeyPressFor`: records `Tab`, `Enter` (outside textarea/contentEditable), `Escape`, arrow/function keys, modifier+char combos. Skips `Backspace`, `Delete`, paste shortcuts, bare modifier keys, and single printable chars without modifiers.
+- **Mouse variants** — `dblclick` (`clickCount: 2`), `contextmenu` (right button) and `auxclick` (middle button) are recorded alongside plain clicks; modifier keys held during a click become `modifiers`. The raw `detail >= 2` clicks that make up a double-click are dropped in favour of the `dblclick` event.
 - **Table cell detection** — when a click lands inside a `<tr>`, two `alternativeLocators` are offered (Cell-by-content vs Row-by-nth-position, scoped to the right `<table>`/section), triggering the in-browser locator picker (see below).
 
-`CodegenCapture` buffers `isInputClick` clicks and discards them if a fill on the same element follows (`flushPendingInputClick`).
+`CodegenCapture` keeps a **one-slot action buffer**: `isInputClick` clicks wait indefinitely and are discarded if a fill on the same element follows (`flushPendingInputClick`); plain left clicks wait `DBLCLICK_MERGE_MS = 350` for a possible `dblclick` to merge into (and so a popup event can stamp `opensPage` before emission).
+
+#### Multi-page (popup) recording
+
+`CodegenCapture` listens on the context's `page` event. Each new page gets an alias (`page1`, `page2`…; the initial page maps to `''` and its actions carry no `pageAlias`), gets the same scripts injected, and its first navigation is nav-suppressed. The action that opened it is stamped with `opensPage`:
+- if it is still in the dblclick buffer, the field is set before emission;
+- if it was already emitted within `OPENS_PAGE_WINDOW_MS = 1000`, `ACTION_UPDATED` retro-patches the node in the renderer.
+
+`Replayer` awaits `context.waitForEvent('page')` around such actions; `ScriptExporter` emits the official `const pageNPromise = page.waitForEvent('popup'); … ; const pageN = await pageNPromise;` pattern (and imports `Page` when a popup alias must be hoisted).
+
+#### iframe recording
+
+`frameLocatorChain()` builds the iframe locator chain (top → innermost) for the frame an event came from, cached per `Frame` and invalidated on detach/navigation. When the frame element can't be resolved it degrades to `iframe[name="…"]` / `iframe[src="…"]`. The chain is stored on `action.framePath` and **never baked into `locatorExpr`** — `Replayer.scopeFor()` folds it into `page → frameLocator` hops via `.contentFrame()`, and `ScriptExporter` emits the same chain. Top-frame-only UI (assertion dock, cursor highlight, locator picker) is wrapped by `topFrameOnly()` since context init scripts run in every frame.
 
 ### File upload recording (`fixtures/`)
 
@@ -121,6 +142,8 @@ Assertion picking is driven by an **in-browser dock** injected during recording 
 ### Replay pipeline
 
 `Replayer.replayToNode()` walks `parentId` pointers from the target node up to the root (cycle-guarded) to build an ordered path, then executes each `Action` sequentially. A yellow cursor-highlight dot is injected (`getCursorHighlightScript`). Assertions support `text`, `visible`, `url`, `count` with a 10 s timeout. Each step fires `REPLAY_NODE_START` / `REPLAY_NODE_COMPLETE` to drive canvas status badges.
+
+Each action resolves its target through two hops: `pageFor(action)` picks the page by `pageAlias` (relaunching a closed one is not possible — a missing page is an error), then `scopeFor(action)` folds `framePath` into `.contentFrame()` hops. `getLocator()` evaluates `locatorExpr` against that scope with `new Function`, falling back to `scope.locator(selector)`. Clicks honour `button` / `modifiers` / `clickCount` (≥2 → `dblclick`); `selectOption` prefers `values[]`; `press` uses `keyboard.press()` when there is no locator; `code` nodes run through `AsyncFunction` with `(page, expect, vars)`.
 
 `Replayer` constructor: `(page, baseURL = '', profileVars?, activeProfileId?, activeEnvironmentId?, envVars?, activeProjectId?, sharedPages?)`. The **project environment variable** `domain` (`envVars['domain']`, trailing slash stripped) drives goto URL origin substitution — if a goto URL's origin matches `baseURL`'s origin, it is replaced with that domain. `activeProfileId` + `activeEnvironmentId` let the replayer resolve `subFlowProfileMapping` and `envValues` on `callFlow` nodes at any nesting depth; `activeProjectId` gates env-var resolution to the active project. `executeCallFlow()` loads the sub-flow, resolves its profile, builds a nested `Replayer` (passing same-project-gated `envVars`), and merges captured session vars back up.
 
@@ -158,6 +181,15 @@ With `useTestStep`, each action is wrapped in its own `test.step('…', async ()
 
 If an `assertText` node's `value` is a pure session-var reference (`{{varName}}`, with `varName` already defined) and `action.selector` exists, `actionToCode()` emits `page.locator(selector).filter({ hasText: valueExpr })` instead of the stale recording-time `locatorExpr` (which embedded the captured text). `assertValue` is unaffected.
 
+### Code nodes
+
+A `code` action holds a raw Playwright/JS body — the escape hatch for loops, conditionals and anything the recorder can't express. Created from the **canvas pane context menu → 加入節點** (`AddNodeModal`), which lands a **floating** node (no parent/child) at the click position via `addNodeAt()`; the user wires it up manually.
+
+Three names are in scope: **`page`** (the action's page), **`expect`** (Playwright's), and **`vars`**. `Replayer.buildCodeVars()` builds `vars` as `{...envVars, ...profileVars}` overlaid with session vars (session wins), plus the 5 built-ins exposed as **functions** (`vars.randomText()`) so each call yields a fresh value. `AddNodeModal` lists every available name with its origin (內建 / 環境配置 / 專案環境 / 區域); click to copy.
+
+- **Replay**: `new AsyncFunction('page', 'expect', 'vars', action.code)`.
+- **Export**: the body is inlined verbatim, preceded by a generated `const vars = { … }` literal — profile keys reference `_ftProf_*` (or are inlined as literals inside sub-flows), built-ins reference the `VARIABLE_HELPERS_CODE` helpers, so those helpers are always emitted when a code node is present.
+
 ### Environment Profiles system
 
 Each flow has `profiles?: FlowProfile[]`. A profile is a named set of `ProfileVariable` entries. Switching the active profile swaps all `{{key}}` resolutions at once.
@@ -182,8 +214,8 @@ Projects add a layer **above** flows for managing environment-specific variable 
 - `ProjectEnvVar` = `{ key, values: Record<envId, string>, description? }`, flattened for the active environment by `flattenProjectEnvVars`.
 - The **active environment** (`activeEnvironmentId` in the store) + **active project** (`activeProjectId` = `currentProject.id`) are threaded through replay, branch recording, and export, and used by `Replayer`/`ScriptExporter`/`usePlaywright`/`Toolbar` when building `profileVars`/`envVars`. Env-var references resolve only when the flow belongs to the active project (v1: no cross-project references).
 - Storage: projects live as `projects/{id}.json` (`ProjectStorage`), separate from flows.
-- Store actions: `createProject`, `addEnvironmentToProject`, `renameEnvironment`, `deleteEnvironment`, `deleteProject`, `assignFlowToProject`, `setActiveEnvironment`, `setCurrentProject`, and project-env-var actions `addProjectEnvVar` / `renameProjectEnvVarKey` / `deleteProjectEnvVar` / `setProjectEnvVarValue`. `openFlow` loads the owning project (default if none) and picks a sensible active environment (first env by default).
-- **UI:** `FlowList` groups flows by project (📁 headers, 未分類 last); the "新增專案" dialog collects 專案名稱 + 環境名稱 (DEV) + domain. The "新增流程" dialog collects 歸類至專案 (first) + 流程名稱 (second) — there is **no 目標URL field** (baseURL is derived from the project's `domain`). The Toolbar shows a 🌐 environment selector and "🔧 管理環境變數…" (`ProjectEnvVarModal`) for the current flow's project.
+- Store actions: `createProject`, `renameProject`, `duplicateProject`, `deleteProject`, `addEnvironmentToProject`, `renameEnvironment`, `duplicateEnvironment`, `deleteEnvironment` (the last environment can't be removed), `assignFlowToProject`, `setActiveEnvironment`, `setCurrentProject`, and project-env-var actions `addProjectEnvVar` / `renameProjectEnvVarKey` / `deleteProjectEnvVar` / `setProjectEnvVarValue`. `openFlow` loads the owning project (default if none) and picks a sensible active environment (first env by default).
+- **UI:** `FlowList` groups flows by project (📁 headers, 未分類 last); the "新增專案" dialog collects 專案名稱 + 環境名稱 (DEV) + domain. The "新增流程" dialog collects 歸類至專案 (first) + 流程名稱 (second) — there is **no 目標URL field** (baseURL is derived from the project's `domain`). The Toolbar shows a 🌐 environment selector (with inline 新增環境) and "🔧 管理環境變數…" (`ProjectEnvVarModal`) for the current flow's project; the modal also handles environment add/rename/duplicate/delete. The right sidebar's `ProjectEnvVarList` shows the active environment's project vars.
 
 ### Sub-flow system
 
@@ -209,6 +241,7 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 - **Layout** (`src/renderer/utils/treeLayout.ts`): `computeTreeLayout` lays out one tree (subtree-centered, `NODE_WIDTH=200`, `NODE_HEIGHT=70`); `computeAllRootsLayout` lays out every root tree side-by-side; both accept a `SizeOf` callback so expanded groups can reserve their full box footprint.
 - **`positionsFinalized`**: `fn.position` is the single source of truth for rendering. On first load of a flow whose positions were never finalized, `FlowCanvas` calls `materializeLayout()` (writes computed positions into the store, marks finalized, persists). `relayoutAll()` ("🧹 整理節點") recomputes unconditionally. Manual drags update `position` via `updateNode` with **debounced** disk save, run through `runWithoutHistory` so repositioning doesn't flood undo history.
 - **Editing**: drag node handles to `connectNodes` (rejects if target already has a parent); delete edges to `disconnectNodes`; context-menu `disconnectNode` detaches a node from both parent and children (each becomes a floating root); `deleteNode` removes a node + subtree; `deleteNodesOnly` removes nodes but re-parents survivors as floating roots. Multi-select (Shift) drives extract/group/bulk-delete/bulk-disconnect.
+- **Pane context menu**: right-clicking empty canvas offers **加入節點** → `AddNodeModal` (currently `code` nodes only), which calls `addNodeAt(action, position)` to drop a floating node at the clicked canvas coordinates.
 
 ### Visual groups (in-place, canvas-only)
 
@@ -240,25 +273,25 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 | File | Role |
 |------|------|
 | `src/main/index.ts` | Electron entry — creates BrowserWindow, registers IPC handlers, opens external links in default browser |
-| `src/main/ipc/ipcHandlers.ts` | Central orchestrator — all 21 Renderer→Main channel handlers; holds singleton BrowserController/Recorder/Replayer; `hasCallFlowCycle()` + `killProcessOnPort()` |
+| `src/main/ipc/ipcHandlers.ts` | Central orchestrator — all 22 Renderer→Main channel handlers; holds singleton BrowserController/Recorder/Replayer; `hasCallFlowCycle()` + `killProcessOnPort()` |
 | `src/main/playwright/browserController.ts` | Wraps playwright-core chromium: launch, context, page, auto-cleanup on disconnect |
 | `src/main/playwright/recorder.ts` | Thin wrapper around CodegenCapture; tracks recording state; pause/resume; assertion-pick entry |
-| `src/main/playwright/codegenCapture.ts` | Multi-page recorder: injects scripts (initScript + DOM capture + cursor + assertion dock), exposes report/assert/locator-resolved functions, filters navigation, buffers input clicks, drives in-browser locator picker |
+| `src/main/playwright/codegenCapture.ts` | Multi-page recorder: injects scripts (initScript + DOM capture + cursor + assertion dock, top-frame UI via `topFrameOnly`), exposes report/assert/locator-resolved functions, filters navigation, buffers input clicks + dblclick merge, assigns page aliases & `opensPage` (incl. `ACTION_UPDATED` retro-patch), builds iframe `framePath` chains, imports upload paths over CDP, drives in-browser locator picker |
 | `src/main/playwright/actionCapture.ts` | Single-page variant of CodegenCapture (supports stop/restart without re-injection; not active in main flow) |
 | `src/main/playwright/captureShared.ts` | Shared utilities: extracts InjectedScript from coreBundle.js, DOM event capture (blacklist, Shadow DOM-aware), locator builder, nav-suppression logic, assertion dock + pick overlay scripts, in-browser locator-picker script, cursor highlight, `buildAction` |
-| `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events; constructor `(page, baseURL, profileVars?, activeProfileId?, activeEnvironmentId?, envVars?, activeProjectId?, sharedPages?)`; `substituteOrigin` swaps goto origin for the project env var `domain`; resolves subFlowProfileMapping + envValues for callFlow at any depth |
+| `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events; constructor `(page, baseURL, profileVars?, activeProfileId?, activeEnvironmentId?, envVars?, activeProjectId?, sharedPages?)`; `pageFor`/`scopeFor` resolve `pageAlias` + `framePath`; `substituteOrigin` swaps goto origin for the project env var `domain`; `buildCodeVars` backs `code` nodes; resolves subFlowProfileMapping + envValues for callFlow at any depth |
 | `src/main/storage/flowStorage.ts` | Flow CRUD; `list()` computes `refCount`; sorts by updatedAt |
 | `src/main/storage/fixtureStorage.ts` | Upload fixtures: `dataRoot()`, `importFile()` (copy into `fixtures/`, content-hash suffix on name collision), `toAbsolute()` |
 | `src/main/storage/projectStorage.ts` | Project CRUD under `projects/`; `ensureDefault()` materializes the reserved `未分類` project (DEV env + `domain`) with a stable env id; `delete()` protects `__default__` |
-| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` codegen; emits `_ftProf_*` decls; bakes each flow's active-env `domain` literal into matching gotos (`resolveFlowDomain`, per-step `domain`); threads activeProfileId/activeEnvironmentId/envVars/activeProjectId through recursive sub-flow expansion; hoists captureAs vars in useTestStep mode; `filter({ hasText })` for session-var assertText |
+| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` codegen; emits `_ftProf_*` decls; bakes each flow's active-env `domain` literal into matching gotos (`resolveFlowDomain`, per-step `domain`); threads activeProfileId/activeEnvironmentId/envVars/activeProjectId through recursive sub-flow expansion; hoists captureAs vars in useTestStep mode; `filter({ hasText })` for session-var assertText; emits `waitForEvent('popup')` for `opensPage`, `.contentFrame()` chains for `framePath`, `dblclick` for `clickCount>=2`, and a `const vars = {…}` preamble for `code` nodes |
 | `src/shared/types.ts` | All shared types + `IPC_CHANNELS`; `isCallFlowAction` guard; `REPLAY_SPEED_MS`; `DEFAULT_PROJECT_ID`/`DEFAULT_PROJECT_NAME`/`DOMAIN_ENV_KEY`/`DEFAULT_ENV_NAME`/`DEFAULT_DOMAIN` |
-| `src/shared/variableResolver.ts` | Variable system: 5 built-ins, `resolveValue(WithSession)`, `valueToCodeExpr`, `sessionAwareValueToCodeExpr`, `locatorExprToCode`, `emitProfileVarDecls`, `VARIABLE_HELPERS_CODE` |
+| `src/shared/variableResolver.ts` | Variable system: 5 built-ins, `flattenProjectEnvVars`, `resolveValue(WithSession)`, `valueToCodeExpr`, `sessionAwareValueToCodeExpr`, `locatorExprToCode`, `emitProfileVarDecls` / `emitEnvVarDecls` (`_ftProf_` / `_ftEnv_` prefixes), `VARIABLE_HELPERS_CODE` |
 | `src/preload/index.ts` | contextBridge — exposes typed `window.electronAPI` (incl. project + report + locator-pick wrappers) |
-| `src/renderer/App.tsx` | Root — calls `usePlaywrightEvents()` + `useUndoRedo()`; renders Toolbar + FlowList + FlowCanvas + PropertyPanel + right sidebar (VariableList / ProfileVarList / SessionVarList) |
+| `src/renderer/App.tsx` | Root — calls `usePlaywrightEvents()` + `useUndoRedo()`; renders Toolbar + FlowList + FlowCanvas + PropertyPanel + right sidebar (VariableList / ProfileVarList / ProjectEnvVarList / SessionVarList, shown only when a node is selected) |
 | `src/renderer/stores/flowStore.ts` | Zustand store — flow/node/profile/project/environment state + actions; undo/redo history subscription; group actions; layout actions; domain + callFlow-profile migrations |
 | `src/renderer/components/Toolbar/Toolbar.tsx` | Action bar: new-flow, undo/redo, record/stop, relayout, export, run-tests, replay-speed, environment selector (🌐), profile selector (⚙), status pills; new-flow dialog (歸類至專案 + 流程名稱, no 目標URL) |
 | `src/renderer/components/Toolbar/TestOutputModal.tsx` | Streams live `TEST_OUTPUT` lines during `RUN_TESTS` |
-| `src/renderer/components/Canvas/FlowCanvas.tsx` | ReactFlow canvas: node/edge derivation (incl. groups), drag-reposition with debounced save, connect/disconnect, multi-select, context menu, modals (CallFlow / ExtractSubflow / GroupName); one-time layout materialization |
+| `src/renderer/components/Canvas/FlowCanvas.tsx` | ReactFlow canvas (Background / Controls / MiniMap): node/edge derivation (incl. groups), drag-reposition with debounced save, connect/disconnect, multi-select, node + pane context menus, modals (CallFlow / ExtractSubflow / GroupName / AddNode); one-time layout materialization |
 | `src/renderer/components/Canvas/ActionNode.tsx` | Custom node: type icon/color, description, selector, replay-status border, page-nav border, callFlow profile badge |
 | `src/renderer/components/Canvas/GroupNode.tsx` | Collapsed-group node (expand on click) |
 | `src/renderer/components/Canvas/GroupBox.tsx` | Expanded-group background frame with collapse / ungroup controls |
@@ -270,13 +303,15 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 | `src/renderer/components/FlowList/FlowList.tsx` | Sidebar: flows grouped by project (未分類 = reserved default, pinned last, no rename/delete); collapsible 子流程 subsection (refCount>0); right-click menu (move project / rename / duplicate / delete / add as sub-flow); new-project dialog (name + 環境名稱 + domain) + rename dialogs |
 | `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | Bottom panel: edit description/selector/locator/value for selected node; assertText/assertValue value fields; callFlow "配置對應" mapping grid (loads sub-flow profiles via `FLOW_GET`) |
 | `src/renderer/components/ProfileEditor/ProfileEditorModal.tsx` | Two-column modal: profile list (add/rename/delete) + variable table (key synced across profiles; value/description per-profile) |
-| `src/renderer/components/ProjectEnvVar/ProjectEnvVarModal.tsx` | Project-level env-var editor (one key per row, value per selected environment); `domain` row is key-locked and non-deletable (🔒) |
+| `src/renderer/components/ProjectEnvVar/ProjectEnvVarModal.tsx` | Project-level env-var editor (one key per row, value per selected environment) + environment add/rename/duplicate/delete; `domain` row is key-locked and non-deletable (🔒) |
+| `src/renderer/components/ProjectEnvVar/ProjectEnvVarList.tsx` | Sidebar: active project's env vars resolved for the active environment; click to copy `{{key}}` |
+| `src/renderer/components/AddNodeModal/AddNodeModal.tsx` | 加入節點 dialog — code editor (`page` / `expect` / `vars` in scope) with a click-to-copy list of every available variable grouped by origin |
 | `src/renderer/components/CallFlowModal/CallFlowModal.tsx` | 2–3 step modal to embed a sub-flow: select flow (cycle-checked) → exit node → profile mapping |
 | `src/renderer/components/LocatorPickerModal/LocatorPickerModal.tsx` | **Legacy** — Cell-vs-Row picker (now rendered in-browser by CodegenCapture) |
 | `src/renderer/components/VariableList/VariableList.tsx` | Sidebar: 5 built-in variables; click to copy |
 | `src/renderer/components/ProfileVarList/ProfileVarList.tsx` | Sidebar: active profile's variables (amber); click to copy `{{key}}` |
 | `src/renderer/components/SessionVarList/SessionVarList.tsx` | Sidebar: session variables from `captureAs` nodes; click to copy, trash to delete |
-| `src/renderer/hooks/usePlaywrightEvents.ts` | IPC event subscriptions: ACTION_CAPTURED, REPLAY_NODE_*, REPLAY_FINISHED/ERROR, ASSERTION_PICK_CANCELLED, LOCATOR_PICK_NEEDED |
+| `src/renderer/hooks/usePlaywrightEvents.ts` | IPC event subscriptions: ACTION_CAPTURED, ACTION_UPDATED, ACTION_REMOVED, REPLAY_NODE_*, REPLAY_FINISHED/ERROR, ASSERTION_PICK_CANCELLED, LOCATOR_PICK_NEEDED |
 | `src/renderer/hooks/usePlaywright.ts` | IPC invocation wrappers: startRecording (navigates to the active env's `domain`, persists it as `flow.baseURL`), startBranchRecording, stopRecording, replayToNode (builds env-aware profileVars + envVars) |
 | `src/renderer/hooks/useUndoRedo.ts` | Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z keyboard shortcuts |
 | `src/renderer/hooks/useRecording.ts` | Branch-recording state helpers |

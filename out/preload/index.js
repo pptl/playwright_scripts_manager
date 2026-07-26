@@ -26,11 +26,14 @@ const IPC_CHANNELS = {
   START_ASSERTION_PICK: "assertion:pickStart",
   // Renderer → Main (locator pick)
   LOCATOR_PICK_RESOLVED: "locator:pickResolved",
+  // Renderer → Main (native file picker — returns paths imported into fixtures/)
+  PICK_FILES: "files:pick",
   // Main → Renderer
   LOCATOR_PICK_NEEDED: "locator:pickNeeded",
   ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
   ACTION_UPDATED: "action:updated",
+  ACTION_REMOVED: "action:removed",
   TEST_OUTPUT: "test:output",
   TEST_FINISHED: "test:finished",
   REPLAY_NODE_START: "replay:nodeStart",
@@ -62,6 +65,8 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   startAssertionPick: (assertionType) => electron.ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
   // Locator pick
   resolveLocatorPick: () => electron.ipcRenderer.invoke(IPC_CHANNELS.LOCATOR_PICK_RESOLVED),
+  // Native file picker — copies the picks into fixtures/ and returns their stored paths
+  pickFiles: (multiple) => electron.ipcRenderer.invoke(IPC_CHANNELS.PICK_FILES, { multiple }),
   // Sub-flow support
   getFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
   checkFlowCycle: (currentFlowId, candidateSubFlowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_CHECK_CYCLE, { currentFlowId, candidateSubFlowId }),
@@ -80,6 +85,11 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_, payload) => cb(payload);
     electron.ipcRenderer.on(IPC_CHANNELS.ACTION_UPDATED, handler);
     return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.ACTION_UPDATED, handler);
+  },
+  onActionRemoved: (cb) => {
+    const handler = (_, actionId) => cb(actionId);
+    electron.ipcRenderer.on(IPC_CHANNELS.ACTION_REMOVED, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.ACTION_REMOVED, handler);
   },
   onReplayNodeStart: (cb) => {
     const handler = (_, nodeId) => cb(nodeId);

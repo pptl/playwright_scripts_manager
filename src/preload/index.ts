@@ -52,6 +52,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Locator pick
   resolveLocatorPick: () => ipcRenderer.invoke(IPC_CHANNELS.LOCATOR_PICK_RESOLVED),
 
+  // Native file picker — copies the picks into fixtures/ and returns their stored paths
+  pickFiles: (multiple?: boolean) => ipcRenderer.invoke(IPC_CHANNELS.PICK_FILES, { multiple }),
+
   // Sub-flow support
   getFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
   checkFlowCycle: (currentFlowId: string, candidateSubFlowId: string) =>
@@ -73,6 +76,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_: Electron.IpcRendererEvent, payload: ActionUpdatedPayload) => cb(payload)
     ipcRenderer.on(IPC_CHANNELS.ACTION_UPDATED, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTION_UPDATED, handler)
+  },
+  onActionRemoved: (cb: (actionId: string) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, actionId: string) => cb(actionId)
+    ipcRenderer.on(IPC_CHANNELS.ACTION_REMOVED, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTION_REMOVED, handler)
   },
   onReplayNodeStart: (cb: (nodeId: string) => void) => {
     const handler = (_: Electron.IpcRendererEvent, nodeId: string) => cb(nodeId)

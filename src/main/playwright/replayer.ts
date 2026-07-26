@@ -1,10 +1,12 @@
 import { Page, Locator, FrameLocator } from 'playwright-core'
 import { createRequire } from 'module'
+import { existsSync } from 'fs'
 import type { Action, FlowNode } from '../../shared/types'
 import { isCallFlowAction, DEFAULT_PROJECT_ID, DOMAIN_ENV_KEY } from '../../shared/types'
 import { resolveValueWithSession, resolveValue } from '../../shared/variableResolver'
 import { getCursorHighlightScript } from './captureShared'
 import { FlowStorage } from '../storage/flowStorage'
+import { FixtureStorage } from '../storage/fixtureStorage'
 
 // Async function constructor — used to run a code node's body with (page, expect, vars) in scope.
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
@@ -28,6 +30,16 @@ function getExpect(): unknown {
 type NodeStartCallback = (nodeId: string) => void
 type NodeCompleteCallback = (nodeId: string, success: boolean, error?: string) => void
 
+/** No-op 'filechooser' listener. Merely having one makes Chromium intercept the chooser
+ *  instead of opening the OS dialog, which would otherwise sit on top of the browser and
+ *  stall the replay — a recorded flow can still contain a click that opens one. The files
+ *  themselves come from the upload action's setInputFiles.
+ *
+ *  Interception lasts as long as the listener, so it MUST be released when the replay
+ *  ends: branch recording silently replays on the very page it then records on, and a
+ *  leftover listener would swallow the user's own file chooser. */
+const swallowFileChooser = () => {}
+
 export class Replayer {
   private page: Page
   private sessionVars = new Map<string, string>()
@@ -41,6 +53,8 @@ export class Replayer {
   private activeProjectId?: string
   /** pageAlias → Page for popups opened during replay (shared with nested Replayers). */
   private pages: Map<string, Page>
+  /** Pages this replay muted the file chooser on, released when the replay ends. */
+  private suppressedPages = new Set<Page>()
 
   constructor(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string, sharedPages?: Map<string, Page>) {
     this.page = page
@@ -74,26 +88,46 @@ export class Replayer {
     const cursorScript = getCursorHighlightScript()
     await this.page.addInitScript(cursorScript)
     await this.page.evaluate(cursorScript).catch(() => {})
+    this.suppressFileChooser(this.page)
     const path = this.findPath(nodes, targetNodeId)
 
-    for (const node of path) {
-      onNodeStart(node.id)
-      try {
-        if (isCallFlowAction(node.action)) {
-          await this.executeCallFlow(node.action, onNodeStart, onNodeComplete, speed)
-        } else {
-          await this.executeAction(node.action)
-          if (node.action.assertion) {
-            await this.executeAssertion(node.action)
+    try {
+      for (const node of path) {
+        onNodeStart(node.id)
+        try {
+          if (isCallFlowAction(node.action)) {
+            await this.executeCallFlow(node.action, onNodeStart, onNodeComplete, speed)
+          } else {
+            await this.executeAction(node.action)
+            if (node.action.assertion) {
+              await this.executeAssertion(node.action)
+            }
           }
+          onNodeComplete(node.id, true)
+        } catch (err) {
+          onNodeComplete(node.id, false, String(err))
+          throw err
         }
-        onNodeComplete(node.id, true)
-      } catch (err) {
-        onNodeComplete(node.id, false, String(err))
-        throw err
+        await new Promise((res) => setTimeout(res, speed))
       }
-      await new Promise((res) => setTimeout(res, speed))
+    } finally {
+      this.releaseFileChooserSuppression()
     }
+  }
+
+  /** Swallow file choosers for the duration of this replay. Only ever removes its own
+   *  listener, so a nested call-flow replayer can't lift the outer replay's suppression. */
+  private suppressFileChooser(page: Page): void {
+    if (this.suppressedPages.has(page)) return
+    this.suppressedPages.add(page)
+    page.on('filechooser', swallowFileChooser)
+  }
+
+  private releaseFileChooserSuppression(): void {
+    for (const page of this.suppressedPages) {
+      if (!page.isClosed()) page.off('filechooser', swallowFileChooser)
+    }
+    this.suppressedPages.clear()
   }
 
   getSessionVars(): Map<string, string> {
@@ -194,6 +228,29 @@ export class Replayer {
     return scope.locator(action.selector)
   }
 
+  /**
+   * Resolve the actual <input type=file> for an upload action.
+   * Recorded locators are often not usable as-is: these widgets hide the input behind a
+   * styled trigger and frequently reuse one id for both, and Chromium reports the input
+   * itself as role=button with the trigger's label. Narrow to the one element
+   * setInputFiles can accept, rather than failing on a strict-mode violation.
+   */
+  private async resolveFileInput(action: Action): Promise<Locator> {
+    const scope = this.scopeFor(action)
+    const fileInputs = scope.locator('input[type="file"]')
+    const base = this.getLocator(action)
+    const candidates = [
+      base.and(fileInputs),               // same element, but only if it is a file input
+      base.locator('input[type="file"]'), // recorded locator was a wrapper / label
+      base,                               // recorded locator is already unambiguous
+      fileInputs,                         // page has exactly one file input
+    ]
+    for (const c of candidates) {
+      if (await c.count() === 1) return c
+    }
+    throw new Error('找不到唯一的檔案上傳欄位 input[type=file] — 請在屬性面板修正此節點的 Locator')
+  }
+
   private substituteOrigin(url: string): string {
     // The domain override is a project environment variable ({{domain}}) resolved for the
     // active environment. Strip any trailing slash so it concatenates cleanly with pathname.
@@ -260,9 +317,18 @@ export class Replayer {
         }
         break
       case 'upload': {
-        // value holds comma-separated file paths (recorded as names; user edits to real paths)
-        const files = (val ?? '').split(',').map((s) => s.trim()).filter(Boolean)
-        await this.getLocator(action).setInputFiles(files)
+        // filePaths is authoritative; older nodes only have the comma-joined value.
+        // Paths are relative to the data root (fixtures/…) or absolute — the main
+        // process cwd isn't the data root once packaged, so resolve explicitly.
+        const raw = action.filePaths?.length
+          ? action.filePaths.map((p) => resolveValueWithSession(p, this.sessionVars, this.profileVars, this.envVars))
+          : (val ?? '').split(',')
+        const files = raw.map((s) => s.trim()).filter(Boolean).map((s) => FixtureStorage.toAbsolute(s))
+        if (!files.length) throw new Error('上傳節點沒有檔案路徑 — 請在屬性面板選擇檔案')
+        for (const f of files) {
+          if (!existsSync(f)) throw new Error(`找不到檔案: ${f}`)
+        }
+        await (await this.resolveFileInput(action)).setInputFiles(files)
         break
       }
       case 'wait':
@@ -280,6 +346,7 @@ export class Replayer {
     if (popupPromise && action.opensPage) {
       const newPage = await popupPromise
       await newPage.waitForLoadState('domcontentloaded').catch(() => {})
+      this.suppressFileChooser(newPage)
       this.pages.set(action.opensPage, newPage)
     }
 

@@ -1,4 +1,4 @@
-import { BrowserWindow, ipcMain, app } from 'electron'
+import { BrowserWindow, ipcMain, app, dialog } from 'electron'
 import { spawn } from 'child_process'
 import { join, basename } from 'path'
 import { IPC_CHANNELS } from '../../shared/types'
@@ -17,6 +17,7 @@ import { BrowserController } from '../playwright/browserController'
 import { Recorder } from '../playwright/recorder'
 import { Replayer } from '../playwright/replayer'
 import { FlowStorage } from '../storage/flowStorage'
+import { FixtureStorage } from '../storage/fixtureStorage'
 import { ProjectStorage } from '../storage/projectStorage'
 import { ScriptExporter } from '../storage/scriptExporter'
 
@@ -25,6 +26,21 @@ let recorder: Recorder | null = null
 let replayer: Replayer | null = null
 
 export function registerIpcHandlers(win: BrowserWindow): void {
+  /** Copy files into fixtures/, returning the data-root-relative paths stored on Actions. */
+  const importFiles = async (absPaths: string[]): Promise<string[]> =>
+    (await Promise.all(absPaths.map((p) => FixtureStorage.importFile(p)))).map((i) => i.stored)
+
+  // Manual picker for the PropertyPanel (drag & drop uploads and older nodes).
+  // Recording never comes through here — the browser shows its own dialog.
+  ipcMain.handle(IPC_CHANNELS.PICK_FILES, async (_e, { multiple }: { multiple?: boolean } = {}) => {
+    const result = await dialog.showOpenDialog(win, {
+      title: '選擇要上傳的檔案',
+      properties: (multiple ?? true) ? ['openFile', 'multiSelections'] : ['openFile'],
+    })
+    if (result.canceled || !result.filePaths.length) return []
+    return await importFiles(result.filePaths)
+  })
+
   // ── Browser ──────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.BROWSER_LAUNCH, async () => {
     browserController = new BrowserController()
@@ -76,6 +92,12 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       (payload) => {
         // Late popup attribution: patch the already-captured action in the renderer
         win.webContents.send(IPC_CHANNELS.ACTION_UPDATED, payload)
+      },
+      // Uploads: the real paths CDP read out of the browser, copied into fixtures/
+      importFiles,
+      (actionId) => {
+        // Un-record the click that opened the file chooser
+        win.webContents.send(IPC_CHANNELS.ACTION_REMOVED, actionId)
       },
     )
     // For branch recording, don't navigate (we're already at the right page)

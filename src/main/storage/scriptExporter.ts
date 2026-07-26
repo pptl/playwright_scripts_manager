@@ -286,7 +286,14 @@ export class ScriptExporter {
           ? new Set(steps.map(({ node }) => node.action.opensPage).filter((v): v is string => !!v))
           : new Set()
         if (hoistedPages.size > 0) usesPopupHoist = true
+        // An upload's trigger click would pop the OS file dialog and stall the run.
+        // Registering a filechooser listener makes Chromium intercept it instead;
+        // the files still come from the upload step's setInputFiles.
+        const suppressChooser = steps.some(({ node }) => node.action.type === 'upload')
+          ? "    page.on('filechooser', () => {});\n"
+          : ''
         const hoistDecls =
+          suppressChooser +
           (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join('\n') + '\n' : '') +
           (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join('\n') + '\n' : '')
 
@@ -481,10 +488,20 @@ export class ScriptExporter {
           ? `${captureDecl}await ${loc}.press(${va(action.value ?? '')});`
           : `${captureDecl}await ${pageRef}.keyboard.press(${va(action.value ?? '')});`
       case 'upload': {
-        // value holds comma-separated file paths
-        const files = (action.value ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+        // filePaths is authoritative; older nodes only have the comma-joined value.
+        // Stored `fixtures/…` paths are emitted as-is — the test runner's cwd is the
+        // data root (see RUN_TESTS), so they resolve and the spec stays portable.
+        const files = (action.filePaths?.length ? action.filePaths : (action.value ?? '').split(','))
+          .map((s) => s.trim())
+          .filter(Boolean)
         const arg = files.length === 1 ? va(files[0]) : `[${files.map((f) => va(f)).join(', ')}]`
-        return `${captureDecl}await ${loc}.setInputFiles(${arg});`
+        // Uploads recorded before locators were tag-qualified can match the styled
+        // trigger as well as the hidden input (same id) — narrow to the input so the
+        // spec doesn't die on a strict-mode violation.
+        const uploadLoc = /\binput\b/.test(action.locatorExpr ?? action.selector ?? '')
+          ? loc
+          : `${loc}.and(${scopeRef}.locator('input[type="file"]'))`
+        return `${captureDecl}await ${uploadLoc}.setInputFiles(${arg});`
       }
       case 'code': {
         // Emit `const vars = { … }` then inline the user's code verbatim.

@@ -17049,6 +17049,11 @@ const TYPE_ICONS = {
   callFlow: "⛓",
   code: "</>"
 };
+function hasUploadPath(action) {
+  const entries = action.filePaths?.length ? action.filePaths : (action.value ?? "").split(",");
+  const cleaned = entries.map((s) => s.trim()).filter(Boolean);
+  return cleaned.length > 0 && cleaned.every((p2) => /[/\\]/.test(p2) || p2.includes("{{"));
+}
 function ActionNodeComponent({ data, selected }) {
   const { flowNode } = data;
   const { action } = flowNode;
@@ -17162,6 +17167,23 @@ function ActionNodeComponent({ data, selected }) {
             }
           )
         ] }),
+        action.type === "upload" && !hasUploadPath(action) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            title: "錄製時只取得檔名，沒有可用的檔案路徑。請在屬性面板按「📂 選擇檔案…」補上。",
+            style: {
+              fontSize: 10,
+              color: "#f87171",
+              background: "#2a0f0f",
+              border: "1px solid #7f1d1d",
+              borderRadius: 3,
+              padding: "1px 5px",
+              marginTop: 3,
+              display: "inline-block"
+            },
+            children: "⚠ 缺少檔案路徑"
+          }
+        ),
         action.type === "callFlow" && (action.subFlowProfileName || action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 0) && (() => {
           const isDynamic = action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 1;
           const label = isDynamic ? "動態配置" : action.subFlowProfileName ?? "已配置";
@@ -20276,11 +20298,17 @@ function PropertyPanel() {
         value: value || void 0,
         // Multi-select nodes keep values[] in sync with the comma-joined value field
         ...selectedNode.action.values ? { values: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+        // Upload nodes do the same for filePaths[], which replay/export read first
+        ...selectedNode.action.type === "upload" ? { filePaths: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
         ...selectedNode.action.type === "code" ? { code } : {},
         ...callFlowUpdates
       }
     });
     window.electronAPI.saveFlow(useFlowStore.getState().currentFlow).catch(console.error);
+  };
+  const pickFiles = async () => {
+    const picked = await window.electronAPI.pickFiles(true);
+    if (picked.length) setValue(picked.join(", "));
   };
   const parentProfiles = currentFlow.profiles ?? [];
   const isCallFlow = selectedNode?.action.type === "callFlow";
@@ -20328,15 +20356,18 @@ function PropertyPanel() {
           ] })
         ] }),
         ["fill", "selectOption", "goto", "press", "upload", "assertText", "assertValue"].includes(selectedNode.action.type) && /* @__PURE__ */ jsxRuntimeExports.jsxs(Field, { label: selectedNode.action.type === "assertText" ? "驗證文字" : selectedNode.action.type === "assertValue" ? "驗證值" : selectedNode.action.type === "upload" ? "檔案路徑" : "值", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "input",
-            {
-              value,
-              onChange: (e) => setValue(e.target.value),
-              style: inputStyle
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: selectedNode.action.type === "upload" ? "錄製時只能取得檔名，回放前請改成完整路徑（多檔用逗號分隔）" : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                value,
+                onChange: (e) => setValue(e.target.value),
+                style: inputStyle
+              }
+            ),
+            selectedNode.action.type === "upload" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: pickFiles, style: pickBtnStyle, title: "選擇檔案（會複製到 fixtures/）", children: "📂 選擇檔案…" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: selectedNode.action.type === "upload" ? "路徑相對於資料根目錄（fixtures/…），也可填絕對路徑；多檔用逗號分隔" : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
             "可插入變數，如 ",
             /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "{{randomText}}" })
           ] }) })
@@ -20465,6 +20496,16 @@ const inputStyle = {
   fontSize: 12,
   outline: "none",
   width: 200
+};
+const pickBtnStyle = {
+  padding: "5px 10px",
+  borderRadius: 5,
+  border: "1px solid #334155",
+  background: "#0f172a",
+  color: "#cbd5e1",
+  cursor: "pointer",
+  fontSize: 12,
+  whiteSpace: "nowrap"
 };
 const saveBtnStyle = {
   padding: "5px 16px",
@@ -21012,6 +21053,15 @@ function usePlaywrightEvents() {
       const updated = useFlowStore.getState().currentFlow;
       if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
     });
+    const unsubRemoved = window.electronAPI.onActionRemoved((actionId) => {
+      const { currentFlow, deleteNode, setRecordingHead, recordingHeadId } = useFlowStore.getState();
+      const node = currentFlow?.nodes.find((n2) => n2.id === actionId);
+      if (!node) return;
+      if (recordingHeadId === actionId) setRecordingHead(node.parentId);
+      deleteNode(actionId);
+      const updated = useFlowStore.getState().currentFlow;
+      if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
+    });
     const unsubNodeStart = window.electronAPI.onReplayNodeStart((nodeId) => {
       setReplayingNode(nodeId);
       setReplayStatus(nodeId, "running");
@@ -21037,6 +21087,7 @@ function usePlaywrightEvents() {
     return () => {
       unsubCaptured();
       unsubUpdated();
+      unsubRemoved();
       unsubNodeStart();
       unsubNodeComplete();
       unsubFinished();

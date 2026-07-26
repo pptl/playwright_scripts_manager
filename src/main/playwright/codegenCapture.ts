@@ -1,4 +1,5 @@
-import { BrowserContext, Frame, Page } from 'playwright-core'
+import { BrowserContext, CDPSession, Frame, Page } from 'playwright-core'
+import { basename } from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { Action, ActionUpdatedPayload, LocatorOption } from '../../shared/types'
 import {
@@ -28,6 +29,13 @@ const OPENS_PAGE_WINDOW_MS = 1_000
 
 export type ActionUpdatedCallback = (payload: ActionUpdatedPayload) => void
 
+/** Node id of a recorded action the renderer should drop again. */
+export type ActionRemovedCallback = (actionId: string) => void
+
+/** Copies the files the user picked in the browser's own dialog into fixtures/,
+ *  returning the stored (data-root-relative) paths written into the Action. */
+export type FilesImportedCallback = (absPaths: string[]) => Promise<string[]>
+
 /** Wrap a self-executing script so it only runs in the top frame (dock/cursor UI
  *  must not render inside iframes — context init scripts run in every frame). */
 function topFrameOnly(script: string): string {
@@ -38,6 +46,8 @@ export class CodegenCapture {
   private context: BrowserContext
   private onAction: ActionCallback
   private onActionUpdated: ActionUpdatedCallback | null
+  private onActionRemoved: ActionRemovedCallback | null
+  private onFilesImported: FilesImportedCallback | null
   private active = false
   private paused = false
   private lastInteraction: LastInteraction | null = null
@@ -54,17 +64,28 @@ export class CodegenCapture {
   private lastGotoUrlByPage = new Map<Page, string>()
   /** Frame → iframe locator chain (top → innermost); invalidated on detach/navigation. */
   private frameChainCache = new Map<Frame, string[]>()
+  /** Page → CDP session, used to read real upload paths (Chromium only). */
+  private cdpSessions = new Map<Page, CDPSession>()
 
-  constructor(context: BrowserContext, onAction: ActionCallback, onActionUpdated?: ActionUpdatedCallback) {
+  constructor(
+    context: BrowserContext,
+    onAction: ActionCallback,
+    onActionUpdated?: ActionUpdatedCallback,
+    onFilesImported?: FilesImportedCallback,
+    onActionRemoved?: ActionRemovedCallback,
+  ) {
     this.context = context
     this.onAction = onAction
     this.onActionUpdated = onActionUpdated ?? null
+    this.onFilesImported = onFilesImported ?? null
+    this.onActionRemoved = onActionRemoved ?? null
   }
 
   async start(): Promise<void> {
     this.active = true
     this.lastInteraction = null
     this.lastEmitted = null
+    this.cdpSessions.clear()
     this.pageAliases.clear()
     this.lastGotoUrlByPage.clear()
     this.frameChainCache.clear()
@@ -119,7 +140,10 @@ export class CodegenCapture {
     // Report channel — source.page/source.frame tell us where the event came from.
     await this.context.exposeBinding('__flowtest_report', async ({ page: srcPage, frame }, raw: RawEvent) => {
       const framePath = await this.frameLocatorChain(frame, srcPage)
-      this.handleRawEvent(srcPage, raw, framePath.length ? framePath : undefined)
+      // Uploads: ask the browser for the paths behind the File objects before emitting,
+      // so the action is complete the moment it reaches the canvas.
+      const storedFiles = raw.kind === 'upload' ? await this.importUploadedFiles(srcPage) : []
+      this.handleRawEvent(srcPage, raw, framePath.length ? framePath : undefined, storedFiles)
     })
 
     // ── Init scripts (context-level: injected into every current & future page) ──
@@ -153,6 +177,59 @@ export class CodegenCapture {
       this.attachNavListener(newPage)
       this.attributeOpensPage(alias)
     })
+  }
+
+  /**
+   * Read the real paths of the files the user just picked, and copy them into fixtures/.
+   *
+   * The chooser is deliberately NOT intercepted: Chromium opens its own dialog, on the
+   * browser window the user is already working in. The page still only sees File.name,
+   * but the browser process knows the backing path and CDP's DOM.getFileInfo hands it
+   * over. The capture script parks the input on the top window as __ft_lastUploadInput
+   * (init scripts run in the main world, so Runtime.evaluate can see it).
+   *
+   * Returns [] on any failure — the node then keeps bare file names and the canvas
+   * flags it, which is exactly the pre-CDP behaviour.
+   */
+  private async importUploadedFiles(page: Page): Promise<string[]> {
+    if (!this.onFilesImported) return []
+    try {
+      const session = await this.cdpSessionFor(page)
+      const count = await session.send('Runtime.evaluate', {
+        expression: 'window.__ft_lastUploadInput ? window.__ft_lastUploadInput.files.length : 0',
+        returnByValue: true,
+      }) as { result: { value?: number } }
+      const n = count.result.value ?? 0
+      if (!n) return []
+
+      const absPaths: string[] = []
+      for (let i = 0; i < n; i++) {
+        const handle = await session.send('Runtime.evaluate', {
+          expression: `window.__ft_lastUploadInput.files[${i}]`,
+        }) as { result: { objectId?: string } }
+        const objectId = handle.result.objectId
+        if (!objectId) continue
+        try {
+          const info = await session.send('DOM.getFileInfo', { objectId }) as { path?: string }
+          if (info.path) absPaths.push(info.path)
+        } finally {
+          await session.send('Runtime.releaseObject', { objectId }).catch(() => {})
+        }
+      }
+      if (!absPaths.length) return []
+      return await this.onFilesImported(absPaths)
+    } catch {
+      return []
+    }
+  }
+
+  private async cdpSessionFor(page: Page): Promise<CDPSession> {
+    const existing = this.cdpSessions.get(page)
+    if (existing) return existing
+    const session = await this.context.newCDPSession(page)
+    this.cdpSessions.set(page, session)
+    page.once('close', () => this.cdpSessions.delete(page))
+    return session
   }
 
   /** Mirrors Playwright's RecorderSignalProcessor: navigation within NAV_SUPPRESSION_MS
@@ -244,7 +321,7 @@ export class CodegenCapture {
     return chain
   }
 
-  private handleRawEvent(srcPage: Page, raw: RawEvent, framePath?: string[]): void {
+  private handleRawEvent(srcPage: Page, raw: RawEvent, framePath?: string[], storedFiles: string[] = []): void {
     if (!this.active || this.paused) return
     const action = buildAction(raw)
     if (!action) return
@@ -252,6 +329,21 @@ export class CodegenCapture {
     const alias = this.pageAliases.get(srcPage)
     if (alias) action.pageAlias = alias
     if (framePath?.length) action.framePath = framePath
+
+    if (raw.kind === 'upload') {
+      // The `change` event only knows file names — swap in the paths CDP resolved,
+      // keeping the locator / framePath / pageAlias this event already worked out.
+      if (storedFiles.length) {
+        action.filePaths = storedFiles
+        action.value = storedFiles.join(', ')
+        action.description = `上傳檔案「${storedFiles.map((p) => basename(p)).join('、')}」`
+      }
+      // Forget the click that opened the chooser. Replaying it can't work: the input
+      // is hidden behind a styled trigger, and Chromium gives input[type=file] itself
+      // role=button with that trigger's label — so the recorded click either waits
+      // forever on an invisible element or matches both. setInputFiles never needed it.
+      if (raw.triggerSelector) this.dropTriggerClick(raw.triggerSelector)
+    }
 
     // Double-click merge: the DOM fires click → dblclick, so a dblclick report on
     // the same element supersedes the buffered single click (mirrors Playwright's
@@ -305,6 +397,21 @@ export class CodegenCapture {
     this.onAction(action)
   }
 
+  /** Un-record the click that opened the file chooser. Usually it is still in the
+   *  dblclick buffer; if the user lingered in the dialog it has already reached the
+   *  canvas, so ask the renderer to delete that node (it is still the recording head). */
+  private dropTriggerClick(triggerSelector: string): void {
+    if (this.pendingAction?.action.type === 'click' && this.pendingAction.action.selector === triggerSelector) {
+      this.discardPendingAction()
+      return
+    }
+    if (this.lastEmitted?.action.type === 'click' && this.lastEmitted.action.selector === triggerSelector) {
+      const { action } = this.lastEmitted
+      this.lastEmitted = null
+      this.onActionRemoved?.(action.id)
+    }
+  }
+
   private setPendingAction(action: Action, isInputClick: boolean): void {
     this.flushPendingAction()
     const timer = isInputClick ? null : setTimeout(() => this.flushPendingAction(), DBLCLICK_MERGE_MS)
@@ -337,6 +444,7 @@ export class CodegenCapture {
     this.paused = false
 
     this.pendingLocatorPick = null
+    this.cdpSessions.clear()
 
     // Remove the in-page assertion dock + any leftover picker overlay/dialog on every page.
     for (const page of this.context.pages()) {

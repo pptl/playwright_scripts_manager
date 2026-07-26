@@ -61,11 +61,14 @@ const IPC_CHANNELS = {
   START_ASSERTION_PICK: "assertion:pickStart",
   // Renderer → Main (locator pick)
   LOCATOR_PICK_RESOLVED: "locator:pickResolved",
+  // Renderer → Main (native file picker — returns paths imported into fixtures/)
+  PICK_FILES: "files:pick",
   // Main → Renderer
   LOCATOR_PICK_NEEDED: "locator:pickNeeded",
   ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
   ACTION_UPDATED: "action:updated",
+  ACTION_REMOVED: "action:removed",
   TEST_OUTPUT: "test:output",
   TEST_FINISHED: "test:finished",
   REPLAY_NODE_START: "replay:nodeStart",
@@ -216,6 +219,30 @@ function getDOMCaptureScript() {
       if (loc) return loc;
       return `locator(${JSON.stringify(generateCSSSelector(el))})`;
     }
+    function qualifyFileInputLocator(expr, el) {
+      if (!/^locator\(\s*['"]input\[type=['"]?file['"]?\]['"]\s*\)$/.test(expr)) return expr;
+      const h = el;
+      const testId = h.getAttribute("data-testid");
+      if (testId) return `locator('input[data-testid="${testId}"]')`;
+      if (h.id) return `locator('input#${CSS.escape(h.id)}')`;
+      const name = h.getAttribute("name");
+      if (name) return `locator('input[name="${name}"]')`;
+      return expr;
+    }
+    let lastClickEl = null;
+    let lastClickTime = 0;
+    function findTriggerSelector(input) {
+      const el = lastClickEl;
+      if (!el || Date.now() - lastClickTime > 3e5) return void 0;
+      const label = input.labels;
+      let related = el === input || !!el.id && el.id === input.id || !!label && Array.prototype.some.call(label, (l) => l === el || l.contains(el));
+      let anc = input;
+      for (let i = 0; !related && i < 3 && anc; i++) {
+        anc = anc.parentElement;
+        if (anc && (anc === el || anc.contains(el))) related = true;
+      }
+      return related ? generateCSSSelector(el) : void 0;
+    }
     function extractLabel(locatorExpr, el) {
       const q = `['"]([^'"]+)['"]`;
       const patterns = [
@@ -278,6 +305,8 @@ function getDOMCaptureScript() {
     function handleMouseAction(e, button, clickCount) {
       let el = getTarget(e);
       if (!el?.tagName) return;
+      lastClickEl = el;
+      lastClickTime = Date.now();
       if (currentFocusedInput && currentFocusedInput !== el) flushPendingFill();
       const tag = el.tagName.toLowerCase();
       const type = (el.type || "").toLowerCase();
@@ -410,8 +439,13 @@ function getDOMCaptureScript() {
         const input = el;
         const names = Array.from(input.files ?? []).map((f) => f.name);
         if (names.length === 0) return;
-        const locatorExpr = getLocatorExpr(el);
-        report({ kind: "upload", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: names.join(", "), timestamp: Date.now(), url: window.location.href });
+        try {
+          (window.top || window).__ft_lastUploadInput = input;
+        } catch (err) {
+          window.__ft_lastUploadInput = input;
+        }
+        const locatorExpr = qualifyFileInputLocator(getLocatorExpr(el), el);
+        report({ kind: "upload", locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: names.join(", "), timestamp: Date.now(), url: window.location.href, triggerSelector: findTriggerSelector(input) });
         return;
       }
       if (tag === "input" && (inputType === "range" || inputType === "color")) {
@@ -860,6 +894,8 @@ class CodegenCapture {
   context;
   onAction;
   onActionUpdated;
+  onActionRemoved;
+  onFilesImported;
   active = false;
   paused = false;
   lastInteraction = null;
@@ -876,15 +912,20 @@ class CodegenCapture {
   lastGotoUrlByPage = /* @__PURE__ */ new Map();
   /** Frame → iframe locator chain (top → innermost); invalidated on detach/navigation. */
   frameChainCache = /* @__PURE__ */ new Map();
-  constructor(context, onAction, onActionUpdated) {
+  /** Page → CDP session, used to read real upload paths (Chromium only). */
+  cdpSessions = /* @__PURE__ */ new Map();
+  constructor(context, onAction, onActionUpdated, onFilesImported, onActionRemoved) {
     this.context = context;
     this.onAction = onAction;
     this.onActionUpdated = onActionUpdated ?? null;
+    this.onFilesImported = onFilesImported ?? null;
+    this.onActionRemoved = onActionRemoved ?? null;
   }
   async start() {
     this.active = true;
     this.lastInteraction = null;
     this.lastEmitted = null;
+    this.cdpSessions.clear();
     this.pageAliases.clear();
     this.lastGotoUrlByPage.clear();
     this.frameChainCache.clear();
@@ -929,7 +970,8 @@ class CodegenCapture {
     });
     await this.context.exposeBinding("__flowtest_report", async ({ page: srcPage, frame }, raw) => {
       const framePath = await this.frameLocatorChain(frame, srcPage);
-      this.handleRawEvent(srcPage, raw, framePath.length ? framePath : void 0);
+      const storedFiles = raw.kind === "upload" ? await this.importUploadedFiles(srcPage) : [];
+      this.handleRawEvent(srcPage, raw, framePath.length ? framePath : void 0, storedFiles);
     });
     const initScript = getBrowserInitScript();
     if (initScript) await this.context.addInitScript(initScript);
@@ -955,6 +997,57 @@ class CodegenCapture {
       this.attachNavListener(newPage);
       this.attributeOpensPage(alias);
     });
+  }
+  /**
+   * Read the real paths of the files the user just picked, and copy them into fixtures/.
+   *
+   * The chooser is deliberately NOT intercepted: Chromium opens its own dialog, on the
+   * browser window the user is already working in. The page still only sees File.name,
+   * but the browser process knows the backing path and CDP's DOM.getFileInfo hands it
+   * over. The capture script parks the input on the top window as __ft_lastUploadInput
+   * (init scripts run in the main world, so Runtime.evaluate can see it).
+   *
+   * Returns [] on any failure — the node then keeps bare file names and the canvas
+   * flags it, which is exactly the pre-CDP behaviour.
+   */
+  async importUploadedFiles(page) {
+    if (!this.onFilesImported) return [];
+    try {
+      const session = await this.cdpSessionFor(page);
+      const count = await session.send("Runtime.evaluate", {
+        expression: "window.__ft_lastUploadInput ? window.__ft_lastUploadInput.files.length : 0",
+        returnByValue: true
+      });
+      const n = count.result.value ?? 0;
+      if (!n) return [];
+      const absPaths = [];
+      for (let i = 0; i < n; i++) {
+        const handle = await session.send("Runtime.evaluate", {
+          expression: `window.__ft_lastUploadInput.files[${i}]`
+        });
+        const objectId = handle.result.objectId;
+        if (!objectId) continue;
+        try {
+          const info = await session.send("DOM.getFileInfo", { objectId });
+          if (info.path) absPaths.push(info.path);
+        } finally {
+          await session.send("Runtime.releaseObject", { objectId }).catch(() => {
+          });
+        }
+      }
+      if (!absPaths.length) return [];
+      return await this.onFilesImported(absPaths);
+    } catch {
+      return [];
+    }
+  }
+  async cdpSessionFor(page) {
+    const existing = this.cdpSessions.get(page);
+    if (existing) return existing;
+    const session = await this.context.newCDPSession(page);
+    this.cdpSessions.set(page, session);
+    page.once("close", () => this.cdpSessions.delete(page));
+    return session;
   }
   /** Mirrors Playwright's RecorderSignalProcessor: navigation within NAV_SUPPRESSION_MS
    *  after a click/press/fill is a redirect side-effect and must NOT generate a goto node.
@@ -1039,13 +1132,21 @@ class CodegenCapture {
     this.frameChainCache.set(frame, chain);
     return chain;
   }
-  handleRawEvent(srcPage, raw, framePath) {
+  handleRawEvent(srcPage, raw, framePath, storedFiles = []) {
     if (!this.active || this.paused) return;
     const action = buildAction(raw);
     if (!action) return;
     const alias = this.pageAliases.get(srcPage);
     if (alias) action.pageAlias = alias;
     if (framePath?.length) action.framePath = framePath;
+    if (raw.kind === "upload") {
+      if (storedFiles.length) {
+        action.filePaths = storedFiles;
+        action.value = storedFiles.join(", ");
+        action.description = `上傳檔案「${storedFiles.map((p) => path.basename(p)).join("、")}」`;
+      }
+      if (raw.triggerSelector) this.dropTriggerClick(raw.triggerSelector);
+    }
     if (action.type === "click" && (action.clickCount ?? 1) >= 2 && this.pendingAction?.action.type === "click" && this.pendingAction.action.selector === action.selector) {
       if (this.pendingAction.action.opensPage) action.opensPage = this.pendingAction.action.opensPage;
       this.discardPendingAction();
@@ -1074,6 +1175,20 @@ class CodegenCapture {
   emitAction(action) {
     this.lastEmitted = { action, time: Date.now() };
     this.onAction(action);
+  }
+  /** Un-record the click that opened the file chooser. Usually it is still in the
+   *  dblclick buffer; if the user lingered in the dialog it has already reached the
+   *  canvas, so ask the renderer to delete that node (it is still the recording head). */
+  dropTriggerClick(triggerSelector) {
+    if (this.pendingAction?.action.type === "click" && this.pendingAction.action.selector === triggerSelector) {
+      this.discardPendingAction();
+      return;
+    }
+    if (this.lastEmitted?.action.type === "click" && this.lastEmitted.action.selector === triggerSelector) {
+      const { action } = this.lastEmitted;
+      this.lastEmitted = null;
+      this.onActionRemoved?.(action.id);
+    }
   }
   setPendingAction(action, isInputClick) {
     this.flushPendingAction();
@@ -1104,6 +1219,7 @@ class CodegenCapture {
     this.active = false;
     this.paused = false;
     this.pendingLocatorPick = null;
+    this.cdpSessions.clear();
     for (const page of this.context.pages()) {
       await page.evaluate(() => {
         ["__ft_assert_toolbar", "__ft_pick_overlay", "__ft_pick_tooltip", "__ft_locator_picker"].forEach(
@@ -1145,9 +1261,9 @@ class Recorder {
   page;
   capture;
   recording = false;
-  constructor(page, onAction, onActionUpdated) {
+  constructor(page, onAction, onActionUpdated, onFilesImported, onActionRemoved) {
     this.page = page;
-    this.capture = new CodegenCapture(page.context(), onAction, onActionUpdated);
+    this.capture = new CodegenCapture(page.context(), onAction, onActionUpdated, onFilesImported, onActionRemoved);
   }
   /**
    * @param baseURL - if provided, navigate to this URL after starting capture.
@@ -1380,6 +1496,52 @@ class FlowStorage {
     }
   }
 }
+function dataRoot() {
+  return electron.app.isPackaged ? electron.app.getPath("userData") : process.cwd();
+}
+function fixturesDir() {
+  return path.join(dataRoot(), "fixtures");
+}
+const FIXTURES_PREFIX = "fixtures";
+async function sha256(file) {
+  return crypto.createHash("sha256").update(await fs.promises.readFile(file)).digest("hex");
+}
+class FixtureStorage {
+  /**
+   * Copy a picked file into fixtures/ and return both the stored (relative) path
+   * written into the Action and the absolute path on disk.
+   *
+   * Same name + same content → reuse the existing copy. Same name, different
+   * content → insert a short content hash before the extension.
+   */
+  static async importFile(sourcePath) {
+    await fs.promises.mkdir(fixturesDir(), { recursive: true });
+    const name = path.basename(sourcePath);
+    let target = path.join(fixturesDir(), name);
+    try {
+      await fs.promises.access(target);
+      if (await sha256(target) !== await sha256(sourcePath)) {
+        const ext = path.extname(name);
+        const stem = ext ? name.slice(0, -ext.length) : name;
+        const hash = (await sha256(sourcePath)).slice(0, 6);
+        target = path.join(fixturesDir(), `${stem}.${hash}${ext}`);
+        await fs.promises.copyFile(sourcePath, target);
+      }
+    } catch {
+      await fs.promises.copyFile(sourcePath, target);
+    }
+    return { stored: `${FIXTURES_PREFIX}/${path.basename(target)}`, abs: target };
+  }
+  /**
+   * Resolve a stored fixture path for use with setInputFiles.
+   * Absolute paths (hand-typed, or legacy nodes) pass through untouched; relative
+   * paths resolve against the data root — the main process cwd is not the data root
+   * once packaged, so this must never be left to the cwd.
+   */
+  static toAbsolute(stored) {
+    return path.isAbsolute(stored) ? stored : path.resolve(dataRoot(), stored);
+  }
+}
 const AsyncFunction = Object.getPrototypeOf(async () => {
 }).constructor;
 let _expectFn = null;
@@ -1393,6 +1555,8 @@ function getExpect() {
   }
   return _expectFn;
 }
+const swallowFileChooser = () => {
+};
 class Replayer {
   page;
   sessionVars = /* @__PURE__ */ new Map();
@@ -1406,6 +1570,8 @@ class Replayer {
   activeProjectId;
   /** pageAlias → Page for popups opened during replay (shared with nested Replayers). */
   pages;
+  /** Pages this replay muted the file chooser on, released when the replay ends. */
+  suppressedPages = /* @__PURE__ */ new Set();
   constructor(page, baseURL = "", profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId, sharedPages) {
     this.page = page;
     this.profileVars = profileVars ?? {};
@@ -1437,25 +1603,43 @@ class Replayer {
     await this.page.addInitScript(cursorScript);
     await this.page.evaluate(cursorScript).catch(() => {
     });
+    this.suppressFileChooser(this.page);
     const path2 = this.findPath(nodes, targetNodeId);
-    for (const node of path2) {
-      onNodeStart(node.id);
-      try {
-        if (isCallFlowAction(node.action)) {
-          await this.executeCallFlow(node.action, onNodeStart, onNodeComplete, speed);
-        } else {
-          await this.executeAction(node.action);
-          if (node.action.assertion) {
-            await this.executeAssertion(node.action);
+    try {
+      for (const node of path2) {
+        onNodeStart(node.id);
+        try {
+          if (isCallFlowAction(node.action)) {
+            await this.executeCallFlow(node.action, onNodeStart, onNodeComplete, speed);
+          } else {
+            await this.executeAction(node.action);
+            if (node.action.assertion) {
+              await this.executeAssertion(node.action);
+            }
           }
+          onNodeComplete(node.id, true);
+        } catch (err) {
+          onNodeComplete(node.id, false, String(err));
+          throw err;
         }
-        onNodeComplete(node.id, true);
-      } catch (err) {
-        onNodeComplete(node.id, false, String(err));
-        throw err;
+        await new Promise((res) => setTimeout(res, speed));
       }
-      await new Promise((res) => setTimeout(res, speed));
+    } finally {
+      this.releaseFileChooserSuppression();
     }
+  }
+  /** Swallow file choosers for the duration of this replay. Only ever removes its own
+   *  listener, so a nested call-flow replayer can't lift the outer replay's suppression. */
+  suppressFileChooser(page) {
+    if (this.suppressedPages.has(page)) return;
+    this.suppressedPages.add(page);
+    page.on("filechooser", swallowFileChooser);
+  }
+  releaseFileChooserSuppression() {
+    for (const page of this.suppressedPages) {
+      if (!page.isClosed()) page.off("filechooser", swallowFileChooser);
+    }
+    this.suppressedPages.clear();
   }
   getSessionVars() {
     return this.sessionVars;
@@ -1525,6 +1709,32 @@ class Replayer {
     }
     return scope.locator(action.selector);
   }
+  /**
+   * Resolve the actual <input type=file> for an upload action.
+   * Recorded locators are often not usable as-is: these widgets hide the input behind a
+   * styled trigger and frequently reuse one id for both, and Chromium reports the input
+   * itself as role=button with the trigger's label. Narrow to the one element
+   * setInputFiles can accept, rather than failing on a strict-mode violation.
+   */
+  async resolveFileInput(action) {
+    const scope = this.scopeFor(action);
+    const fileInputs = scope.locator('input[type="file"]');
+    const base = this.getLocator(action);
+    const candidates = [
+      base.and(fileInputs),
+      // same element, but only if it is a file input
+      base.locator('input[type="file"]'),
+      // recorded locator was a wrapper / label
+      base,
+      // recorded locator is already unambiguous
+      fileInputs
+      // page has exactly one file input
+    ];
+    for (const c of candidates) {
+      if (await c.count() === 1) return c;
+    }
+    throw new Error("找不到唯一的檔案上傳欄位 input[type=file] — 請在屬性面板修正此節點的 Locator");
+  }
   substituteOrigin(url) {
     const domainOverride = (this.envVars[DOMAIN_ENV_KEY] ?? "").replace(/\/+$/, "");
     if (!domainOverride || !this.baseOrigin) return url;
@@ -1578,8 +1788,13 @@ class Replayer {
         }
         break;
       case "upload": {
-        const files = (val ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-        await this.getLocator(action).setInputFiles(files);
+        const raw = action.filePaths?.length ? action.filePaths.map((p) => resolveValueWithSession(p, this.sessionVars, this.profileVars, this.envVars)) : (val ?? "").split(",");
+        const files = raw.map((s) => s.trim()).filter(Boolean).map((s) => FixtureStorage.toAbsolute(s));
+        if (!files.length) throw new Error("上傳節點沒有檔案路徑 — 請在屬性面板選擇檔案");
+        for (const f of files) {
+          if (!fs.existsSync(f)) throw new Error(`找不到檔案: ${f}`);
+        }
+        await (await this.resolveFileInput(action)).setInputFiles(files);
         break;
       }
       case "wait":
@@ -1595,6 +1810,7 @@ class Replayer {
       const newPage = await popupPromise;
       await newPage.waitForLoadState("domcontentloaded").catch(() => {
       });
+      this.suppressFileChooser(newPage);
       this.pages.set(action.opensPage, newPage);
     }
     if (action.captureAs && val != null) {
@@ -1926,7 +2142,8 @@ class ScriptExporter {
       const hoistedVars = config.useTestStep ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       const hoistedPages = config.useTestStep ? new Set(steps.map(({ node }) => node.action.opensPage).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       if (hoistedPages.size > 0) usesPopupHoist = true;
-      const hoistDecls = (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "") + (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join("\n") + "\n" : "");
+      const suppressChooser = steps.some(({ node }) => node.action.type === "upload") ? "    page.on('filechooser', () => {});\n" : "";
+      const hoistDecls = suppressChooser + (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "") + (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join("\n") + "\n" : "");
       const stepCode = steps.map(({ node, profileVars: stepProfileVars, envVars: stepEnvVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
         let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, stepEnvVars);
         if (node.action.opensPage) {
@@ -2057,9 +2274,10 @@ ${emitProfileVarDecls(profileVars)}` : "",
       case "press":
         return action.locatorExpr ? `${captureDecl}await ${loc}.press(${va(action.value ?? "")});` : `${captureDecl}await ${pageRef}.keyboard.press(${va(action.value ?? "")});`;
       case "upload": {
-        const files = (action.value ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+        const files = (action.filePaths?.length ? action.filePaths : (action.value ?? "").split(",")).map((s) => s.trim()).filter(Boolean);
         const arg = files.length === 1 ? va(files[0]) : `[${files.map((f) => va(f)).join(", ")}]`;
-        return `${captureDecl}await ${loc}.setInputFiles(${arg});`;
+        const uploadLoc = /\binput\b/.test(action.locatorExpr ?? action.selector ?? "") ? loc : `${loc}.and(${scopeRef}.locator('input[type="file"]'))`;
+        return `${captureDecl}await ${uploadLoc}.setInputFiles(${arg});`;
       }
       case "code": {
         const used = /* @__PURE__ */ new Set();
@@ -2169,6 +2387,15 @@ let browserController = null;
 let recorder = null;
 let replayer = null;
 function registerIpcHandlers(win) {
+  const importFiles = async (absPaths) => (await Promise.all(absPaths.map((p) => FixtureStorage.importFile(p)))).map((i) => i.stored);
+  electron.ipcMain.handle(IPC_CHANNELS.PICK_FILES, async (_e, { multiple } = {}) => {
+    const result = await electron.dialog.showOpenDialog(win, {
+      title: "選擇要上傳的檔案",
+      properties: multiple ?? true ? ["openFile", "multiSelections"] : ["openFile"]
+    });
+    if (result.canceled || !result.filePaths.length) return [];
+    return await importFiles(result.filePaths);
+  });
   electron.ipcMain.handle(IPC_CHANNELS.BROWSER_LAUNCH, async () => {
     browserController = new BrowserController();
     await browserController.launch();
@@ -2212,6 +2439,11 @@ function registerIpcHandlers(win) {
       },
       (payload2) => {
         win.webContents.send(IPC_CHANNELS.ACTION_UPDATED, payload2);
+      },
+      // Uploads: the real paths CDP read out of the browser, copied into fixtures/
+      importFiles,
+      (actionId) => {
+        win.webContents.send(IPC_CHANNELS.ACTION_REMOVED, actionId);
       }
     );
     await recorder.start(payload.branchFromNodeId ? void 0 : payload.baseURL);

@@ -50,6 +50,9 @@ export interface RawEvent {
   clickCount?: number
   /** selectOption only: all selected values of a <select multiple> */
   values?: string[]
+  /** upload only: CSS selector of the click that opened the chooser, when one is
+   *  identifiable — that click is un-recorded rather than replayed. */
+  triggerSelector?: string
 }
 
 export function generateDescription(
@@ -190,6 +193,50 @@ export function getDOMCaptureScript(): () => void {
       return `locator(${JSON.stringify(generateCSSSelector(el))})`
     }
 
+    // Hidden file inputs carry no name/label, so Playwright's generator usually falls back
+    // to a bare input[type="file"] — a strict-mode violation on any page with more than one.
+    // Qualify it with the input's own id / name / test id when it has one. Every branch
+    // keeps the `input` tag: these widgets routinely give the styled trigger and the hidden
+    // input the same id, and only the tag tells the two apart.
+    function qualifyFileInputLocator(expr: string, el: Element): string {
+      if (!/^locator\(\s*['"]input\[type=['"]?file['"]?\]['"]\s*\)$/.test(expr)) return expr
+      const h = el as HTMLElement
+      const testId = h.getAttribute('data-testid')
+      if (testId) return `locator('input[data-testid="${testId}"]')`
+      if (h.id) return `locator('input#${CSS.escape(h.id)}')`
+      const name = h.getAttribute('name')
+      if (name) return `locator('input[name="${name}"]')`
+      return expr
+    }
+
+    // The element the user clicked last, kept so an upload can recognise the click that
+    // opened the file chooser (see findTriggerSelector).
+    let lastClickEl: Element | null = null
+    let lastClickTime = 0
+
+    /**
+     * Did the last click open the chooser for this input? Walk up from the input that
+     * actually received files (at most 3 levels) and see whether the clicked element is
+     * that ancestor or sits inside it. Anchoring on the input — rather than hunting for
+     * a file input under the click target — keeps a click on some large container that
+     * merely happens to contain an upload widget from being treated as the trigger.
+     */
+    function findTriggerSelector(input: HTMLInputElement): string | undefined {
+      const el = lastClickEl
+      if (!el || Date.now() - lastClickTime > 300_000) return undefined
+      const label = (input as unknown as { labels?: NodeListOf<HTMLLabelElement> }).labels
+      let related =
+        el === (input as unknown as Element) ||
+        (!!(el as HTMLElement).id && (el as HTMLElement).id === input.id) ||
+        (!!label && Array.prototype.some.call(label, (l: HTMLLabelElement) => l === el || l.contains(el)))
+      let anc: Element | null = input as unknown as Element
+      for (let i = 0; !related && i < 3 && anc; i++) {
+        anc = anc.parentElement
+        if (anc && (anc === el || anc.contains(el))) related = true
+      }
+      return related ? generateCSSSelector(el) : undefined
+    }
+
     function extractLabel(locatorExpr: string, el: Element): string {
       // Playwright's asLocator() generates single-quoted JS; accept both quote styles.
       const q = `['"]([^'"]+)['"]`
@@ -277,6 +324,11 @@ export function getDOMCaptureScript(): () => void {
     function handleMouseAction(e: MouseEvent, button: 'left' | 'right' | 'middle', clickCount: number): void {
       let el = getTarget(e) as Element
       if (!el?.tagName) return
+
+      // Remember every click, including the blacklisted ones below: a click straight on
+      // a hidden file input still counts as the trigger a following upload should drop.
+      lastClickEl = el
+      lastClickTime = Date.now()
 
       // A click on anything other than the currently-focused input means that
       // input's value is "final" from the user's perspective, even if focus was
@@ -457,14 +509,21 @@ export function getDOMCaptureScript(): () => void {
       }
       const inputType = ((el as unknown as HTMLInputElement).type || '').toLowerCase()
       // input[type=file] → upload (matches Playwright's setInputFiles capture).
-      // Browsers only expose file names, not paths — the user replaces them with
-      // real paths in the PropertyPanel before replay/export.
+      // The page only ever sees File.name; CodegenCapture asks the browser itself for
+      // the real paths (CDP DOM.getFileInfo) via __ft_lastUploadInput below and
+      // overwrites `value`. If that fails, the node keeps bare names until the user
+      // picks files in the PropertyPanel.
       if (tag === 'input' && inputType === 'file') {
         const input = el as unknown as HTMLInputElement
         const names = Array.from(input.files ?? []).map((f) => f.name)
         if (names.length === 0) return
-        const locatorExpr = getLocatorExpr(el)
-        report({ kind: 'upload', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: names.join(', '), timestamp: Date.now(), url: window.location.href })
+        // Park the element where a top-frame Runtime.evaluate can reach it. Same-origin
+        // iframes can write to window.top; cross-origin ones fall back to their own
+        // global, where the lookup won't find it (→ name-only capture).
+        try { ((window.top as any) || window).__ft_lastUploadInput = input }
+        catch (err) { (window as any).__ft_lastUploadInput = input }
+        const locatorExpr = qualifyFileInputLocator(getLocatorExpr(el), el)
+        report({ kind: 'upload', locatorExpr, selector: generateCSSSelector(el), label: extractLabel(locatorExpr, el), value: names.join(', '), timestamp: Date.now(), url: window.location.href, triggerSelector: findTriggerSelector(input) })
         return
       }
       // range/color have no blur-based fill path (excluded from isTextInput and the

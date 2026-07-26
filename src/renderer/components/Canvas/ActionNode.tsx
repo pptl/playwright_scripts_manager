@@ -1,6 +1,6 @@
 import React, { memo } from 'react'
 import { Handle, Position, NodeProps } from 'reactflow'
-import type { FlowNode } from '../../../../shared/types'
+import type { FlowNode } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
 
 const TYPE_COLORS: Record<string, string> = {
@@ -39,6 +39,16 @@ const TYPE_ICONS: Record<string, string> = {
 
 export interface ActionNodeData {
   flowNode: FlowNode
+}
+
+/** An upload only replays if it has something path-shaped: an imported fixtures/ entry,
+ *  an absolute path, or a variable. A bare "cat.jpg" is just the name the browser leaked. */
+function hasUploadPath(action: FlowNode['action']): boolean {
+  const entries = action.filePaths?.length
+    ? action.filePaths
+    : (action.value ?? '').split(',')
+  const cleaned = entries.map((s) => s.trim()).filter(Boolean)
+  return cleaned.length > 0 && cleaned.every((p) => /[/\\]/.test(p) || p.includes('{{'))
 }
 
 function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
@@ -142,6 +152,19 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
               ↗ 開新頁 {action.opensPage}
             </span>
           )}
+        </div>
+      )}
+
+      {action.type === 'upload' && !hasUploadPath(action) && (
+        <div
+          title="錄製時只取得檔名，沒有可用的檔案路徑。請在屬性面板按「📂 選擇檔案…」補上。"
+          style={{
+            fontSize: 10, color: '#f87171', background: '#2a0f0f',
+            border: '1px solid #7f1d1d', borderRadius: 3, padding: '1px 5px',
+            marginTop: 3, display: 'inline-block',
+          }}
+        >
+          ⚠ 缺少檔案路徑
         </div>
       )}
 

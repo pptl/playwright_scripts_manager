@@ -1,6 +1,6 @@
 import { Page } from 'playwright-core'
 import type { Action, LocatorOption } from '../../shared/types'
-import { CodegenCapture, type ActionUpdatedCallback } from './codegenCapture'
+import { CodegenCapture, type ActionUpdatedCallback, type ActionRemovedCallback, type FilesImportedCallback } from './codegenCapture'
 import type { AssertPickType } from './captureShared'
 
 type ActionCallback = (action: Action, alternatives?: LocatorOption[]) => void
@@ -10,9 +10,15 @@ export class Recorder {
   private capture: CodegenCapture
   private recording = false
 
-  constructor(page: Page, onAction: ActionCallback, onActionUpdated?: ActionUpdatedCallback) {
+  constructor(
+    page: Page,
+    onAction: ActionCallback,
+    onActionUpdated?: ActionUpdatedCallback,
+    onFilesImported?: FilesImportedCallback,
+    onActionRemoved?: ActionRemovedCallback,
+  ) {
     this.page = page
-    this.capture = new CodegenCapture(page.context(), onAction, onActionUpdated)
+    this.capture = new CodegenCapture(page.context(), onAction, onActionUpdated, onFilesImported, onActionRemoved)
   }
 
   /**

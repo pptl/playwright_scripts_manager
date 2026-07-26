@@ -38,6 +38,10 @@ export interface Action {
   /** selectOption only: all selected values when the <select> allows multiple.
    *  Takes precedence over `value` at replay/export. */
   values?: string[]
+  /** upload only: the files to send, one entry per file. Paths are either relative to the
+   *  data root (`fixtures/cat.jpg`, written when recording imports the picked file) or
+   *  absolute. Takes precedence over the comma-joined `value` at replay/export. */
+  filePaths?: string[]
   /** Page this action ran on — absent means the initial page. Popups get 'page1', 'page2'… */
   pageAlias?: string
   /** iframe chain (top → innermost) as locator expressions for each iframe element.
@@ -260,11 +264,15 @@ export const IPC_CHANNELS = {
   // Renderer → Main (locator pick)
   LOCATOR_PICK_RESOLVED: 'locator:pickResolved',
 
+  // Renderer → Main (native file picker — returns paths imported into fixtures/)
+  PICK_FILES: 'files:pick',
+
   // Main → Renderer
   LOCATOR_PICK_NEEDED: 'locator:pickNeeded',
   ASSERTION_PICK_CANCELLED: 'assertion:pickCancelled',
   ACTION_CAPTURED: 'action:captured',
   ACTION_UPDATED: 'action:updated',
+  ACTION_REMOVED: 'action:removed',
   TEST_OUTPUT: 'test:output',
   TEST_FINISHED: 'test:finished',
   REPLAY_NODE_START: 'replay:nodeStart',

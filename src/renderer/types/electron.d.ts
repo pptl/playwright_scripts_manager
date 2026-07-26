@@ -17,6 +17,7 @@ export interface ElectronAPI {
   startAssertionPick: (assertionType: ActionType) => Promise<void>
   onActionCaptured: (cb: (action: Action) => void) => () => void
   onActionUpdated: (cb: (payload: ActionUpdatedPayload) => void) => () => void
+  onActionRemoved: (cb: (actionId: string) => void) => () => void
   onReplayNodeStart: (cb: (nodeId: string) => void) => () => void
   onReplayNodeComplete: (cb: (payload: ReplayNodeCompletePayload) => void) => () => void
   onReplayFinished: (cb: () => void) => () => void
@@ -25,6 +26,8 @@ export interface ElectronAPI {
   onTestFinished: (cb: (payload: TestFinishedPayload) => void) => () => void
   onAssertionPickCancelled: (cb: () => void) => () => void
   resolveLocatorPick: () => Promise<void>
+  /** Opens the native file picker; returns paths already copied into fixtures/. */
+  pickFiles: (multiple?: boolean) => Promise<string[]>
   onLocatorPickNeeded: (cb: (payload: LocatorPickPayload) => void) => () => void
   getFlow: (flowId: string) => Promise<Flow | null>
   checkFlowCycle: (currentFlowId: string, candidateSubFlowId: string) => Promise<boolean>

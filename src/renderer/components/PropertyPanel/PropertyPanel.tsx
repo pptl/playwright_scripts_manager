@@ -91,11 +91,21 @@ export function PropertyPanel() {
         ...(selectedNode.action.values
           ? { values: value.split(',').map((s) => s.trim()).filter(Boolean) }
           : {}),
+        // Upload nodes do the same for filePaths[], which replay/export read first
+        ...(selectedNode.action.type === 'upload'
+          ? { filePaths: value.split(',').map((s) => s.trim()).filter(Boolean) }
+          : {}),
         ...(selectedNode.action.type === 'code' ? { code } : {}),
         ...callFlowUpdates,
       },
     })
     window.electronAPI.saveFlow(useFlowStore.getState().currentFlow!).catch(console.error)
+  }
+
+  // Native picker — main copies each pick into fixtures/ and hands back the stored paths.
+  const pickFiles = async () => {
+    const picked = await window.electronAPI.pickFiles(true)
+    if (picked.length) setValue(picked.join(', '))
   }
 
   const parentProfiles = currentFlow.profiles ?? []
@@ -162,14 +172,21 @@ export function PropertyPanel() {
                 selectedNode.action.type === 'assertValue' ? '驗證值' :
                 selectedNode.action.type === 'upload' ? '檔案路徑' : '值'
               }>
-                <input
-                  value={value}
-                  onChange={(e) => setValue(e.target.value)}
-                  style={inputStyle}
-                />
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input
+                    value={value}
+                    onChange={(e) => setValue(e.target.value)}
+                    style={inputStyle}
+                  />
+                  {selectedNode.action.type === 'upload' && (
+                    <button onClick={pickFiles} style={pickBtnStyle} title="選擇檔案（會複製到 fixtures/）">
+                      📂 選擇檔案…
+                    </button>
+                  )}
+                </div>
                 <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
                   {selectedNode.action.type === 'upload'
-                    ? '錄製時只能取得檔名，回放前請改成完整路徑（多檔用逗號分隔）'
+                    ? '路徑相對於資料根目錄（fixtures/…），也可填絕對路徑；多檔用逗號分隔'
                     : <>可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code></>}
                 </div>
               </Field>
@@ -301,6 +318,17 @@ const inputStyle: React.CSSProperties = {
   fontSize: 12,
   outline: 'none',
   width: 200,
+}
+
+const pickBtnStyle: React.CSSProperties = {
+  padding: '5px 10px',
+  borderRadius: 5,
+  border: '1px solid #334155',
+  background: '#0f172a',
+  color: '#cbd5e1',
+  cursor: 'pointer',
+  fontSize: 12,
+  whiteSpace: 'nowrap',
 }
 
 const saveBtnStyle: React.CSSProperties = {

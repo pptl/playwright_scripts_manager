@@ -7203,20 +7203,25 @@ const NODE_WIDTH = 200;
 const NODE_HEIGHT = 70;
 const H_MARGIN = 25;
 const V_GAP = 30;
-const defaultSizeOf = () => ({ width: NODE_WIDTH, height: NODE_HEIGHT });
-function computeTreeLayout(nodes, rootNodeId, sizeOf = defaultSizeOf) {
+const CODE_PREVIEW_EXTRA_HEIGHT = 68;
+function nodeHeightOf(node) {
+  if (node?.action.type === "code" && node.action.code) return NODE_HEIGHT + CODE_PREVIEW_EXTRA_HEIGHT;
+  return NODE_HEIGHT;
+}
+function computeTreeLayout(nodes, rootNodeId, sizeOf) {
   const nodeMap = new Map(nodes.map((n2) => [n2.id, n2]));
+  const resolvedSizeOf = sizeOf ?? ((id2) => ({ width: NODE_WIDTH, height: nodeHeightOf(nodeMap.get(id2)) }));
   const positions = /* @__PURE__ */ new Map();
   function subtreeWidth(nodeId) {
     const node = nodeMap.get(nodeId);
-    const w2 = sizeOf(nodeId).width;
+    const w2 = resolvedSizeOf(nodeId).width;
     if (!node || node.childIds.length === 0) return w2;
     const childWidths = node.childIds.map(subtreeWidth);
     const total = childWidths.reduce((a, b) => a + b, 0) + (node.childIds.length - 1) * H_MARGIN;
     return Math.max(w2, total);
   }
   function place(nodeId, centerX, y2) {
-    const { width, height } = sizeOf(nodeId);
+    const { width, height } = resolvedSizeOf(nodeId);
     positions.set(nodeId, { x: centerX - width / 2, y: y2 });
     const node = nodeMap.get(nodeId);
     if (!node || node.childIds.length === 0) return;
@@ -7235,18 +7240,20 @@ function computeTreeLayout(nodes, rootNodeId, sizeOf = defaultSizeOf) {
   return positions;
 }
 const TREE_H_GAP = 80;
-function computeAllRootsLayout(nodes, sizeOf = defaultSizeOf) {
+function computeAllRootsLayout(nodes, sizeOf) {
+  const nodeMap = new Map(nodes.map((n2) => [n2.id, n2]));
+  const resolvedSizeOf = sizeOf ?? ((id2) => ({ width: NODE_WIDTH, height: nodeHeightOf(nodeMap.get(id2)) }));
   const result = /* @__PURE__ */ new Map();
   const roots = nodes.filter((n2) => n2.parentId === null).sort((a, b) => a.position.x - b.position.x);
   let xCursor = 0;
   const placeTree = (rootId) => {
-    const treePos = computeTreeLayout(nodes, rootId, sizeOf);
+    const treePos = computeTreeLayout(nodes, rootId, resolvedSizeOf);
     if (treePos.size === 0) return;
     let minX = Infinity;
     let maxRight = -Infinity;
     treePos.forEach((p2, id2) => {
       if (p2.x < minX) minX = p2.x;
-      const right = p2.x + sizeOf(id2).width;
+      const right = p2.x + resolvedSizeOf(id2).width;
       if (right > maxRight) maxRight = right;
     });
     const shift = xCursor - minX;
@@ -7280,15 +7287,16 @@ function layoutMembers(members, boundary) {
   }));
   const positions = computeTreeLayout(memberNodes, boundary.entryId);
   if (positions.size === 0) return null;
+  const memberById = new Map(members.map((m2) => [m2.id, m2]));
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  positions.forEach((p2) => {
+  positions.forEach((p2, id2) => {
     minX = Math.min(minX, p2.x);
     minY = Math.min(minY, p2.y);
     maxX = Math.max(maxX, p2.x + NODE_WIDTH);
-    maxY = Math.max(maxY, p2.y + NODE_HEIGHT);
+    maxY = Math.max(maxY, p2.y + nodeHeightOf(memberById.get(id2)));
   });
   return { positions, minX, minY, width: maxX - minX, height: maxY - minY };
 }
@@ -7302,7 +7310,7 @@ function groupBoxRect(members) {
     minX = Math.min(minX, m2.position.x);
     minY = Math.min(minY, m2.position.y);
     maxX = Math.max(maxX, m2.position.x + NODE_WIDTH);
-    maxY = Math.max(maxY, m2.position.y + NODE_HEIGHT);
+    maxY = Math.max(maxY, m2.position.y + nodeHeightOf(m2));
   }
   const x2 = minX - GROUP_PAD_X;
   const y2 = minY - GROUP_BOX_HEADER - GROUP_HEADER_GAP;
@@ -7371,7 +7379,7 @@ function computeGroupAwareLayout(nodes, groups) {
         };
       }
     }
-    return { width: NODE_WIDTH, height: NODE_HEIGHT };
+    return { width: NODE_WIDTH, height: nodeHeightOf(nodeById.get(id2)) };
   };
   const viewPos = computeAllRootsLayout(view, sizeOf);
   const result = /* @__PURE__ */ new Map();
@@ -8030,12 +8038,21 @@ const useFlowStore = create$1((set2, get2) => ({
     });
   },
   deleteProject: async (projectId) => {
+    const allFlows = await window.electronAPI.listFlows();
+    const flowsToDelete = allFlows.filter((f2) => (f2.projectId ?? DEFAULT_PROJECT_ID) === projectId);
+    for (const f2 of flowsToDelete) {
+      await window.electronAPI.deleteFlow(f2.id);
+    }
     await window.electronAPI.deleteProject(projectId);
     const list = await window.electronAPI.listProjects();
-    const { currentProject } = get2();
+    const { currentProject, currentFlow } = get2();
+    const currentFlowDeleted = !!currentFlow && (currentFlow.projectId ?? DEFAULT_PROJECT_ID) === projectId;
+    if (currentFlowDeleted) {
+      get2().setCurrentFlow(null);
+    }
     set2({
       projects: list,
-      ...currentProject?.id === projectId ? { currentProject: null, activeEnvironmentId: null } : {}
+      ...!currentFlowDeleted && currentProject?.id === projectId ? { currentProject: null, activeEnvironmentId: null } : {}
     });
   },
   renameProject: async (projectId, name) => {
@@ -19260,7 +19277,7 @@ function FlowList() {
   };
   const handleDeleteProject = async (projectId, projectName) => {
     if (!window.confirm(`刪除專案「${projectName}」？
-此專案中的流程將移至「未分類」。`)) return;
+此專案中的所有流程也將一併刪除，且無法復原。`)) return;
     await deleteProject(projectId);
     await refreshFlowList();
   };
@@ -20121,7 +20138,9 @@ function VariableList() {
         background: "#1e293b",
         display: "flex",
         flexDirection: "column",
-        flexShrink: 0
+        flexShrink: 0,
+        maxHeight: 220,
+        overflow: "hidden"
       },
       children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -20134,12 +20153,13 @@ function VariableList() {
               color: "#64748b",
               fontWeight: 600,
               textTransform: "uppercase",
-              letterSpacing: "0.06em"
+              letterSpacing: "0.06em",
+              flexShrink: 0
             },
             children: "全域變數"
           }
         ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: BUILT_IN_VARIABLES.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflowY: "auto", flex: 1 }, children: BUILT_IN_VARIABLES.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "div",
           {
             onClick: () => copyToClipboard(v2.placeholder, v2.name),
@@ -20273,7 +20293,7 @@ function PropertyPanel() {
         borderTop: "1px solid #334155",
         padding: "12px 16px",
         flexShrink: 0,
-        maxHeight: 260,
+        maxHeight: 420,
         overflowY: "auto"
       },
       children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-end" }, children: selectedNode ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
@@ -20332,7 +20352,7 @@ function PropertyPanel() {
               style: {
                 display: "block",
                 width: "100%",
-                minHeight: 120,
+                minHeight: 240,
                 resize: "vertical",
                 marginTop: 4,
                 padding: "8px 10px",
@@ -20517,7 +20537,8 @@ function SessionVarList() {
         borderTop: "1px solid #334155",
         display: "flex",
         flexDirection: "column",
-        flex: 1,
+        flexShrink: 0,
+        maxHeight: 220,
         overflow: "hidden"
       },
       children: [
@@ -21056,7 +21077,7 @@ function App() {
         /* @__PURE__ */ jsxRuntimeExports.jsx(FlowCanvas, {}),
         currentFlow && /* @__PURE__ */ jsxRuntimeExports.jsx(PropertyPanel, {})
       ] }),
-      selectedNodeId && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", width: 200, flexShrink: 0, borderLeft: "1px solid #334155", overflow: "hidden" }, children: [
+      selectedNodeId && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", width: 200, flexShrink: 0, borderLeft: "1px solid #334155", overflowY: "auto", overflowX: "hidden" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(VariableList, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx(ProfileVarList, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx(ProjectEnvVarList, {}),

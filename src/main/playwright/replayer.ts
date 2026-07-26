@@ -166,7 +166,7 @@ export class Replayer {
   private scopeFor(action: Action): Page | FrameLocator {
     let scope: Page | FrameLocator = this.pageFor(action)
     for (const frameExpr of action.framePath ?? []) {
-      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.profileVars)
+      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.profileVars, this.envVars)
       // eslint-disable-next-line @typescript-eslint/no-implied-eval
       const fn = new Function('s', `return s.${resolved}`)
       scope = (fn(scope) as Locator).contentFrame()
@@ -183,7 +183,7 @@ export class Replayer {
     if (action.locatorExpr) {
       try {
         // Resolve {{...}} variables before evaluating the locator expression
-        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars)
+        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars, this.envVars)
         // eslint-disable-next-line @typescript-eslint/no-implied-eval
         const fn = new Function('page', `return page.${resolved}`)
         return fn(scope) as Locator
@@ -212,7 +212,7 @@ export class Replayer {
 
   private async executeAction(action: Action): Promise<void> {
     const val = action.value != null
-      ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars)
+      ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars, this.envVars)
       : undefined
 
     // If this action opens a popup, start waiting for the page event BEFORE executing
@@ -239,7 +239,7 @@ export class Replayer {
       case 'selectOption':
         if (action.values?.length) {
           await this.getLocator(action).selectOption(
-            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.profileVars)),
+            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.profileVars, this.envVars)),
           )
         } else {
           await this.getLocator(action).selectOption(val ?? '')

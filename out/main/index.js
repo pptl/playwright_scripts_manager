@@ -1225,6 +1225,7 @@ function resolveValueWithSession(value, sessionVars, profileVars, envVars) {
     out = out.replace(/\{\{(\w+)\}\}/g, (match, name) => {
       if (sessionVars.has(name)) return sessionVars.get(name);
       if (profileVars && name in profileVars) return profileVars[name];
+      if (envVars && name in envVars) return envVars[name];
       if (name === "randomText") return generateRandomText();
       if (name === "randomNumber") return generateRandomNumber();
       if (name === "randomOneText") return generateRandomOneLetter();
@@ -1239,71 +1240,66 @@ function resolveValueWithSession(value, sessionVars, profileVars, envVars) {
 function hasVariables(value) {
   return /\{\{.+?\}\}/.test(value);
 }
-function valueToCodeExpr(value, profileVarKeys) {
-  if (!hasVariables(value)) {
-    return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-  }
-  const inner = value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{(\w+)\}\}/g, (_, name) => {
-    if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`;
-    if (name === "randomText") return "${_ftRandomText()}";
-    if (name === "randomNumber") return "${_ftRandomNumber()}";
-    if (name === "randomOneText") return "${_ftRandomOneLetter()}";
-    if (name === "randomOneNumber") return "${_ftRandomOneDigit()}";
-    if (name === "timestamp") return "${_ftTimestamp()}";
-    return `{{${name}}}`;
+const PROFILE_VAR_PREFIX = "_ftProf_";
+const ENV_VAR_PREFIX = "_ftEnv_";
+function varToCodeRef(name, scope) {
+  if (scope.sessionVars?.has(name)) return name;
+  if (scope.profileVars?.has(name)) return `${PROFILE_VAR_PREFIX}${name}`;
+  if (scope.envVars?.has(name)) return `${ENV_VAR_PREFIX}${name}`;
+  if (name === "randomText") return "_ftRandomText()";
+  if (name === "randomNumber") return "_ftRandomNumber()";
+  if (name === "randomOneText") return "_ftRandomOneLetter()";
+  if (name === "randomOneNumber") return "_ftRandomOneDigit()";
+  if (name === "timestamp") return "_ftTimestamp()";
+  return null;
+}
+function toSingleQuoted(value) {
+  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+}
+function escapeTemplateBody(value) {
+  return value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
+}
+function valueToCodeExpr(value, scope = {}) {
+  if (!hasVariables(value)) return toSingleQuoted(value);
+  const inner = escapeTemplateBody(value).replace(/\{\{(\w+)\}\}/g, (m, name) => {
+    const ref = varToCodeRef(name, scope);
+    return ref ? `\${${ref}}` : m;
   });
   return "`" + inner + "`";
 }
-function sessionAwareValueToCodeExpr(value, sessionVarNames, profileVarKeys) {
-  if (!hasVariables(value)) {
-    return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-  }
+function sessionAwareValueToCodeExpr(value, sessionVars, scope = {}) {
+  const fullScope = { ...scope, sessionVars };
+  if (!hasVariables(value)) return toSingleQuoted(value);
   const singleVar = value.match(/^\{\{(\w+)\}\}$/);
-  if (singleVar && sessionVarNames.has(singleVar[1])) {
-    return singleVar[1];
-  }
-  const inner = value.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{(\w+)\}\}/g, (_, name) => {
-    if (sessionVarNames.has(name)) return `\${${name}}`;
-    if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`;
-    if (name === "randomText") return "${_ftRandomText()}";
-    if (name === "randomNumber") return "${_ftRandomNumber()}";
-    if (name === "randomOneText") return "${_ftRandomOneLetter()}";
-    if (name === "randomOneNumber") return "${_ftRandomOneDigit()}";
-    if (name === "timestamp") return "${_ftTimestamp()}";
-    return `{{${name}}}`;
-  });
-  return "`" + inner + "`";
+  if (singleVar && sessionVars.has(singleVar[1])) return singleVar[1];
+  return valueToCodeExpr(value, fullScope);
 }
-function locatorExprToCode(expr, profileVarKeys, sessionVarNames) {
-  return expr.replace(/'([^']*\{\{[^}]+\}\}[^']*)'|"([^"]*\{\{[^}]+\}\}[^"]*)"/g, (match, sq, dq) => {
-    const inner = sq ?? dq;
-    const singleVar = inner.match(/^\{\{(\w+)\}\}$/);
-    if (singleVar) {
-      const name = singleVar[1];
-      if (sessionVarNames?.has(name)) return name;
-      if (profileVarKeys?.has(name)) return `_ftProf_${name}`;
-      if (name === "randomText") return "_ftRandomText()";
-      if (name === "randomNumber") return "_ftRandomNumber()";
-      if (name === "randomOneText") return "_ftRandomOneLetter()";
-      if (name === "randomOneNumber") return "_ftRandomOneDigit()";
-      if (name === "timestamp") return "_ftTimestamp()";
-      return match;
+function locatorExprToCode(expr, scope = {}) {
+  const rewriteQuoted = expr.replace(
+    /'([^']*\{\{[^}]+\}\}[^']*)'|"([^"]*\{\{[^}]+\}\}[^"]*)"/g,
+    (match, sq, dq) => {
+      const inner = sq ?? dq;
+      const singleVar = inner.match(/^\{\{(\w+)\}\}$/);
+      if (singleVar) return varToCodeRef(singleVar[1], scope) ?? match;
+      const templateInner = escapeTemplateBody(inner).replace(/\{\{(\w+)\}\}/g, (m, name) => {
+        const ref = varToCodeRef(name, scope);
+        return ref ? `\${${ref}}` : m;
+      });
+      return "`" + templateInner + "`";
     }
-    const templateInner = inner.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${").replace(/\{\{(\w+)\}\}/g, (m, name) => {
-      if (sessionVarNames?.has(name)) return `\${${name}}`;
-      if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`;
-      if (name === "randomText") return "${_ftRandomText()}";
-      if (name === "randomNumber") return "${_ftRandomNumber()}";
-      if (name === "randomOneText") return "${_ftRandomOneLetter()}";
-      if (name === "randomOneNumber") return "${_ftRandomOneDigit()}";
-      if (name === "timestamp") return "${_ftTimestamp()}";
-      return m;
-    });
-    return "`" + templateInner + "`";
+  );
+  return rewriteQuoted.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+    return varToCodeRef(name, scope) ?? toSingleQuoted(match);
   });
+}
+function emitVarDecls(vars, prefix) {
+  return Object.entries(vars).filter(([key]) => /^\w+$/.test(key)).map(([key, value]) => `const ${prefix}${key} = ${JSON.stringify(value)};`).join("\n");
 }
 function emitProfileVarDecls(profileVars) {
-  return Object.entries(profileVars).map(([key, value]) => `const _ftProf_${key} = ${JSON.stringify(value)};`).join("\n");
+  return emitVarDecls(profileVars, PROFILE_VAR_PREFIX);
+}
+function emitEnvVarDecls(envVars) {
+  return emitVarDecls(envVars, ENV_VAR_PREFIX);
 }
 const VARIABLE_HELPERS_CODE = `
 function _ftRandomText(len = 8) {
@@ -1507,7 +1503,7 @@ class Replayer {
   scopeFor(action) {
     let scope = this.pageFor(action);
     for (const frameExpr of action.framePath ?? []) {
-      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.profileVars);
+      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.profileVars, this.envVars);
       const fn = new Function("s", `return s.${resolved}`);
       scope = fn(scope).contentFrame();
     }
@@ -1521,7 +1517,7 @@ class Replayer {
     const scope = this.scopeFor(action);
     if (action.locatorExpr) {
       try {
-        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars);
+        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars, this.envVars);
         const fn = new Function("page", `return page.${resolved}`);
         return fn(scope);
       } catch {
@@ -1542,7 +1538,7 @@ class Replayer {
     return url;
   }
   async executeAction(action) {
-    const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars) : void 0;
+    const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars, this.envVars) : void 0;
     const popupPromise = action.opensPage ? this.pageFor(action).context().waitForEvent("page", { timeout: 15e3 }) : null;
     switch (action.type) {
       case "goto":
@@ -1562,7 +1558,7 @@ class Replayer {
       case "selectOption":
         if (action.values?.length) {
           await this.getLocator(action).selectOption(
-            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.profileVars))
+            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.profileVars, this.envVars))
           );
         } else {
           await this.getLocator(action).selectOption(val ?? "");
@@ -1758,9 +1754,11 @@ class ProjectStorage {
 function exportsDir() {
   return electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "exports") : path.join(process.cwd(), "exports");
 }
+function gateEnvVars(flow, envVars, activeProjectId) {
+  return activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? envVars ?? {} : {};
+}
 function resolveFlowDomain(flow, envVars, activeProjectId) {
-  const gated = activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? envVars ?? {} : {};
-  return (gated[DOMAIN_ENV_KEY] ?? "").replace(/\/+$/, "");
+  return (gateEnvVars(flow, envVars, activeProjectId)[DOMAIN_ENV_KEY] ?? "").replace(/\/+$/, "");
 }
 class ScriptExporter {
   static async export(flow, config) {
@@ -1804,7 +1802,7 @@ class ScriptExporter {
   static resolveProfileVars(flow, profileId, activeEnvironmentId, envVars, activeProjectId) {
     const profile = profileId ? (flow.profiles ?? []).find((p) => p.id === profileId) : (flow.profiles ?? [])[0];
     if (!profile) return {};
-    const flowEnvVars = activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? envVars ?? {} : {};
+    const flowEnvVars = gateEnvVars(flow, envVars, activeProjectId);
     return Object.fromEntries(
       profile.vars.map((v) => {
         const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value;
@@ -1820,7 +1818,7 @@ class ScriptExporter {
     }
     return action.subFlowProfileId ?? null;
   }
-  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subDomain, activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
+  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subEnvVars, subBaseOrigin, subDomain, activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]));
     const path2 = [];
     const visited = /* @__PURE__ */ new Set();
@@ -1832,6 +1830,7 @@ class ScriptExporter {
         if (nested) {
           const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, activeProfileId);
           const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId, activeEnvironmentId, envVars, activeProjectId);
+          const nestedEnvVars = gateEnvVars(nested, envVars, activeProjectId);
           const nestedBaseOrigin = (() => {
             try {
               return new URL(nested.baseURL).origin;
@@ -1840,16 +1839,16 @@ class ScriptExporter {
             }
           })();
           const nestedDomain = resolveFlowDomain(nested, envVars, activeProjectId);
-          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedDomain, nestedProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
+          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedEnvVars, nestedBaseOrigin, nestedDomain, nestedProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
         }
       } else {
-        path2.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true, domain: subDomain });
+        path2.unshift({ node: cur, profileVars: subProfileVars, envVars: subEnvVars, baseOrigin: subBaseOrigin, inlineVars: true, domain: subDomain });
       }
       cur = cur.parentId ? nodeMap.get(cur.parentId) : void 0;
     }
     return path2;
   }
-  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultBaseOrigin = "", defaultDomain = "", activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
+  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultEnvVars = {}, defaultBaseOrigin = "", defaultDomain = "", activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
     const result = [];
     for (const id of nodeIds) {
       const node = nodeMap.get(id);
@@ -1859,6 +1858,7 @@ class ScriptExporter {
         if (subFlow) {
           const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, activeProfileId);
           const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId, activeEnvironmentId, envVars, activeProjectId);
+          const subEnvVars = gateEnvVars(subFlow, envVars, activeProjectId);
           const subBaseOrigin = (() => {
             try {
               return new URL(subFlow.baseURL).origin;
@@ -1867,10 +1867,10 @@ class ScriptExporter {
             }
           })();
           const subDomain = resolveFlowDomain(subFlow, envVars, activeProjectId);
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subDomain, subProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subEnvVars, subBaseOrigin, subDomain, subProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
         }
       } else {
-        result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false, domain: defaultDomain });
+        result.push({ node, profileVars: defaultProfileVars, envVars: defaultEnvVars, baseOrigin: defaultBaseOrigin, inlineVars: false, domain: defaultDomain });
       }
     }
     return result;
@@ -1903,6 +1903,8 @@ class ScriptExporter {
     const profileVars = config.profileVars ?? {};
     const profileVarKeys = new Set(Object.keys(profileVars));
     const hasProfileVars = profileVarKeys.size > 0;
+    const allEnvVars = config.envVars ?? {};
+    const hasEnvVars = Object.keys(allEnvVars).length > 0;
     const baseOrigin = (() => {
       try {
         return new URL(flow.baseURL).origin;
@@ -1911,6 +1913,7 @@ class ScriptExporter {
       }
     })();
     const flowDomain = resolveFlowDomain(flow, config.envVars, config.activeProjectId);
+    const flowEnvVars = gateEnvVars(flow, config.envVars, config.activeProjectId);
     const usesVariables = flow.nodes.some(
       (n) => n.action.value && hasVariables(n.action.value) || n.action.locatorExpr && hasVariables(n.action.locatorExpr) || // code nodes emit `const vars = { randomText: _ftRandomText, … }`, so the helpers are needed
       n.action.type === "code"
@@ -1918,14 +1921,14 @@ class ScriptExporter {
     let usesPopupHoist = false;
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
-      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, flowDomain, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId);
+      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, flowEnvVars, baseOrigin, flowDomain, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const hoistedVars = config.useTestStep ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       const hoistedPages = config.useTestStep ? new Set(steps.map(({ node }) => node.action.opensPage).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       if (hoistedPages.size > 0) usesPopupHoist = true;
       const hoistDecls = (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "") + (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join("\n") + "\n" : "");
-      const stepCode = steps.map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
-        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, config.envVars ?? {});
+      const stepCode = steps.map(({ node, profileVars: stepProfileVars, envVars: stepEnvVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
+        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, stepEnvVars);
         if (node.action.opensPage) {
           const alias = node.action.opensPage;
           const pageRef = node.action.pageAlias || "page";
@@ -1953,6 +1956,8 @@ ${hoistDecls}${stepCode}
       `import { test, expect${usesPopupHoist ? ", Page" : ""} } from '@playwright/test';`,
       helperImport,
       usesVariables ? VARIABLE_HELPERS_CODE : "",
+      hasEnvVars ? `
+${emitEnvVarDecls(allEnvVars)}` : "",
       hasProfileVars ? `
 ${emitProfileVarDecls(profileVars)}` : "",
       "",
@@ -1969,6 +1974,10 @@ ${emitProfileVarDecls(profileVars)}` : "",
     const frameChain = (action.framePath ?? []).map((f) => `.${f}.contentFrame()`).join("");
     const scopeRef = `${pageRef}${frameChain}`;
     const profileVarKeys = inlineVars ? /* @__PURE__ */ new Set() : new Set(Object.keys(profileVars));
+    const scope = {
+      profileVars: profileVarKeys,
+      envVars: new Set(Object.keys(envVars))
+    };
     let loc;
     const { selector } = action;
     const locatorExpr = action.locatorExpr && inlineVars ? action.locatorExpr.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : action.locatorExpr;
@@ -1995,19 +2004,19 @@ ${emitProfileVarDecls(profileVars)}` : "",
       loc = `${scopeRef}.locator('${selector}')`;
     }
     if (hasVariables(loc)) {
-      loc = locatorExprToCode(loc, profileVarKeys, sessionVarsDefined);
+      loc = locatorExprToCode(loc, { ...scope, sessionVars: sessionVarsDefined });
     }
     const resolveProfilePlaceholders = (v) => inlineVars ? v.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : v;
     const captureAs = action.captureAs;
     let captureDecl = "";
     if (captureAs) {
-      const expr = valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ""), profileVarKeys);
+      const expr = valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ""), scope);
       captureDecl = hoistedVars.has(captureAs) ? `${captureAs} = ${expr};
 ` : `const ${captureAs} = ${expr};
 `;
       sessionVarsDefined.add(captureAs);
     }
-    const va = (v) => captureAs ? captureAs : sessionAwareValueToCodeExpr(resolveProfilePlaceholders(v), sessionVarsDefined, profileVarKeys);
+    const va = (v) => captureAs ? captureAs : sessionAwareValueToCodeExpr(resolveProfilePlaceholders(v), sessionVarsDefined, scope);
     switch (action.type) {
       case "goto": {
         let gotoVal = action.value ?? "";
@@ -2022,7 +2031,7 @@ ${emitProfileVarDecls(profileVars)}` : "",
           }
         }
         if (inlineVars) {
-          gotoVal = resolveValue(gotoVal, profileVars);
+          gotoVal = resolveValue(gotoVal, profileVars, envVars);
         }
         return `${captureDecl}await ${pageRef}.goto(${va(gotoVal)});`;
       }
@@ -2060,10 +2069,10 @@ ${emitProfileVarDecls(profileVars)}` : "",
           used.add(key);
           entries.push(`${JSON.stringify(key)}: ${inlineVars ? JSON.stringify(profileVars[key]) : `_ftProf_${key}`}`);
         }
-        for (const [key, v] of Object.entries(envVars)) {
+        for (const key of Object.keys(envVars)) {
           if (used.has(key)) continue;
           used.add(key);
-          entries.push(`${JSON.stringify(key)}: ${JSON.stringify(v)}`);
+          entries.push(`${JSON.stringify(key)}: _ftEnv_${key}`);
         }
         for (const name of sessionVarsDefined) {
           if (used.has(name)) continue;

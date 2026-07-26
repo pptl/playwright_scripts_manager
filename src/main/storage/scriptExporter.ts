@@ -4,12 +4,14 @@ import { app } from 'electron'
 import type { Flow, FlowNode, ExportConfig, TestPath } from '../../shared/types'
 import { isCallFlowAction, DEFAULT_PROJECT_ID, DOMAIN_ENV_KEY } from '../../shared/types'
 import { FlowStorage } from './flowStorage'
+import type { CodegenVarScope } from '../../shared/variableResolver'
 import {
   hasVariables,
   valueToCodeExpr,
   sessionAwareValueToCodeExpr,
   locatorExprToCode,
   emitProfileVarDecls,
+  emitEnvVarDecls,
   VARIABLE_HELPERS_CODE,
   resolveValue,
 } from '../../shared/variableResolver'
@@ -24,6 +26,8 @@ function exportsDir(): string {
 type ExpandedStep = {
   node: FlowNode
   profileVars: Record<string, string>
+  /** Project env vars visible to this node, already gated by active project (see gateEnvVars). */
+  envVars: Record<string, string>
   baseOrigin: string
   inlineVars: boolean
   /** The `domain` env-var value (trailing-slash stripped) for the flow this node came from,
@@ -31,16 +35,25 @@ type ExpandedStep = {
   domain: string
 }
 
-/** Resolve a flow's `domain` env-var value, gated so it only applies when the flow belongs to
- *  the active project (v1: no cross-project env-var references). Trailing slash stripped. */
+/** Project env vars are only visible to flows belonging to the active project
+ *  (v1: no cross-project env-var references). */
+function gateEnvVars(
+  flow: Flow,
+  envVars: Record<string, string> | undefined,
+  activeProjectId: string | undefined,
+): Record<string, string> {
+  return activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId
+    ? (envVars ?? {})
+    : {}
+}
+
+/** Resolve a flow's `domain` env-var value, gated to the active project. Trailing slash stripped. */
 function resolveFlowDomain(
   flow: Flow,
   envVars: Record<string, string> | undefined,
   activeProjectId: string | undefined,
 ): string {
-  const gated =
-    activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? (envVars ?? {}) : {}
-  return (gated[DOMAIN_ENV_KEY] ?? '').replace(/\/+$/, '')
+  return (gateEnvVars(flow, envVars, activeProjectId)[DOMAIN_ENV_KEY] ?? '').replace(/\/+$/, '')
 }
 
 export class ScriptExporter {
@@ -100,10 +113,7 @@ export class ScriptExporter {
       ? (flow.profiles ?? []).find((p) => p.id === profileId)
       : (flow.profiles ?? [])[0]
     if (!profile) return {}
-    // Env-var references ({{envKey}}) only resolve when this flow belongs to the active
-    // project (v1 restriction: no cross-project env-var references).
-    const flowEnvVars =
-      activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? (envVars ?? {}) : {}
+    const flowEnvVars = gateEnvVars(flow, envVars, activeProjectId)
     return Object.fromEntries(
       profile.vars.map((v) => {
         const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
@@ -129,6 +139,7 @@ export class ScriptExporter {
     exitNodeId: string,
     subFlowMap: Map<string, Flow>,
     subProfileVars: Record<string, string>,
+    subEnvVars: Record<string, string>,
     subBaseOrigin: string,
     subDomain: string,
     activeProfileId?: string,
@@ -147,12 +158,13 @@ export class ScriptExporter {
         if (nested) {
           const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, activeProfileId)
           const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId, activeEnvironmentId, envVars, activeProjectId)
+          const nestedEnvVars = gateEnvVars(nested, envVars, activeProjectId)
           const nestedBaseOrigin = (() => { try { return new URL(nested.baseURL).origin } catch { return '' } })()
           const nestedDomain = resolveFlowDomain(nested, envVars, activeProjectId)
-          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedBaseOrigin, nestedDomain, nestedProfileId ?? undefined, activeEnvironmentId, envVars, activeProjectId))
+          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedEnvVars, nestedBaseOrigin, nestedDomain, nestedProfileId ?? undefined, activeEnvironmentId, envVars, activeProjectId))
         }
       } else {
-        path.unshift({ node: cur, profileVars: subProfileVars, baseOrigin: subBaseOrigin, inlineVars: true, domain: subDomain })
+        path.unshift({ node: cur, profileVars: subProfileVars, envVars: subEnvVars, baseOrigin: subBaseOrigin, inlineVars: true, domain: subDomain })
       }
       cur = cur.parentId ? nodeMap.get(cur.parentId) : undefined
     }
@@ -164,6 +176,7 @@ export class ScriptExporter {
     nodeMap: Map<string, FlowNode>,
     subFlowMap: Map<string, Flow>,
     defaultProfileVars: Record<string, string> = {},
+    defaultEnvVars: Record<string, string> = {},
     defaultBaseOrigin: string = '',
     defaultDomain: string = '',
     activeProfileId?: string,
@@ -180,12 +193,13 @@ export class ScriptExporter {
         if (subFlow) {
           const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, activeProfileId)
           const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId, activeEnvironmentId, envVars, activeProjectId)
+          const subEnvVars = gateEnvVars(subFlow, envVars, activeProjectId)
           const subBaseOrigin = (() => { try { return new URL(subFlow.baseURL).origin } catch { return '' } })()
           const subDomain = resolveFlowDomain(subFlow, envVars, activeProjectId)
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subBaseOrigin, subDomain, subProfileId ?? undefined, activeEnvironmentId, envVars, activeProjectId))
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subEnvVars, subBaseOrigin, subDomain, subProfileId ?? undefined, activeEnvironmentId, envVars, activeProjectId))
         }
       } else {
-        result.push({ node, profileVars: defaultProfileVars, baseOrigin: defaultBaseOrigin, inlineVars: false, domain: defaultDomain })
+        result.push({ node, profileVars: defaultProfileVars, envVars: defaultEnvVars, baseOrigin: defaultBaseOrigin, inlineVars: false, domain: defaultDomain })
       }
     }
     return result
@@ -234,10 +248,16 @@ export class ScriptExporter {
     const profileVarKeys = new Set(Object.keys(profileVars))
     const hasProfileVars = profileVarKeys.size > 0
 
+    // Project env vars are emitted once at file scope as `_ftEnv_*` consts. They are
+    // project-global, so sub-flow nodes reference the same consts (no per-flow inlining).
+    const allEnvVars = config.envVars ?? {}
+    const hasEnvVars = Object.keys(allEnvVars).length > 0
+
     const baseOrigin = (() => {
       try { return new URL(flow.baseURL).origin } catch { return '' }
     })()
     const flowDomain = resolveFlowDomain(flow, config.envVars, config.activeProjectId)
+    const flowEnvVars = gateEnvVars(flow, config.envVars, config.activeProjectId)
 
     const usesVariables = flow.nodes.some((n) =>
       (n.action.value && hasVariables(n.action.value)) ||
@@ -251,7 +271,7 @@ export class ScriptExporter {
     const tests = paths
       .map((path, idx) => {
         const testName = path.name || `測試路徑 ${idx + 1}`
-        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap, profileVars, baseOrigin, flowDomain, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId)
+        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap, profileVars, flowEnvVars, baseOrigin, flowDomain, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId)
         const sessionVarsDefined = new Set<string>()
 
         // When useTestStep, each step is wrapped in its own async closure.
@@ -271,8 +291,8 @@ export class ScriptExporter {
           (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join('\n') + '\n' : '')
 
         const stepCode = steps
-          .map(({ node, profileVars: stepProfileVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
-            let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, config.envVars ?? {})
+          .map(({ node, profileVars: stepProfileVars, envVars: stepEnvVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
+            let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, stepEnvVars)
             // Popup-opening action: wrap in the official waitForEvent('popup') pattern
             if (node.action.opensPage) {
               const alias = node.action.opensPage
@@ -302,6 +322,7 @@ export class ScriptExporter {
       `import { test, expect${usesPopupHoist ? ', Page' : ''} } from '@playwright/test';`,
       helperImport,
       usesVariables ? VARIABLE_HELPERS_CODE : '',
+      hasEnvVars ? `\n${emitEnvVarDecls(allEnvVars)}` : '',
       hasProfileVars ? `\n${emitProfileVarDecls(profileVars)}` : '',
       '',
       `test.describe('${flow.name}', () => {`,
@@ -334,6 +355,12 @@ export class ScriptExporter {
     // For sub-flow nodes (inlineVars=true), profile vars are baked into actual values at code-gen
     // time so we don't emit _ftProf_* references (which would resolve to the parent flow's values).
     const profileVarKeys = inlineVars ? new Set<string>() : new Set(Object.keys(profileVars))
+    // Env vars are project-global, so sub-flow nodes reference the same _ftEnv_* consts —
+    // no inlining, which also keeps unquoted placeholders in locators valid JS.
+    const scope: CodegenVarScope = {
+      profileVars: profileVarKeys,
+      envVars: new Set(Object.keys(envVars)),
+    }
 
     // Locator priority:
     // 1. If selector has [name="..."] (form inputs), always use it — it's already
@@ -383,7 +410,7 @@ export class ScriptExporter {
 
     // Transform any {{...}} variable placeholders remaining in loc into JS code expressions
     if (hasVariables(loc)) {
-      loc = locatorExprToCode(loc, profileVarKeys, sessionVarsDefined)
+      loc = locatorExprToCode(loc, { ...scope, sessionVars: sessionVarsDefined })
     }
 
     // For sub-flow nodes: pre-resolve profile var placeholders to actual values.
@@ -397,7 +424,7 @@ export class ScriptExporter {
     const captureAs = action.captureAs
     let captureDecl = ''
     if (captureAs) {
-      const expr = valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ''), profileVarKeys)
+      const expr = valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ''), scope)
       captureDecl = hoistedVars.has(captureAs)
         ? `${captureAs} = ${expr};\n`
         : `const ${captureAs} = ${expr};\n`
@@ -406,7 +433,7 @@ export class ScriptExporter {
 
     // Value argument: use captureAs var name when this node defines it,
     // otherwise use session-aware expression so {{varName}} resolves to the right reference.
-    const va = (v: string) => captureAs ? captureAs : sessionAwareValueToCodeExpr(resolveProfilePlaceholders(v), sessionVarsDefined, profileVarKeys)
+    const va = (v: string) => captureAs ? captureAs : sessionAwareValueToCodeExpr(resolveProfilePlaceholders(v), sessionVarsDefined, scope)
 
     switch (action.type) {
       case 'goto': {
@@ -424,8 +451,8 @@ export class ScriptExporter {
           } catch { /* not a URL, fall through */ }
         }
         if (inlineVars) {
-          // Resolve any remaining {{key}} placeholders with actual profile var values
-          gotoVal = resolveValue(gotoVal, profileVars)
+          // Resolve any remaining {{key}} placeholders with actual profile / env var values
+          gotoVal = resolveValue(gotoVal, profileVars, envVars)
         }
         return `${captureDecl}await ${pageRef}.goto(${va(gotoVal)});`
       }
@@ -463,7 +490,7 @@ export class ScriptExporter {
         // Emit `const vars = { … }` then inline the user's code verbatim.
         // Parity with Replayer.buildCodeVars: env < profile < session (session wins),
         // built-ins exposed as functions. Profile vars reference _ftProf_* (or literals
-        // when inlineVars), env/session use literals/identifiers.
+        // when inlineVars), env vars reference _ftEnv_*, session vars are identifiers.
         const used = new Set<string>()
         const entries: string[] = []
         for (const key of Object.keys(profileVars)) {
@@ -471,10 +498,10 @@ export class ScriptExporter {
           used.add(key)
           entries.push(`${JSON.stringify(key)}: ${inlineVars ? JSON.stringify(profileVars[key]) : `_ftProf_${key}`}`)
         }
-        for (const [key, v] of Object.entries(envVars)) {
+        for (const key of Object.keys(envVars)) {
           if (used.has(key)) continue
           used.add(key)
-          entries.push(`${JSON.stringify(key)}: ${JSON.stringify(v)}`)
+          entries.push(`${JSON.stringify(key)}: _ftEnv_${key}`)
         }
         for (const name of sessionVarsDefined) {
           if (used.has(name)) continue

@@ -149,112 +149,125 @@ export function hasVariables(value: string): boolean {
   return /\{\{.+?\}\}/.test(value)
 }
 
+/** Identifier prefixes for the const declarations emitted at the top of a generated spec. */
+export const PROFILE_VAR_PREFIX = '_ftProf_'
+export const ENV_VAR_PREFIX = '_ftEnv_'
+
+/**
+ * Which variable names are in scope during code generation, by tier.
+ * Mirrors the runtime priority of resolveValueWithSession:
+ * session > profile > project env > built-in.
+ */
+export interface CodegenVarScope {
+  /** captureAs names already declared — emitted as bare identifiers. */
+  sessionVars?: Set<string>
+  /** Active profile's keys — emitted as `_ftProf_<key>`. */
+  profileVars?: Set<string>
+  /** Active project env-var keys — emitted as `_ftEnv_<key>`. */
+  envVars?: Set<string>
+}
+
+/** Map a placeholder name to the JS expression producing its value, or null if unknown. */
+function varToCodeRef(name: string, scope: CodegenVarScope): string | null {
+  if (scope.sessionVars?.has(name)) return name
+  if (scope.profileVars?.has(name)) return `${PROFILE_VAR_PREFIX}${name}`
+  if (scope.envVars?.has(name)) return `${ENV_VAR_PREFIX}${name}`
+  if (name === 'randomText') return '_ftRandomText()'
+  if (name === 'randomNumber') return '_ftRandomNumber()'
+  if (name === 'randomOneText') return '_ftRandomOneLetter()'
+  if (name === 'randomOneNumber') return '_ftRandomOneDigit()'
+  if (name === 'timestamp') return '_ftTimestamp()'
+  return null
+}
+
+/** Escape a raw string for embedding inside a single-quoted JS literal. */
+function toSingleQuoted(value: string): string {
+  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+}
+
+/** Escape a raw string for embedding inside a template literal body. */
+function escapeTemplateBody(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${')
+}
+
 /**
  * Convert a value string into a TypeScript code expression.
  * Plain strings become single-quoted literals; strings with variables become template literals.
- * Profile var keys emit as `${_ftProf_key}` references.
+ * Known variables emit as `${_ftProf_key}` / `${_ftEnv_key}` / `${_ftRandomText()}` …;
+ * unknown names are left as literal `{{name}}` text.
  * e.g. "test-{{randomText}}" → "`test-${_ftRandomText()}`"
  * e.g. "{{admin_name}}" (profile var) → "`${_ftProf_admin_name}`"
  */
-export function valueToCodeExpr(value: string, profileVarKeys?: Set<string>): string {
-  if (!hasVariables(value)) {
-    return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
-  }
-  const inner = value
-    .replace(/\\/g, '\\\\')
-    .replace(/`/g, '\\`')
-    .replace(/\$\{/g, '\\${')
-    .replace(/\{\{(\w+)\}\}/g, (_, name) => {
-      if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`
-      if (name === 'randomText') return '${_ftRandomText()}'
-      if (name === 'randomNumber') return '${_ftRandomNumber()}'
-      if (name === 'randomOneText') return '${_ftRandomOneLetter()}'
-      if (name === 'randomOneNumber') return '${_ftRandomOneDigit()}'
-      if (name === 'timestamp') return '${_ftTimestamp()}'
-      return `{{${name}}}`
-    })
+export function valueToCodeExpr(value: string, scope: CodegenVarScope = {}): string {
+  if (!hasVariables(value)) return toSingleQuoted(value)
+  const inner = escapeTemplateBody(value).replace(/\{\{(\w+)\}\}/g, (m, name) => {
+    const ref = varToCodeRef(name, scope)
+    return ref ? `\${${ref}}` : m
+  })
   return '`' + inner + '`'
 }
 
 /**
- * Like valueToCodeExpr but treats names in sessionVarNames as JS variable references.
- * Priority: session vars > profile vars > built-ins.
- * e.g. "{{sign_title}}" + sessionVarNames={"sign_title"} → bare identifier `sign_title`
+ * Like valueToCodeExpr, but a value that is exactly one session variable collapses to a
+ * bare identifier rather than a one-slot template literal.
+ * e.g. "{{sign_title}}" + sessionVars={"sign_title"} → `sign_title`
  */
 export function sessionAwareValueToCodeExpr(
   value: string,
-  sessionVarNames: Set<string>,
-  profileVarKeys?: Set<string>,
+  sessionVars: Set<string>,
+  scope: CodegenVarScope = {},
 ): string {
-  if (!hasVariables(value)) {
-    return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
-  }
-  // If the entire value is a single session variable reference, emit a bare JS identifier
+  const fullScope: CodegenVarScope = { ...scope, sessionVars }
+  if (!hasVariables(value)) return toSingleQuoted(value)
   const singleVar = value.match(/^\{\{(\w+)\}\}$/)
-  if (singleVar && sessionVarNames.has(singleVar[1])) {
-    return singleVar[1]
-  }
-  const inner = value
-    .replace(/\\/g, '\\\\')
-    .replace(/`/g, '\\`')
-    .replace(/\$\{/g, '\\${')
-    .replace(/\{\{(\w+)\}\}/g, (_, name) => {
-      if (sessionVarNames.has(name)) return `\${${name}}`
-      if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`
-      if (name === 'randomText') return '${_ftRandomText()}'
-      if (name === 'randomNumber') return '${_ftRandomNumber()}'
-      if (name === 'randomOneText') return '${_ftRandomOneLetter()}'
-      if (name === 'randomOneNumber') return '${_ftRandomOneDigit()}'
-      if (name === 'timestamp') return '${_ftTimestamp()}'
-      return `{{${name}}}`
-    })
-  return '`' + inner + '`'
+  if (singleVar && sessionVars.has(singleVar[1])) return singleVar[1]
+  return valueToCodeExpr(value, fullScope)
 }
 
 /**
  * Transform variable placeholders inside a locatorExpr string for code generation.
+ *
  * Quoted string arguments containing {{...}} are rewritten to JS expressions:
  *   '{{sessionVar}}' → bare identifier  sessionVar
- *   '{{profileVar}}' → bare identifier  _ftProf_profileVar
+ *   '{{profileVar}}' → _ftProf_profileVar
+ *   '{{envVar}}'     → _ftEnv_envVar
  *   '{{randomText}}' → _ftRandomText()
  *   Mixed content ('prefix_{{var}}') → template literal `prefix_${_ftProf_var}`
+ *
+ * Bare (unquoted) placeholders are handled too — users copy `{{key}}` from the variable
+ * sidebar and paste it over a quoted argument, producing `{ name: {{key}} }`. A known name
+ * becomes its identifier; an unknown one is quoted into a string literal so the emitted
+ * spec still parses (the test then fails on a missing element, not a SyntaxError).
  */
-export function locatorExprToCode(
-  expr: string,
-  profileVarKeys?: Set<string>,
-  sessionVarNames?: Set<string>,
-): string {
-  return expr.replace(/'([^']*\{\{[^}]+\}\}[^']*)'|"([^"]*\{\{[^}]+\}\}[^"]*)"/g, (match, sq, dq) => {
-    const inner = sq ?? dq
-    const singleVar = inner.match(/^\{\{(\w+)\}\}$/)
-    if (singleVar) {
-      const name = singleVar[1]
-      if (sessionVarNames?.has(name)) return name
-      if (profileVarKeys?.has(name)) return `_ftProf_${name}`
-      if (name === 'randomText') return '_ftRandomText()'
-      if (name === 'randomNumber') return '_ftRandomNumber()'
-      if (name === 'randomOneText') return '_ftRandomOneLetter()'
-      if (name === 'randomOneNumber') return '_ftRandomOneDigit()'
-      if (name === 'timestamp') return '_ftTimestamp()'
-      return match
-    }
-    // Mixed content → template literal
-    const templateInner = inner
-      .replace(/\\/g, '\\\\')
-      .replace(/`/g, '\\`')
-      .replace(/\$\{/g, '\\${')
-      .replace(/\{\{(\w+)\}\}/g, (m, name) => {
-        if (sessionVarNames?.has(name)) return `\${${name}}`
-        if (profileVarKeys?.has(name)) return `\${_ftProf_${name}}`
-        if (name === 'randomText') return '${_ftRandomText()}'
-        if (name === 'randomNumber') return '${_ftRandomNumber()}'
-        if (name === 'randomOneText') return '${_ftRandomOneLetter()}'
-        if (name === 'randomOneNumber') return '${_ftRandomOneDigit()}'
-        if (name === 'timestamp') return '${_ftTimestamp()}'
-        return m
+export function locatorExprToCode(expr: string, scope: CodegenVarScope = {}): string {
+  const rewriteQuoted = expr.replace(
+    /'([^']*\{\{[^}]+\}\}[^']*)'|"([^"]*\{\{[^}]+\}\}[^"]*)"/g,
+    (match, sq, dq) => {
+      const inner = sq ?? dq
+      const singleVar = inner.match(/^\{\{(\w+)\}\}$/)
+      if (singleVar) return varToCodeRef(singleVar[1], scope) ?? match
+      const templateInner = escapeTemplateBody(inner).replace(/\{\{(\w+)\}\}/g, (m, name) => {
+        const ref = varToCodeRef(name, scope)
+        return ref ? `\${${ref}}` : m
       })
-    return '`' + templateInner + '`'
+      return '`' + templateInner + '`'
+    },
+  )
+
+  return rewriteQuoted.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+    return varToCodeRef(name, scope) ?? toSingleQuoted(match)
   })
+}
+
+/** Emit `const <prefix><key> = '<value>';` lines for a flat variable map.
+ *  Keys that aren't plain word characters are skipped — they'd produce an invalid
+ *  identifier and break the whole spec, and `{{...}}` placeholders only ever match
+ *  \w+ so such a key could never be referenced anyway. */
+function emitVarDecls(vars: Record<string, string>, prefix: string): string {
+  return Object.entries(vars)
+    .filter(([key]) => /^\w+$/.test(key))
+    .map(([key, value]) => `const ${prefix}${key} = ${JSON.stringify(value)};`)
+    .join('\n')
 }
 
 /**
@@ -263,9 +276,15 @@ export function locatorExprToCode(
  *   → "const _ftProf_admin_name = 'admin';\nconst _ftProf_region = 'apac';"
  */
 export function emitProfileVarDecls(profileVars: Record<string, string>): string {
-  return Object.entries(profileVars)
-    .map(([key, value]) => `const _ftProf_${key} = ${JSON.stringify(value)};`)
-    .join('\n')
+  return emitVarDecls(profileVars, PROFILE_VAR_PREFIX)
+}
+
+/**
+ * Emit top-level const declarations for the active project's environment variables.
+ * e.g. { domain: 'https://x.test' } → "const _ftEnv_domain = 'https://x.test';"
+ */
+export function emitEnvVarDecls(envVars: Record<string, string>): string {
+  return emitVarDecls(envVars, ENV_VAR_PREFIX)
 }
 
 /** Helper functions block to inject into generated spec files when built-in variables are used. */

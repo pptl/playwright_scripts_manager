@@ -106,6 +106,8 @@ interface FlowStore {
   addProfile: (name: string) => Promise<void>
   updateProfile: (id: string, updates: Partial<Pick<FlowProfile, 'name' | 'vars'>>) => Promise<void>
   deleteProfile: (id: string) => Promise<void>
+  /** Duplicate an existing profile, deep-copying its vars (incl. envValues) */
+  duplicateProfile: (id: string) => Promise<void>
   /** Append a new empty variable row to EVERY profile (keys must stay in sync) */
   addVarToAllProfiles: () => Promise<void>
   /** Rename the variable at the given index across ALL profiles */
@@ -727,6 +729,48 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       currentFlow: updatedFlow,
       activeProfileId: activeProfileId === id ? (updatedProfiles[0]?.id ?? null) : activeProfileId,
     })
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+  },
+
+  duplicateProfile: async (id) => {
+    const flow = get().currentFlow
+    if (!flow) return
+    const source = (flow.profiles ?? []).find((p) => p.id === id)
+    if (!source) return
+    const newProfile: FlowProfile = {
+      id: uuidv4(),
+      name: `${source.name}-副本`,
+      // Unlike addProfile, a copy must carry the per-environment overrides too.
+      vars: source.vars.map((v) => ({
+        key: v.key,
+        value: v.value,
+        description: v.description ?? '',
+        ...(v.envValues ? { envValues: { ...v.envValues } } : {}),
+      })),
+    }
+    // Extend all callFlow node mappings, inheriting the source profile's mapping.
+    const updatedNodes = flow.nodes.map((n) => {
+      if (n.action.type === 'callFlow' && n.action.subFlowProfileMapping) {
+        return {
+          ...n,
+          action: {
+            ...n.action,
+            subFlowProfileMapping: {
+              ...n.action.subFlowProfileMapping,
+              [newProfile.id]: n.action.subFlowProfileMapping[id] ?? null,
+            },
+          },
+        }
+      }
+      return n
+    })
+    const updatedFlow: Flow = {
+      ...flow,
+      profiles: [...(flow.profiles ?? []), newProfile],
+      nodes: updatedNodes,
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow })
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
   },
 

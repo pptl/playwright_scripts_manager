@@ -7922,6 +7922,46 @@ const useFlowStore = create$1((set2, get2) => ({
     });
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
   },
+  duplicateProfile: async (id2) => {
+    const flow = get2().currentFlow;
+    if (!flow) return;
+    const source = (flow.profiles ?? []).find((p2) => p2.id === id2);
+    if (!source) return;
+    const newProfile = {
+      id: v4(),
+      name: `${source.name}-副本`,
+      // Unlike addProfile, a copy must carry the per-environment overrides too.
+      vars: source.vars.map((v2) => ({
+        key: v2.key,
+        value: v2.value,
+        description: v2.description ?? "",
+        ...v2.envValues ? { envValues: { ...v2.envValues } } : {}
+      }))
+    };
+    const updatedNodes = flow.nodes.map((n2) => {
+      if (n2.action.type === "callFlow" && n2.action.subFlowProfileMapping) {
+        return {
+          ...n2,
+          action: {
+            ...n2.action,
+            subFlowProfileMapping: {
+              ...n2.action.subFlowProfileMapping,
+              [newProfile.id]: n2.action.subFlowProfileMapping[id2] ?? null
+            }
+          }
+        };
+      }
+      return n2;
+    });
+    const updatedFlow = {
+      ...flow,
+      profiles: [...flow.profiles ?? [], newProfile],
+      nodes: updatedNodes,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    set2({ currentFlow: updatedFlow });
+    await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
+  },
   addVarToAllProfiles: async () => {
     const flow = get2().currentFlow;
     if (!flow) return;
@@ -8544,6 +8584,7 @@ function ProfileEditorModal({ onClose }) {
     addProfile,
     updateProfile,
     deleteProfile,
+    duplicateProfile,
     addVarToAllProfiles,
     updateVarKeyInAllProfiles,
     deleteVarFromAllProfiles,
@@ -8578,6 +8619,12 @@ function ProfileEditorModal({ onClose }) {
     if (name) await updateProfile(id2, { name });
     setRenamingId(null);
     setRenameInput("");
+  };
+  const handleDuplicateProfile = async (id2) => {
+    await duplicateProfile(id2);
+    const updated = useFlowStore.getState().currentFlow?.profiles ?? [];
+    const last = updated[updated.length - 1];
+    if (last) setSelectedProfileId(last.id);
   };
   const handleDeleteProfile = async (id2) => {
     const nextProfile = profiles.find((p2) => p2.id !== id2);
@@ -8753,6 +8800,35 @@ function ProfileEditorModal({ onClose }) {
                                   e.currentTarget.style.opacity = "0.5";
                                 },
                                 children: "✏"
+                              }
+                            ),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "button",
+                              {
+                                onClick: (e) => {
+                                  e.stopPropagation();
+                                  handleDuplicateProfile(p2.id);
+                                },
+                                title: "建立此配置的副本",
+                                style: {
+                                  flexShrink: 0,
+                                  background: "transparent",
+                                  border: "none",
+                                  cursor: "pointer",
+                                  color: "#93c5fd",
+                                  fontSize: 12,
+                                  padding: "1px 3px",
+                                  borderRadius: 3,
+                                  opacity: 0.5,
+                                  lineHeight: 1
+                                },
+                                onMouseEnter: (e) => {
+                                  e.currentTarget.style.opacity = "1";
+                                },
+                                onMouseLeave: (e) => {
+                                  e.currentTarget.style.opacity = "0.5";
+                                },
+                                children: "⧉"
                               }
                             ),
                             /* @__PURE__ */ jsxRuntimeExports.jsx(

@@ -14,6 +14,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     addProfile,
     updateProfile,
     deleteProfile,
+    duplicateProfile,
     addVarToAllProfiles,
     updateVarKeyInAllProfiles,
     deleteVarFromAllProfiles,
@@ -54,6 +55,13 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     if (name) await updateProfile(id, { name })
     setRenamingId(null)
     setRenameInput('')
+  }
+
+  const handleDuplicateProfile = async (id: string) => {
+    await duplicateProfile(id)
+    const updated = useFlowStore.getState().currentFlow?.profiles ?? []
+    const last = updated[updated.length - 1]
+    if (last) setSelectedProfileId(last.id)
   }
 
   const handleDeleteProfile = async (id: string) => {
@@ -215,6 +223,26 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                           onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.5' }}
                         >
                           ✏
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDuplicateProfile(p.id) }}
+                          title="建立此配置的副本"
+                          style={{
+                            flexShrink: 0,
+                            background: 'transparent',
+                            border: 'none',
+                            cursor: 'pointer',
+                            color: '#93c5fd',
+                            fontSize: 12,
+                            padding: '1px 3px',
+                            borderRadius: 3,
+                            opacity: 0.5,
+                            lineHeight: 1,
+                          }}
+                          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '1' }}
+                          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.5' }}
+                        >
+                          ⧉
                         </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); handleDeleteProfile(p.id) }}

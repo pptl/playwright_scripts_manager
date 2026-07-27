@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 import { isCallFlowAction } from '@shared/types'
 import type { Flow } from '@shared/types'
+import { confirm } from '../../stores/confirmStore'
 
 export function SessionVarList() {
   const { currentFlow, updateNode } = useFlowStore()
@@ -51,9 +52,16 @@ export function SessionVarList() {
     return () => { cancelled = true }
   }, [ancestorCallFlowNodes])
 
-  const deleteVar = (nodeId: string) => {
+  const deleteVar = async (nodeId: string) => {
     const node = currentFlow?.nodes.find((n) => n.id === nodeId)
     if (!node) return
+    const ok = await confirm({
+      title: `刪除區域變數 {{${node.action.captureAs}}}？`,
+      detail: '引用此變數的節點將無法解析。',
+      confirmLabel: '刪除',
+      danger: true,
+    })
+    if (!ok) return
     updateNode(nodeId, { action: { ...node.action, captureAs: undefined } })
     const updated = useFlowStore.getState().currentFlow
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error)

@@ -7,6 +7,7 @@ import { PropertyPanel } from './components/PropertyPanel/PropertyPanel'
 import { SessionVarList } from './components/SessionVarList/SessionVarList'
 import { ProfileVarList } from './components/ProfileVarList/ProfileVarList'
 import { ProjectEnvVarList } from './components/ProjectEnvVar/ProjectEnvVarList'
+import { ConfirmHost } from './components/common/ConfirmDialog'
 import { usePlaywrightEvents } from './hooks/usePlaywrightEvents'
 import { useUndoRedo } from './hooks/useUndoRedo'
 import { useFlowStore } from './stores/flowStore'
@@ -39,6 +40,7 @@ export default function App() {
           </div>
         )}
       </div>
+      <ConfirmHost />
     </div>
   )
 }

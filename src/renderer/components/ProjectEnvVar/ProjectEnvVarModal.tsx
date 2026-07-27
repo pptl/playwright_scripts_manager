@@ -1,6 +1,15 @@
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 import { DOMAIN_ENV_KEY } from '@shared/types'
+import { confirm } from '../../stores/confirmStore'
+import { useDraftRows, ensureNoUnsavedDrafts } from '../../hooks/useDraftForm'
+import { DirtyBadge } from '../common/DirtyBadge'
+
+/** One row of the env-var table: a key plus its value for the currently selected environment. */
+interface EnvVarRow {
+  key: string
+  value: string
+}
 
 interface ProjectEnvVarModalProps {
   onClose: () => void
@@ -21,10 +30,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     renameEnvironment,
     duplicateEnvironment,
     deleteEnvironment,
-    addProjectEnvVar,
-    renameProjectEnvVarKey,
-    deleteProjectEnvVar,
-    setProjectEnvVarValue,
+    commitProjectEnvVars,
   } = useFlowStore()
 
   const environments = currentProject?.environments ?? []
@@ -35,20 +41,44 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
   const selectedEnv =
     environments.find((e) => e.id === activeEnvironmentId) ?? environments[0] ?? null
 
-  const [newKey, setNewKey] = useState('')
-  const [adding, setAdding] = useState(false)
   const [renamingEnv, setRenamingEnv] = useState(false)
   const [envRenameValue, setEnvRenameValue] = useState('')
   const [addingEnv, setAddingEnv] = useState(false)
   const [newEnvName, setNewEnvName] = useState('')
 
-  const handleAdd = async () => {
-    const key = newKey.trim()
-    if (!key) return
-    await addProjectEnvVar(key)
-    setNewKey('')
-    setAdding(false)
-  }
+  // ── Variable table (draft → 儲存) ──────────────────────────
+
+  const varSource = useMemo<EnvVarRow[]>(
+    () => envVars.map((v) => ({ key: v.key, value: (selectedEnv && v.values[selectedEnv.id]) ?? '' })),
+    [envVars, selectedEnv],
+  )
+
+  const table = useDraftRows<EnvVarRow>({
+    source: varSource,
+    // The value column is per-environment, so the environment belongs in the reset key.
+    resetKey: currentProject && selectedEnv ? `${currentProject.id}:${selectedEnv.id}` : null,
+    onCommit: async (rows) => {
+      if (!selectedEnv) return
+      await commitProjectEnvVars(
+        rows.map((r) => ({
+          origKey: r._origIndex !== null ? (varSource[r._origIndex]?.key ?? null) : null,
+          key: r.key.trim(),
+          value: r.value,
+        })),
+        selectedEnv.id,
+      )
+    },
+    validate: (rows) => {
+      const keys = rows.map((r) => r.key.trim())
+      if (keys.some((k) => !k)) return '變數名稱不可為空'
+      const dup = keys.find((k, i) => keys.indexOf(k) !== i)
+      if (dup) return `變數名稱重複：${dup}`
+      // `domain` is reserved: it must survive and keep its name.
+      if (!keys.includes(DOMAIN_ENV_KEY)) return `${DOMAIN_ENV_KEY} 為保留變數，不可刪除或改名`
+      return null
+    },
+    guardLabel: '專案環境變數',
+  })
 
   const startRenameEnv = () => {
     if (!selectedEnv) return
@@ -77,8 +107,26 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
   const handleDeleteEnv = async () => {
     if (!selectedEnv) return
     if (environments.length <= 1) return
-    if (!window.confirm(`刪除環境「${selectedEnv.name}」？\n此環境在所有環境變數上的值將一併移除。`)) return
+    const ok = await confirm({
+      title: `刪除環境「${selectedEnv.name}」？`,
+      detail: '此環境在所有環境變數上的值將一併移除。',
+      confirmLabel: '刪除',
+      danger: true,
+    })
+    if (!ok) return
     await deleteEnvironment(selectedEnv.id)
+  }
+
+  const handleDeleteVar = async (rid: string) => {
+    const key = table.rows.find((r) => r._rid === rid)?.key ?? ''
+    const ok = await confirm({
+      title: key ? `刪除環境變數 {{${key}}}？` : '刪除此變數？',
+      detail: '此變數在所有環境上的值將一併移除，引用它的配置變數將無法解析。儲存後生效。',
+      confirmLabel: '刪除',
+      danger: true,
+    })
+    if (!ok) return
+    table.removeRow(rid)
   }
 
   const gridCols = '1fr 1fr 32px'
@@ -135,7 +183,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
             </span>
           </div>
           <button
-            onClick={onClose}
+            onClick={() => void table.guardedRun(onClose)}
             style={{ background: 'transparent', border: 'none', color: '#64748b', fontSize: 18, cursor: 'pointer' }}
           >
             ✕
@@ -190,7 +238,12 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
               <>
                 <select
                   value={selectedEnv?.id ?? ''}
-                  onChange={(e) => setActiveEnvironment(e.target.value || null)}
+                  // The value column is per-environment — switching re-baselines the table.
+                  onChange={async (e) => {
+                    const next = e.target.value || null
+                    if (!(await ensureNoUnsavedDrafts())) return
+                    setActiveEnvironment(next)
+                  }}
                   style={{
                     background: '#0f172a',
                     border: '1px solid #334155',
@@ -259,13 +312,13 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                 <span />
               </div>
 
-              {envVars.map((v) => {
+              {table.rows.map((row) => {
                 // `domain` is a reserved env var (drives goto-URL origin substitution) — its key
                 // is locked and it cannot be deleted; only its per-environment value is editable.
-                const isDomain = v.key === DOMAIN_ENV_KEY
+                const isDomain = row.key === DOMAIN_ENV_KEY
                 return (
                 <div
-                  key={v.key}
+                  key={row._rid}
                   style={{
                     display: 'grid',
                     gridTemplateColumns: gridCols,
@@ -275,22 +328,18 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                   }}
                 >
                   <input
-                    defaultValue={v.key}
+                    value={row.key}
                     readOnly={isDomain}
-                    onBlur={isDomain ? undefined : (e) => {
-                      const next = e.target.value.trim()
-                      if (next && next !== v.key) renameProjectEnvVarKey(v.key, next)
-                      else e.target.value = v.key
-                    }}
+                    onChange={(e) => table.setCell(row._rid, 'key', e.target.value)}
+                    onKeyDown={table.fieldKeyDown}
                     placeholder="key"
                     style={isDomain ? { ...cellInputStyle, color: '#94a3b8', cursor: 'not-allowed' } : cellInputStyle}
                     title={isDomain ? 'domain 為保留變數，無法改名或刪除' : '變數名稱（配置以 {{key}} 引用）'}
                   />
                   <input
-                    value={(selectedEnv && v.values[selectedEnv.id]) ?? ''}
-                    onChange={(e) => {
-                      if (selectedEnv) setProjectEnvVarValue(v.key, selectedEnv.id, e.target.value)
-                    }}
+                    value={row.value}
+                    onChange={(e) => table.setCell(row._rid, 'value', e.target.value)}
+                    onKeyDown={table.fieldKeyDown}
                     placeholder="(空)"
                     style={{ ...cellInputStyle, borderColor: '#166534' }}
                   />
@@ -298,7 +347,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     <span title="domain 為保留變數，無法刪除" style={{ textAlign: 'center', color: '#475569', fontSize: 13 }}>🔒</span>
                   ) : (
                     <button
-                      onClick={() => deleteProjectEnvVar(v.key)}
+                      onClick={() => handleDeleteVar(row._rid)}
                       title="刪除此變數"
                       style={{
                         background: 'transparent',
@@ -321,7 +370,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                 )
               })}
 
-              {envVars.length === 0 && (
+              {table.rows.length === 0 && (
                 <div style={{ padding: '16px', color: '#64748b', fontSize: 12 }}>
                   尚無環境變數。點擊下方「新增變數」。
                 </div>
@@ -333,49 +382,60 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
         {/* Add + footer */}
         <div style={{ padding: 12, borderTop: '1px solid #334155', flexShrink: 0, display: 'flex', gap: 8, alignItems: 'center' }}>
           {environments.length > 0 && (
-            adding ? (
-              <div style={{ display: 'flex', gap: 6, flex: 1 }}>
-                <input
-                  autoFocus
-                  value={newKey}
-                  onChange={(e) => setNewKey(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleAdd()
-                    if (e.key === 'Escape') { setAdding(false); setNewKey('') }
-                  }}
-                  placeholder="變數名稱，例如 leave_user_name"
-                  style={{ ...cellInputStyle, flex: 1, border: '1px solid #3b82f6' }}
-                />
-                <button
-                  onClick={handleAdd}
-                  style={{ padding: '4px 12px', borderRadius: 4, border: 'none', background: '#3b82f6', color: '#fff', fontSize: 12, cursor: 'pointer' }}
-                >
-                  新增
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => setAdding(true)}
-                style={{
-                  padding: '6px 14px',
-                  borderRadius: 4,
-                  border: '1px dashed #334155',
-                  background: 'transparent',
-                  color: '#3b82f6',
-                  fontSize: 12,
-                  cursor: 'pointer',
-                }}
-              >
-                ＋ 新增變數
-              </button>
-            )
+            <button
+              onClick={() => table.addRow({ key: '', value: '' })}
+              style={{
+                padding: '6px 14px',
+                borderRadius: 4,
+                border: '1px dashed #334155',
+                background: 'transparent',
+                color: '#3b82f6',
+                fontSize: 12,
+                cursor: 'pointer',
+              }}
+            >
+              ＋ 新增變數
+            </button>
           )}
           <div style={{ flex: 1 }} />
-          <button onClick={onClose} style={closeBtnStyle}>關閉</button>
+          {table.error && (
+            <span style={{ fontSize: 11, color: '#f87171', whiteSpace: 'nowrap' }}>{table.error}</span>
+          )}
+          <DirtyBadge isDirty={table.isDirty} isStale={table.isStale} />
+          {table.isDirty && (
+            <button onClick={table.reset} style={ghostBtnStyle} title="捨棄未儲存的變更">還原</button>
+          )}
+          <button
+            onClick={() => void table.commit()}
+            disabled={!table.isDirty}
+            style={{
+              padding: '6px 16px',
+              borderRadius: 4,
+              border: 'none',
+              fontSize: 12,
+              fontWeight: 600,
+              ...(table.isDirty
+                ? { background: '#3b82f6', color: '#fff', cursor: 'pointer' }
+                : { background: '#334155', color: '#64748b', cursor: 'default' }),
+            }}
+          >
+            儲存
+          </button>
+          <button onClick={() => void table.guardedRun(onClose)} style={closeBtnStyle}>關閉</button>
         </div>
       </div>
     </div>
   )
+}
+
+const ghostBtnStyle: React.CSSProperties = {
+  padding: '6px 12px',
+  borderRadius: 4,
+  border: '1px solid #475569',
+  background: 'transparent',
+  color: '#94a3b8',
+  cursor: 'pointer',
+  fontSize: 12,
 }
 
 const cellInputStyle: React.CSSProperties = {

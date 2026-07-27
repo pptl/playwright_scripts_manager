@@ -5,6 +5,7 @@ import { useFlowManager } from '../../hooks/useFlowStore'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import type { Action } from '@shared/types'
 import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN } from '@shared/types'
+import { confirm } from '../../stores/confirmStore'
 
 export function FlowList() {
   const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, duplicateProject, renameCurrentFlow } = useFlowStore()
@@ -87,12 +88,24 @@ export function FlowList() {
   }
 
   const handleDeleteProject = async (projectId: string, projectName: string) => {
-    if (!window.confirm(`刪除專案「${projectName}」？\n此專案中的所有流程也將一併刪除，且無法復原。`)) return
+    const ok = await confirm({
+      title: `刪除專案「${projectName}」？`,
+      detail: '此專案中的所有流程也將一併刪除，且無法復原。',
+      confirmLabel: '刪除',
+      danger: true,
+    })
+    if (!ok) return
     await deleteProject(projectId)
     await refreshFlowList()
   }
 
-  const handleDuplicateProject = async (projectId: string) => {
+  const handleDuplicateProject = async (projectId: string, projectName: string) => {
+    const ok = await confirm({
+      title: `建立專案「${projectName}」的副本？`,
+      detail: '將一併複製此專案中的所有流程。',
+      confirmLabel: '建立副本',
+    })
+    if (!ok) return
     await duplicateProject(projectId)
     await refreshProjectList()
     await refreshFlowList()
@@ -144,7 +157,13 @@ export function FlowList() {
   }
 
   const handleDeleteFlow = async (flowId: string, flowName: string) => {
-    if (!window.confirm(`刪除流程「${flowName}」？`)) return
+    const ok = await confirm({
+      title: `刪除流程「${flowName}」？`,
+      detail: '此操作無法復原。',
+      confirmLabel: '刪除',
+      danger: true,
+    })
+    if (!ok) return
     if (flowId === currentFlow?.id) {
       await deleteCurrentFlow()
     } else {
@@ -416,7 +435,7 @@ export function FlowList() {
           </div>
           <div
             onClick={() => {
-              handleDuplicateProject(projectMenu.projectId)
+              handleDuplicateProject(projectMenu.projectId, projectMenu.name)
             }}
             style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}

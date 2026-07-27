@@ -1,10 +1,21 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 import { DOMAIN_ENV_KEY } from '@shared/types'
 import type { FlowProfile } from '@shared/types'
+import { confirm } from '../../stores/confirmStore'
+import { useDraftForm, useDraftRows, ensureNoUnsavedDrafts } from '../../hooks/useDraftForm'
+import { DirtyBadge } from '../common/DirtyBadge'
 
 interface ProfileEditorModalProps {
   onClose: () => void
+}
+
+/** One row of the variable table. `fallback` is display-only (the base value behind an env override). */
+interface VarRow {
+  key: string
+  value: string
+  description: string
+  fallback: string
 }
 
 export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
@@ -16,9 +27,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     updateProfile,
     deleteProfile,
     duplicateProfile,
-    addVarToAllProfiles,
-    updateVarKeyInAllProfiles,
-    deleteVarFromAllProfiles,
+    commitProfileVars,
     currentProject,
     activeEnvironmentId,
     setActiveEnvironment,
@@ -43,21 +52,29 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
 
   const envBtnRef = useRef<HTMLButtonElement | null>(null)
   const envPopoverRef = useRef<HTMLDivElement | null>(null)
-  const valueInputRefs = useRef<(HTMLInputElement | null)[]>([])
+  const valueInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
   /** Caret position of the last-focused value input, so a picked env var can be inserted there.
-   *  Stamped with the owning profile so a pick can never land in a different profile's row. */
-  const lastValueCaret = useRef<{ profileId: string; index: number; start: number; end: number } | null>(null)
+   *  Keyed by the draft row id, which is stable across re-renders and unique per profile. */
+  const lastValueCaret = useRef<{ rid: string; start: number; end: number } | null>(null)
 
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId) ?? profiles[0] ?? null
   const activeEnvName = environments.find((e) => e.id === activeEnvironmentId)?.name
 
   // ── Profile list actions ──────────────────────────────────
 
-  /** Switching profiles invalidates the remembered caret — it points at the old profile's row.
-   *  Blur first: React rewrites the focused value input's `value` during the re-render, which
+  /** Switching profiles re-baselines the variable table, so prompt for unsaved rows first.
+   *  Blur before switching: React rewrites the focused value input during the re-render, which
    *  fires a `select` event that would otherwise re-arm the caret we just cleared. */
-  const selectProfile = (id: string) => {
+  const selectProfile = async (id: string) => {
+    if (id === selectedProfileId) return
+    if (!(await ensureNoUnsavedDrafts())) return
     if (document.activeElement instanceof HTMLInputElement) document.activeElement.blur()
+    lastValueCaret.current = null
+    setSelectedProfileId(id)
+  }
+
+  /** Same as selectProfile but for programmatic jumps after add/duplicate — nothing to guard. */
+  const jumpToProfile = (id: string) => {
     lastValueCaret.current = null
     setSelectedProfileId(id)
   }
@@ -68,14 +85,21 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     await addProfile(name)
     const updated = useFlowStore.getState().currentFlow?.profiles ?? []
     const last = updated[updated.length - 1]
-    if (last) selectProfile(last.id)
+    if (last) jumpToProfile(last.id)
     setNewProfileName('')
     setAddingProfile(false)
   }
 
+  /** Explicit commit only (✓ / Enter). Blur must NOT commit — that was the app's last
+   *  onBlur-write and it made "click elsewhere" an unpredictable save. */
   const handleRenameCommit = async (id: string) => {
     const name = renameInput.trim()
     if (name) await updateProfile(id, { name })
+    setRenamingId(null)
+    setRenameInput('')
+  }
+
+  const cancelRename = () => {
     setRenamingId(null)
     setRenameInput('')
   }
@@ -84,41 +108,85 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     await duplicateProfile(id)
     const updated = useFlowStore.getState().currentFlow?.profiles ?? []
     const last = updated[updated.length - 1]
-    if (last) selectProfile(last.id)
+    if (last) jumpToProfile(last.id)
   }
 
   const handleDeleteProfile = async (id: string) => {
+    const name = profiles.find((p) => p.id === id)?.name ?? ''
+    const ok = await confirm({
+      title: `刪除配置「${name}」？`,
+      detail: '此配置的所有變數值將一併移除。',
+      confirmLabel: '刪除',
+      danger: true,
+    })
+    if (!ok) return
     const nextProfile = profiles.find((p) => p.id !== id)
     await deleteProfile(id)
     lastValueCaret.current = null
     if (selectedProfileId === id && nextProfile) {
-      selectProfile(nextProfile.id)
+      jumpToProfile(nextProfile.id)
     }
   }
 
-  // ── Variable actions ──────────────────────────────────────
+  // ── Variable table (draft → 儲存) ──────────────────────────
 
-  /** Update value or description on the selected profile only.
-   *  When an env is active and field is 'value', writes to envValues[envId] instead of value. */
-  const handleVarField = (index: number, field: 'value' | 'description', raw: string) => {
-    if (!selectedProfile) return
-    const newVars = selectedProfile.vars.map((v, i) => {
-      if (i !== index) return v
-      if (field === 'value' && activeEnvironmentId) {
-        return { ...v, envValues: { ...v.envValues, [activeEnvironmentId]: raw } }
-      }
-      return { ...v, [field]: raw }
+  /** One draft row per variable. Key is shared across profiles; value/description are per-profile. */
+  const varSource = useMemo<VarRow[]>(
+    () =>
+      (selectedProfile?.vars ?? []).map((v) => ({
+        key: v.key,
+        value: activeEnvironmentId ? (v.envValues?.[activeEnvironmentId] ?? '') : v.value,
+        description: v.description ?? '',
+        fallback: v.value,
+      })),
+    [selectedProfile, activeEnvironmentId],
+  )
+
+  const table = useDraftRows<VarRow>({
+    source: varSource,
+    // Value column is per-environment and per-profile, so both belong in the reset key.
+    resetKey: selectedProfile ? `${currentFlow?.id ?? ''}:${selectedProfile.id}:${activeEnvironmentId ?? ''}` : null,
+    onCommit: async (rows) => {
+      if (!selectedProfile) return
+      await commitProfileVars(
+        selectedProfile.id,
+        rows.map((r) => ({
+          origIndex: r._origIndex,
+          key: r.key.trim(),
+          value: r.value,
+          description: r.description,
+        })),
+        activeEnvironmentId,
+      )
+    },
+    validate: (rows) => {
+      const keys = rows.map((r) => r.key.trim())
+      if (keys.some((k) => !k)) return '變數名稱不可為空'
+      const dup = keys.find((k, i) => keys.indexOf(k) !== i)
+      if (dup) return `變數名稱重複：${dup}`
+      return null
+    },
+    guardLabel: '環境配置變數',
+  })
+
+  /** Variable keys are shared across every profile, so deleting one removes it everywhere. */
+  const handleDeleteVar = async (rid: string) => {
+    const key = table.rows.find((r) => r._rid === rid)?.key ?? ''
+    const ok = await confirm({
+      title: key ? `刪除變數 {{${key}}}？` : '刪除此變數？',
+      detail: '此變數將從「所有配置」中移除，引用它的節點將無法解析。儲存後生效。',
+      confirmLabel: '刪除',
+      danger: true,
     })
-    updateProfile(selectedProfile.id, { vars: newVars })
+    if (!ok) return
+    table.removeRow(rid)
   }
 
   // ── Project env var picker ────────────────────────────────
 
-  const rememberCaret = (index: number, el: HTMLInputElement) => {
-    if (!selectedProfile) return
+  const rememberCaret = (rid: string, el: HTMLInputElement) => {
     lastValueCaret.current = {
-      profileId: selectedProfile.id,
-      index,
+      rid,
       start: el.selectionStart ?? el.value.length,
       end: el.selectionEnd ?? el.value.length,
     }
@@ -140,16 +208,15 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
   const handlePickEnvVar = (key: string) => {
     const token = `{{${key}}}`
     const caret = lastValueCaret.current
-    const vars = selectedProfile?.vars ?? []
+    const row = caret ? table.rows.find((r) => r._rid === caret.rid) : undefined
 
-    if (caret && caret.profileId === selectedProfile?.id && caret.index < vars.length) {
-      const v = vars[caret.index]
-      const current = activeEnvironmentId ? (v.envValues?.[activeEnvironmentId] ?? '') : v.value
-      handleVarField(caret.index, 'value', current.slice(0, caret.start) + token + current.slice(caret.end))
+    if (caret && row) {
+      const current = row.value
+      table.setCell(row._rid, 'value', current.slice(0, caret.start) + token + current.slice(caret.end))
       const pos = caret.start + token.length
-      lastValueCaret.current = { index: caret.index, start: pos, end: pos }
+      lastValueCaret.current = { rid: caret.rid, start: pos, end: pos }
       requestAnimationFrame(() => {
-        const el = valueInputRefs.current[caret.index]
+        const el = valueInputRefs.current[caret.rid]
         el?.focus()
         el?.setSelectionRange(pos, pos)
       })
@@ -228,7 +295,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
         >
           <span style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0' }}>環境配置管理</span>
           <button
-            onClick={onClose}
+            onClick={() => void table.guardedRun(onClose)}
             style={{ background: 'transparent', border: 'none', color: '#64748b', fontSize: 18, cursor: 'pointer' }}
           >
             ✕
@@ -283,18 +350,33 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
                   >
                     {isRenaming ? (
-                      <input
-                        autoFocus
-                        value={renameInput}
-                        onChange={(e) => setRenameInput(e.target.value)}
-                        onBlur={() => handleRenameCommit(p.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleRenameCommit(p.id)
-                          if (e.key === 'Escape') { setRenamingId(null); setRenameInput('') }
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                        style={inlineInputStyle}
-                      />
+                      <>
+                        <input
+                          autoFocus
+                          value={renameInput}
+                          onChange={(e) => setRenameInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleRenameCommit(p.id)
+                            if (e.key === 'Escape') cancelRename()
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          style={inlineInputStyle}
+                        />
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleRenameCommit(p.id) }}
+                          title="確認"
+                          style={renameActionBtnStyle('#4ade80')}
+                        >
+                          ✓
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); cancelRename() }}
+                          title="取消"
+                          style={renameActionBtnStyle('#94a3b8')}
+                        >
+                          ✕
+                        </button>
+                      </>
                     ) : (
                       <>
                         <span
@@ -508,7 +590,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         style={cellInputStyle}
                       />
                       <div style={{ fontSize: 10, color: '#64748b', marginTop: 5 }}>
-                        {lastValueCaret.current?.profileId === selectedProfile.id
+                        {table.rows.some((r) => r._rid === lastValueCaret.current?.rid)
                           ? '點擊插入至編輯中的「值」欄位'
                           : `點擊複製 ${'{{key}}'}（先點一個「值」欄位可直接插入）`}
                       </div>
@@ -597,7 +679,12 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>環境值:</span>
                     <select
                       value={activeEnvironmentId ?? ''}
-                      onChange={(e) => setActiveEnvironment(e.target.value || null)}
+                      // The value column is per-environment — switching re-baselines the table.
+                      onChange={async (e) => {
+                        const next = e.target.value || null
+                        if (!(await ensureNoUnsavedDrafts())) return
+                        setActiveEnvironment(next)
+                      }}
                       style={{
                         background: '#0f172a',
                         border: '1px solid #334155',
@@ -636,13 +723,10 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     <span />
                   </div>
 
-                  {selectedProfile.vars.map((v, i) => {
-                    const displayValue = activeEnvironmentId
-                      ? (v.envValues?.[activeEnvironmentId] ?? '')
-                      : v.value
+                  {table.rows.map((row) => {
                     return (
                     <div
-                      key={i}
+                      key={row._rid}
                       style={{
                         display: 'grid',
                         gridTemplateColumns: gridCols,
@@ -652,32 +736,35 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       }}
                     >
                       <input
-                        value={v.key}
-                        onChange={(e) => updateVarKeyInAllProfiles(i, e.target.value)}
+                        value={row.key}
+                        onChange={(e) => table.setCell(row._rid, 'key', e.target.value)}
+                        onKeyDown={table.fieldKeyDown}
                         placeholder="key"
                         style={cellInputStyle}
-                        title="修改參數名稱將同步至所有配置"
+                        title="修改參數名稱將同步至所有配置（儲存後生效）"
                       />
                       <input
-                        ref={(el) => { valueInputRefs.current[i] = el }}
-                        value={displayValue}
-                        onChange={(e) => { rememberCaret(i, e.currentTarget); handleVarField(i, 'value', e.target.value) }}
-                        onFocus={(e) => rememberCaret(i, e.currentTarget)}
-                        onSelect={(e) => rememberCaret(i, e.currentTarget)}
-                        placeholder={activeEnvironmentId ? `預設: ${v.value || '(空)'}` : 'value'}
+                        ref={(el) => { valueInputRefs.current[row._rid] = el }}
+                        value={row.value}
+                        onChange={(e) => { rememberCaret(row._rid, e.currentTarget); table.setCell(row._rid, 'value', e.target.value) }}
+                        onFocus={(e) => rememberCaret(row._rid, e.currentTarget)}
+                        onSelect={(e) => rememberCaret(row._rid, e.currentTarget)}
+                        onKeyDown={table.fieldKeyDown}
+                        placeholder={activeEnvironmentId ? `預設: ${row.fallback || '(空)'}` : 'value'}
                         style={{
                           ...cellInputStyle,
                           ...(activeEnvironmentId ? { borderColor: '#166534' } : {}),
                         }}
                       />
                       <input
-                        value={v.description ?? ''}
-                        onChange={(e) => handleVarField(i, 'description', e.target.value)}
+                        value={row.description}
+                        onChange={(e) => table.setCell(row._rid, 'description', e.target.value)}
+                        onKeyDown={table.fieldKeyDown}
                         placeholder="說明此參數用途…"
                         style={{ ...cellInputStyle, color: '#94a3b8' }}
                       />
                       <button
-                        onClick={() => deleteVarFromAllProfiles(i)}
+                        onClick={() => handleDeleteVar(row._rid)}
                         title="從所有配置刪除此變數"
                         style={{
                           background: 'transparent',
@@ -699,16 +786,25 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   )
                   })}
 
-                  {selectedProfile.vars.length === 0 && (
+                  {table.rows.length === 0 && (
                     <div style={{ padding: '16px', color: '#64748b', fontSize: 12 }}>
                       尚無變數。點擊下方「新增變數」。
                     </div>
                   )}
                 </div>
 
-                <div style={{ padding: 12, borderTop: '1px solid #334155', flexShrink: 0 }}>
+                <div
+                  style={{
+                    padding: 12,
+                    borderTop: '1px solid #334155',
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                  }}
+                >
                   <button
-                    onClick={() => addVarToAllProfiles()}
+                    onClick={() => table.addRow({ key: '', value: '', description: '', fallback: '' })}
                     style={{
                       padding: '6px 14px',
                       borderRadius: 4,
@@ -720,6 +816,32 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     }}
                   >
                     ＋ 新增變數（所有配置同步）
+                  </button>
+                  <div style={{ flex: 1 }} />
+                  {table.error && (
+                    <span style={{ fontSize: 11, color: '#f87171', whiteSpace: 'nowrap' }}>{table.error}</span>
+                  )}
+                  <DirtyBadge isDirty={table.isDirty} isStale={table.isStale} />
+                  {table.isDirty && (
+                    <button onClick={table.reset} style={ghostBtnStyle} title="捨棄未儲存的變更">
+                      還原
+                    </button>
+                  )}
+                  <button
+                    onClick={() => void table.commit()}
+                    disabled={!table.isDirty}
+                    style={{
+                      padding: '6px 16px',
+                      borderRadius: 4,
+                      border: 'none',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      ...(table.isDirty
+                        ? { background: '#3b82f6', color: '#fff', cursor: 'pointer' }
+                        : { background: '#334155', color: '#64748b', cursor: 'default' }),
+                    }}
+                  >
+                    儲存
                   </button>
                 </div>
               </>
@@ -741,7 +863,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
             flexShrink: 0,
           }}
         >
-          <button onClick={onClose} style={closeBtnStyle}>
+          <button onClick={() => void table.guardedRun(onClose)} style={closeBtnStyle}>
             關閉
           </button>
         </div>
@@ -773,6 +895,29 @@ const inlineInputStyle: React.CSSProperties = {
   fontSize: 12,
   outline: 'none',
   width: '100%',
+}
+
+/** ✓ / ✕ buttons beside the inline rename input (rename commits explicitly, never on blur). */
+const renameActionBtnStyle = (color: string): React.CSSProperties => ({
+  flexShrink: 0,
+  background: 'transparent',
+  border: 'none',
+  cursor: 'pointer',
+  color,
+  fontSize: 12,
+  padding: '1px 3px',
+  borderRadius: 3,
+  lineHeight: 1,
+})
+
+const ghostBtnStyle: React.CSSProperties = {
+  padding: '6px 12px',
+  borderRadius: 4,
+  border: '1px solid #475569',
+  background: 'transparent',
+  color: '#94a3b8',
+  cursor: 'pointer',
+  fontSize: 12,
 }
 
 const cellInputStyle: React.CSSProperties = {

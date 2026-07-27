@@ -194,7 +194,7 @@ Three names are in scope: **`page`** (the action's page), **`expect`** (Playwrig
 
 Each flow has `profiles?: FlowProfile[]`. A profile is a named set of `ProfileVariable` entries. Switching the active profile swaps all `{{key}}` resolutions at once.
 
-**Key invariant:** all profiles within a flow share the same variable keys — only `value`/`description`/`envValues` differ per profile. The store enforces this with three cross-profile mutation actions: `addVarToAllProfiles()`, `updateVarKeyInAllProfiles(index, newKey)`, `deleteVarFromAllProfiles(index)`. Per-profile mutations (`value`, `description`, `name`) use `updateProfile(id, updates)`.
+**Key invariant:** all profiles within a flow share the same variable keys — only `value`/`description`/`envValues` differ per profile. The store enforces this in `commitProfileVars(profileId, rows, envId)`, which rebuilds every profile's `vars` from one draft submission: keys are applied to all profiles, value/description only to `profileId` (into `envValues[envId]` when an environment is active). Profile-level mutations (`name`) use `updateProfile(id, updates)`.
 
 A new flow starts with `profiles: []` (no profiles). `domain` is **not** a profile variable — it lives on the project's environments (see Projects & Environments). `flow.baseURL` is not entered by the user; it is derived from the target project's first-environment `domain` at flow creation and refreshed to the active environment's `domain` at each fresh recording start (the origin-substitution basis).
 
@@ -214,7 +214,7 @@ Projects add a layer **above** flows for managing environment-specific variable 
 - `ProjectEnvVar` = `{ key, values: Record<envId, string>, description? }`, flattened for the active environment by `flattenProjectEnvVars`.
 - The **active environment** (`activeEnvironmentId` in the store) + **active project** (`activeProjectId` = `currentProject.id`) are threaded through replay, branch recording, and export, and used by `Replayer`/`ScriptExporter`/`usePlaywright`/`Toolbar` when building `profileVars`/`envVars`. Env-var references resolve only when the flow belongs to the active project (v1: no cross-project references).
 - Storage: projects live as `projects/{id}.json` (`ProjectStorage`), separate from flows.
-- Store actions: `createProject`, `renameProject`, `duplicateProject`, `deleteProject`, `addEnvironmentToProject`, `renameEnvironment`, `duplicateEnvironment`, `deleteEnvironment` (the last environment can't be removed), `assignFlowToProject`, `setActiveEnvironment`, `setCurrentProject`, and project-env-var actions `addProjectEnvVar` / `renameProjectEnvVarKey` / `deleteProjectEnvVar` / `setProjectEnvVarValue`. `openFlow` loads the owning project (default if none) and picks a sensible active environment (first env by default).
+- Store actions: `createProject`, `renameProject`, `duplicateProject`, `deleteProject`, `addEnvironmentToProject`, `renameEnvironment`, `duplicateEnvironment`, `deleteEnvironment` (the last environment can't be removed), `assignFlowToProject`, `setActiveEnvironment`, `setCurrentProject`, and `commitProjectEnvVars(rows, envId)` — one atomic write for the whole env-var table (see Editing model). `openFlow` loads the owning project (default if none) and picks a sensible active environment (first env by default).
 - **UI:** `FlowList` groups flows by project (📁 headers, 未分類 last); the "新增專案" dialog collects 專案名稱 + 環境名稱 (DEV) + domain. The "新增流程" dialog collects 歸類至專案 (first) + 流程名稱 (second) — there is **no 目標URL field** (baseURL is derived from the project's `domain`). The Toolbar shows a 🌐 environment selector (with inline 新增環境) and "🔧 管理環境變數…" (`ProjectEnvVarModal`) for the current flow's project; the modal also handles environment add/rename/duplicate/delete. The right sidebar's `ProjectEnvVarList` shows the active environment's project vars.
 
 ### Sub-flow system
@@ -239,7 +239,7 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 ### Canvas layout & node graph editing
 
 - **Layout** (`src/renderer/utils/treeLayout.ts`): `computeTreeLayout` lays out one tree (subtree-centered, `NODE_WIDTH=200`, `NODE_HEIGHT=70`); `computeAllRootsLayout` lays out every root tree side-by-side; both accept a `SizeOf` callback so expanded groups can reserve their full box footprint.
-- **`positionsFinalized`**: `fn.position` is the single source of truth for rendering. On first load of a flow whose positions were never finalized, `FlowCanvas` calls `materializeLayout()` (writes computed positions into the store, marks finalized, persists). `relayoutAll()` ("🧹 整理節點") recomputes unconditionally. Manual drags update `position` via `updateNode` with **debounced** disk save, run through `runWithoutHistory` so repositioning doesn't flood undo history.
+- **`positionsFinalized`**: `fn.position` is the single source of truth for rendering. On first load of a flow whose positions were never finalized, `FlowCanvas` calls `materializeLayout()` (writes computed positions into the store, marks finalized, persists). `relayoutAll()` ("🧹 整理節點") recomputes unconditionally. Manual drags update `position` via `updateNode` with a **500 ms debounced** disk save, run through `runWithoutHistory` so repositioning doesn't flood undo history. The debounce captures the flow object at schedule time and is flushed on unmount / flow switch, so a drag followed by a quick flow switch isn't lost.
 - **Editing**: drag node handles to `connectNodes` (rejects if target already has a parent); delete edges to `disconnectNodes`; context-menu `disconnectNode` detaches a node from both parent and children (each becomes a floating root); `deleteNode` removes a node + subtree; `deleteNodesOnly` removes nodes but re-parents survivors as floating roots. Multi-select (Shift) drives extract/group/bulk-delete/bulk-disconnect.
 - **Pane context menu**: right-clicking empty canvas offers **加入節點** → `AddNodeModal` (currently `code` nodes only), which calls `addNodeAt(action, position)` to drop a floating node at the clicked canvas coordinates.
 
@@ -252,7 +252,23 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 
 ### Undo/Redo
 
-`flowStore` keeps `past[]` / `future[]` snapshots of `currentFlow` (cap `HISTORY_LIMIT = 50`). A single `useFlowStore.subscribe` records a snapshot whenever an edit replaces `currentFlow` with a new object — skipping when `isTimeTraveling`, `suppressHistory` (drags), a flow switch, or live recording/replay. `undo`/`redo` swap snapshots and persist. `useUndoRedo` binds Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (ignored while typing in inputs or during recording/replay). Toolbar exposes ↶ 復原 / ↷ 重做 buttons.
+`flowStore` keeps `past[]` / `future[]` of `HistoryEntry` = `{ kind: 'flow', flow }` | `{ kind: 'project', project }` (cap `HISTORY_LIMIT = 50`). Flow and project edits **interleave in one chronological stack**, so Ctrl+Z reverses actions in true order across both entities. A single `useFlowStore.subscribe` records the previous state whenever an edit replaces `currentFlow` *or* `currentProject` with a new object of the same id — skipping when `isTimeTraveling`, `historySuppressed()`, an entity switch, or live recording/replay.
+
+- **Suppression** is a depth counter (`suppressDepth`), not a boolean, so nested scopes can't lift it early. `runWithoutHistory(fn)` is **synchronous only**. `setSilently(partial)` applies a state change without recording — used by `toggleGroupCollapsed` (pure view state) and `materializeLayout` (automatic one-time layout). `relayoutAll` stays undoable: it's an explicit user action.
+- **`undo`/`redo`** refuse to restore when the entry's entity id no longer matches the open one. Restoring a project entry revalidates `activeEnvironmentId` (undoing an "add environment" would otherwise leave it dangling) and refreshes the project list.
+- **Not undoable:** `createProject` / `deleteProject` / `duplicateProject`, and `renameProject` / `assignFlowToProject` when the target isn't the open project/flow — these create or delete whole files. They are guarded by a confirm dialog instead.
+
+`useUndoRedo` binds Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (ignored while typing in inputs or during recording/replay). Toolbar exposes ↶ 復原 / ↷ 重做 buttons.
+
+### Editing model (draft → explicit commit)
+
+Every **text / form field** in the app edits a local draft and reaches the store only on an explicit 儲存/確認. One commit = one store write = one disk write = one undo entry. **Single-gesture controls stay instant** and deliberately do not use drafts: profile/environment dropdowns, replay speed, node drag, edge connect/disconnect, group collapse/expand.
+
+- **`src/renderer/hooks/useDraftForm.ts`** — `useDraftForm({ source, resetKey, onCommit, validate?, equals?, guardLabel? })` returns `{ values, setField, patch, isDirty, isStale, error, commit, reset, fieldKeyDown, guardedRun }`. The draft re-baselines **during render, keyed on `resetKey` only** — never on the `source` object identity. That is what keeps typing alive when a node drag or a recorder `ACTION_UPDATED` replaces the underlying object; `isStale` flags that the store moved underneath a dirty draft. `onCommit` must re-read from `getState()` so a stale draft can't clobber recorder-written fields.
+- **`useDraftRows<R>`** — table variant. Rows carry `_rid` (stable client id) and `_origIndex` (`null` = added in this draft). Add/remove act on the draft; one 儲存 commits the whole table via `commitProfileVars` / `commitProjectEnvVars`.
+- **Unsaved-changes guard** — drafts with a `guardLabel` self-register; `ensureNoUnsavedDrafts()` raises a 儲存/捨棄/取消 prompt and is called before every gesture that would discard a draft (node selection change, pane click, `openFlow`, profile/environment switch, modal close).
+- **`src/renderer/stores/confirmStore.ts` + `components/common/ConfirmDialog.tsx`** — `confirm()` / `confirmDiscard()` raise an app-styled dialog from `<ConfirmHost />` (mounted once in `App.tsx`, `zIndex 4000` so it can appear above modals). Replaces `window.confirm` entirely. Danger dialogs put Enter on 取消.
+- **Destructive actions all confirm** — delete flow / project / environment / profile / profile variable / project env var / session variable, and duplicate project. **Deliberate exception: deleting a node (or node + subtree) does not confirm** — it's a high-frequency editing gesture and Ctrl+Z restores it. Ungroup likewise (destroys no node data, and is undoable).
 
 ### Storage
 
@@ -288,7 +304,11 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 | `src/shared/variableResolver.ts` | Variable system: 5 built-ins, `flattenProjectEnvVars`, `resolveValue(WithSession)`, `valueToCodeExpr`, `sessionAwareValueToCodeExpr`, `locatorExprToCode`, `emitProfileVarDecls` / `emitEnvVarDecls` (`_ftProf_` / `_ftEnv_` prefixes), `VARIABLE_HELPERS_CODE` |
 | `src/preload/index.ts` | contextBridge — exposes typed `window.electronAPI` (incl. project + report + locator-pick wrappers) |
 | `src/renderer/App.tsx` | Root — calls `usePlaywrightEvents()` + `useUndoRedo()`; renders Toolbar + FlowList + FlowCanvas + PropertyPanel + right sidebar (VariableList / ProfileVarList / ProjectEnvVarList / SessionVarList, shown only when a node is selected) |
-| `src/renderer/stores/flowStore.ts` | Zustand store — flow/node/profile/project/environment state + actions; undo/redo history subscription; group actions; layout actions; domain + callFlow-profile migrations |
+| `src/renderer/stores/flowStore.ts` | Zustand store — flow/node/profile/project/environment state + actions; interleaved flow+project undo/redo (`HistoryEntry`) + history subscription; `suppressDepth`/`setSilently`; atomic `commitProfileVars` / `commitProjectEnvVars`; group actions; layout actions; domain + callFlow-profile migrations |
+| `src/renderer/hooks/useDraftForm.ts` | `useDraftForm` / `useDraftRows` (draft → explicit commit, render-phase re-baselining keyed on `resetKey`) + `registerDraftGuard` / `ensureNoUnsavedDrafts` |
+| `src/renderer/stores/confirmStore.ts` | `confirm()` / `confirmDiscard()` — promise-based replacement for `window.confirm` |
+| `src/renderer/components/common/ConfirmDialog.tsx` | `ConfirmHost` — renders queued confirm requests (zIndex 4000, Enter defaults to 取消 on danger) |
+| `src/renderer/components/common/DirtyBadge.tsx` | ● 未儲存 pill + ⚠ 外部已更新 hint for draft forms |
 | `src/renderer/components/Toolbar/Toolbar.tsx` | Action bar: new-flow, undo/redo, record/stop, relayout, export, run-tests, replay-speed, environment selector (🌐), profile selector (⚙), status pills; new-flow dialog (歸類至專案 + 流程名稱, no 目標URL) |
 | `src/renderer/components/Toolbar/TestOutputModal.tsx` | Streams live `TEST_OUTPUT` lines during `RUN_TESTS` |
 | `src/renderer/components/Canvas/FlowCanvas.tsx` | ReactFlow canvas (Background / Controls / MiniMap): node/edge derivation (incl. groups), drag-reposition with debounced save, connect/disconnect, multi-select, node + pane context menus, modals (CallFlow / ExtractSubflow / GroupName / AddNode); one-time layout materialization |
@@ -301,9 +321,9 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 | `src/renderer/components/Canvas/CanvasStatusBar.tsx` | Multi-select status banner |
 | `src/renderer/components/Canvas/ExtractSubflowModal.tsx` | Name + confirm dialog for extracting a selection into a sub-flow |
 | `src/renderer/components/FlowList/FlowList.tsx` | Sidebar: flows grouped by project (未分類 = reserved default, pinned last, no rename/delete); collapsible 子流程 subsection (refCount>0); right-click menu (move project / rename / duplicate / delete / add as sub-flow); new-project dialog (name + 環境名稱 + domain) + rename dialogs |
-| `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | Bottom panel: edit description/selector/locator/value for selected node; assertText/assertValue value fields; callFlow "配置對應" mapping grid (loads sub-flow profiles via `FLOW_GET`) |
-| `src/renderer/components/ProfileEditor/ProfileEditorModal.tsx` | Two-column modal: profile list (add/rename/delete) + variable table (key synced across profiles; value/description per-profile) |
-| `src/renderer/components/ProjectEnvVar/ProjectEnvVarModal.tsx` | Project-level env-var editor (one key per row, value per selected environment) + environment add/rename/duplicate/delete; `domain` row is key-locked and non-deletable (🔒) |
+| `src/renderer/components/PropertyPanel/PropertyPanel.tsx` | Bottom panel: edit description/selector/locator/value for selected node; assertText/assertValue value fields; callFlow "配置對應" mapping grid (loads sub-flow profiles via `FLOW_GET`). Draft-based (`useDraftForm`, `resetKey: selectedNodeId`) with 儲存/還原 + dirty badge; empty fields commit as empty |
+| `src/renderer/components/ProfileEditor/ProfileEditorModal.tsx` | Two-column modal: profile list (add/rename/delete) + draft variable table (key synced across profiles; value/description per-profile) committed by 儲存 via `commitProfileVars`; rename commits on ✓/Enter only |
+| `src/renderer/components/ProjectEnvVar/ProjectEnvVarModal.tsx` | Project-level env-var editor — draft table (one key per row, value per selected environment) committed by 儲存 via `commitProjectEnvVars`; environment add/rename/duplicate/delete; `domain` row is key-locked and non-deletable (🔒) |
 | `src/renderer/components/ProjectEnvVar/ProjectEnvVarList.tsx` | Sidebar: active project's env vars resolved for the active environment; click to copy `{{key}}` |
 | `src/renderer/components/AddNodeModal/AddNodeModal.tsx` | 加入節點 dialog — code editor (`page` / `expect` / `vars` in scope) with a click-to-copy list of every available variable grouped by origin |
 | `src/renderer/components/CallFlowModal/CallFlowModal.tsx` | 2–3 step modal to embed a sub-flow: select flow (cycle-checked) → exit node → profile mapping |
@@ -315,7 +335,7 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 | `src/renderer/hooks/usePlaywright.ts` | IPC invocation wrappers: startRecording (navigates to the active env's `domain`, persists it as `flow.baseURL`), startBranchRecording, stopRecording, replayToNode (builds env-aware profileVars + envVars) |
 | `src/renderer/hooks/useUndoRedo.ts` | Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z keyboard shortcuts |
 | `src/renderer/hooks/useRecording.ts` | Branch-recording state helpers |
-| `src/renderer/hooks/useFlowStore.ts` | `useFlowManager`: refreshFlowList/refreshProjectList, openFlow (+ loads project), newFlow, saveCurrentFlow, deleteCurrentFlow |
+| `src/renderer/hooks/useFlowStore.ts` | `useFlowManager`: refreshFlowList/refreshProjectList, openFlow (guards unsaved drafts, + loads project), newFlow, deleteCurrentFlow |
 | `src/renderer/utils/treeLayout.ts` | Tree layout: `computeTreeLayout`, `computeAllRootsLayout`, sizing constants, `SizeOf` |
 | `src/renderer/utils/groups.ts` | Group geometry + `computeGroupAwareLayout` |
 | `src/renderer/utils/subflowExtraction.ts` | `validateExtraction` (single entry/exit, connected) + `extractSubflow` (build sub-flow, rewire parent) |

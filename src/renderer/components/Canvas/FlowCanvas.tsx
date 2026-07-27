@@ -29,10 +29,11 @@ import { GroupBox } from './GroupBox'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import { AddNodeModal } from '../AddNodeModal/AddNodeModal'
-import type { Action } from '@shared/types'
+import type { Action, Flow } from '@shared/types'
 import { computeTreeLayout } from '../../utils/treeLayout'
 import { validateExtraction, extractSubflow } from '../../utils/subflowExtraction'
 import { getGroupBoundary, groupBoxRect } from '../../utils/groups'
+import { ensureNoUnsavedDrafts } from '../../hooks/useDraftForm'
 
 const nodeTypes = { actionNode: ActionNode, groupNode: GroupNode, groupBox: GroupBox }
 const edgeTypes = { branchEdge: BranchEdge }
@@ -77,6 +78,9 @@ function FlowCanvasInner() {
 
   // Debounced disk save ref
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The exact flow a debounced drag save is still owed to. Held so the flush effect can
+  // persist it even after the store has already moved on to a different flow.
+  const pendingSaveRef = useRef<Flow | null>(null)
   // Latest position per node seen during an in-progress drag (drag-stop events omit position)
   const dragPosRef = useRef<Map<string, { x: number; y: number }>>(new Map())
 
@@ -192,11 +196,25 @@ function FlowCanvasInner() {
   useEffect(() => {
     if (!currentFlow || currentFlow.positionsFinalized || !currentFlow.rootNodeId) return
     const layout = computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId)
-    // Automatic one-time layout on load — position-only, keep it out of undo history.
-    runWithoutHistory(() => materializeLayout(layout))
+    // History suppression lives inside materializeLayout — this is automatic, not a user edit.
+    materializeLayout(layout)
     const updated = useFlowStore.getState().currentFlow
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
-  }, [currentFlow?.id, materializeLayout, runWithoutHistory])
+  }, [currentFlow?.id, materializeLayout])
+
+  // Flush any debounced drag save before the flow changes or the canvas unmounts — otherwise
+  // a drag followed by a quick flow switch is silently lost.
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+      }
+      const pending = pendingSaveRef.current
+      pendingSaveRef.current = null
+      if (pending) window.electronAPI.saveFlow(pending).catch(console.error)
+    }
+  }, [currentFlow?.id])
 
   useEffect(() => {
     setNodes(rfNodes)
@@ -207,11 +225,13 @@ function FlowCanvasInner() {
   }, [rfEdges, setEdges])
 
   const onNodeClick: NodeMouseHandler = useCallback(
-    (_, node) => {
+    async (_, node) => {
       // Group nodes/boxes handle their own clicks (expand/collapse); ignore here
       if (node.id.startsWith('group:') || node.id.startsWith('groupbox:')) return
       // Only update property panel target on single-select clicks
       if (selectedNodeIds.size <= 1) {
+        // Switching nodes swaps out the PropertyPanel draft — prompt if it has unsaved edits.
+        if (!(await ensureNoUnsavedDrafts())) return
         selectNode(node.id)
       }
     },
@@ -262,11 +282,16 @@ function FlowCanvasInner() {
           })
         })
 
-        // Debounce disk save
+        // Debounce disk save. The flow is captured now rather than re-read when the timer
+        // fires, so switching flows inside the 500 ms window can't write the wrong document
+        // (or silently drop the drag — the flush effect below persists what was captured).
+        pendingSaveRef.current = useFlowStore.getState().currentFlow ?? null
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-        saveTimerRef.current = setTimeout(async () => {
-          const updated = useFlowStore.getState().currentFlow
-          if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
+        saveTimerRef.current = setTimeout(() => {
+          saveTimerRef.current = null
+          const pending = pendingSaveRef.current
+          pendingSaveRef.current = null
+          if (pending) window.electronAPI.saveFlow(pending).catch(console.error)
         }, 500)
       }
     },
@@ -278,10 +303,12 @@ function FlowCanvasInner() {
     setSelectedNodeIds(new Set(selNodes.map((n) => n.id).filter((id) => !id.startsWith('group'))))
   }, [])
 
-  const onPaneClick = useCallback(() => {
-    selectNode(null)
+  const onPaneClick = useCallback(async () => {
     setContextMenu(null)
     setPaneMenu(null)
+    // Deselecting unmounts the PropertyPanel fields — prompt before dropping a draft.
+    if (!(await ensureNoUnsavedDrafts())) return
+    selectNode(null)
     setSelectedNodeIds(new Set())
   }, [selectNode])
 
@@ -296,10 +323,11 @@ function FlowCanvasInner() {
   )
 
   const onNodeContextMenu = useCallback(
-    (event: React.MouseEvent, node: Node) => {
+    async (event: React.MouseEvent, node: Node) => {
       event.preventDefault()
       // No context menu on group nodes/boxes — use their inline controls
       if (node.id.startsWith('group:') || node.id.startsWith('groupbox:')) return
+      if (!(await ensureNoUnsavedDrafts())) return
       selectNode(node.id)
       setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY })
     },
@@ -416,6 +444,9 @@ function FlowCanvasInner() {
             onClose={() => setContextMenu(null)}
             onReplay={() => replayToNode(contextMenu.nodeId, replaySpeed)}
             onBranchRecord={() => startBranchRecording(contextMenu.nodeId)}
+            // Node deletion is deliberately NOT confirmed: it is a high-frequency editing
+            // gesture and Ctrl+Z already restores the node (and its subtree). Every other
+            // destructive action in the app does confirm — this is the intended exception.
             onDelete={async () => {
               deleteNode(contextMenu.nodeId)
               const updated = useFlowStore.getState().currentFlow

@@ -7408,8 +7408,10 @@ function computeGroupAwareLayout(nodes, groups) {
 const NODE_VERTICAL_GAP = 80;
 const NODE_START_Y = 50;
 const NODE_START_X = 300;
+const entryId = (e) => e.kind === "flow" ? e.flow.id : e.project.id;
 let isTimeTraveling = false;
-let suppressHistory = false;
+let suppressDepth = 0;
+const historySuppressed = () => suppressDepth > 0;
 function migrateCallFlowProfiles(flow) {
   const profiles = flow.profiles ?? [];
   const needsMigration = flow.nodes.some(
@@ -7440,6 +7442,38 @@ function migrateDomainsToProfiles(flow) {
     }));
   }
   return [];
+}
+function snapshotOf(kind, state) {
+  if (kind === "flow") return state.currentFlow ? { kind: "flow", flow: state.currentFlow } : null;
+  return state.currentProject ? { kind: "project", project: state.currentProject } : null;
+}
+function applyEntry(entry, state) {
+  if (entry.kind === "flow") {
+    return { currentFlow: entry.flow, selectedNodeId: null };
+  }
+  const envs = entry.project.environments;
+  const envStillValid = !!state.activeEnvironmentId && envs.some((e) => e.id === state.activeEnvironmentId);
+  return {
+    currentProject: entry.project,
+    activeEnvironmentId: envStillValid ? state.activeEnvironmentId : envs[0]?.id ?? null
+  };
+}
+async function persistEntry(entry) {
+  if (entry.kind === "flow") {
+    await window.electronAPI.saveFlow(entry.flow).catch(console.error);
+    return;
+  }
+  await window.electronAPI.saveProject(entry.project).catch(console.error);
+  const list = await window.electronAPI.listProjects().catch(() => null);
+  if (list) useFlowStore.setState({ projects: list });
+}
+function setSilently(partial) {
+  suppressDepth++;
+  try {
+    useFlowStore.setState(partial);
+  } finally {
+    suppressDepth--;
+  }
 }
 const useFlowStore = create$1((set2, get2) => ({
   flows: [],
@@ -7508,39 +7542,43 @@ const useFlowStore = create$1((set2, get2) => ({
   },
   setRecordingHead: (id2) => set2({ recordingHeadId: id2 }),
   undo: () => {
-    const { past, future, currentFlow } = get2();
-    if (past.length === 0 || !currentFlow) return;
-    const previous = past[past.length - 1];
+    const state = get2();
+    const { past, future } = state;
+    if (past.length === 0) return;
+    const entry = past[past.length - 1];
+    const current = snapshotOf(entry.kind, state);
+    if (!current || entryId(current) !== entryId(entry)) return;
     isTimeTraveling = true;
     set2({
       past: past.slice(0, -1),
-      future: [currentFlow, ...future],
-      currentFlow: previous,
-      selectedNodeId: null
+      future: [current, ...future],
+      ...applyEntry(entry, state)
     });
     isTimeTraveling = false;
-    window.electronAPI.saveFlow(previous).catch(console.error);
+    void persistEntry(entry);
   },
   redo: () => {
-    const { past, future, currentFlow } = get2();
-    if (future.length === 0 || !currentFlow) return;
-    const next = future[0];
+    const state = get2();
+    const { past, future } = state;
+    if (future.length === 0) return;
+    const entry = future[0];
+    const current = snapshotOf(entry.kind, state);
+    if (!current || entryId(current) !== entryId(entry)) return;
     isTimeTraveling = true;
     set2({
-      past: [...past, currentFlow].slice(-50),
+      past: [...past, current].slice(-50),
       future: future.slice(1),
-      currentFlow: next,
-      selectedNodeId: null
+      ...applyEntry(entry, state)
     });
     isTimeTraveling = false;
-    window.electronAPI.saveFlow(next).catch(console.error);
+    void persistEntry(entry);
   },
   runWithoutHistory: (fn) => {
-    suppressHistory = true;
+    suppressDepth++;
     try {
       fn();
     } finally {
-      suppressHistory = false;
+      suppressDepth--;
     }
   },
   renameCurrentFlow: async (name) => {
@@ -7723,15 +7761,13 @@ const useFlowStore = create$1((set2, get2) => ({
     set2({ currentFlow: updatedFlow });
     return callFlowNode;
   },
-  setPositionsFinalized: (v2) => {
-    const flow = get2().currentFlow;
-    if (!flow) return;
-    set2({ currentFlow: { ...flow, positionsFinalized: v2, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } });
-  },
+  // One-time automatic bookkeeping on first load of a never-laid-out flow — not a user edit,
+  // so it must not consume an undo slot. Suppression lives here rather than at the call site
+  // so it can't be forgotten.
   materializeLayout: (positions) => {
     const flow = get2().currentFlow;
     if (!flow || flow.positionsFinalized) return;
-    set2({
+    setSilently({
       currentFlow: {
         ...flow,
         nodes: flow.nodes.map((n2) => {
@@ -7818,6 +7854,9 @@ const useFlowStore = create$1((set2, get2) => ({
     });
     return groupId;
   },
+  // Collapse/expand is pure view state. It rewrites every node position (group-aware relayout),
+  // which would otherwise land on the undo stack and let a few toggles evict real edits.
+  // Still persisted by the caller — collapsed state belongs on disk.
   toggleGroupCollapsed: (groupId) => {
     const flow = get2().currentFlow;
     if (!flow) return;
@@ -7827,7 +7866,9 @@ const useFlowStore = create$1((set2, get2) => ({
       const pos = positions.get(n2.id);
       return pos ? { ...n2, position: pos } : n2;
     });
-    set2({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } });
+    setSilently({
+      currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }
+    });
   },
   ungroupGroup: (groupId) => {
     const flow = get2().currentFlow;
@@ -7962,43 +8003,31 @@ const useFlowStore = create$1((set2, get2) => ({
     set2({ currentFlow: updatedFlow });
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
   },
-  addVarToAllProfiles: async () => {
+  commitProfileVars: async (profileId, rows, envId) => {
     const flow = get2().currentFlow;
     if (!flow) return;
+    const profiles = flow.profiles ?? [];
+    const updatedProfiles = profiles.map((p2) => {
+      const isEdited = p2.id === profileId;
+      const vars = rows.map((row) => {
+        const base = row.origIndex !== null ? p2.vars[row.origIndex] : void 0;
+        const kept = base ?? { key: row.key, value: "", description: "" };
+        if (!isEdited) return { ...kept, key: row.key };
+        if (envId) {
+          return {
+            ...kept,
+            key: row.key,
+            description: row.description,
+            envValues: { ...kept.envValues, [envId]: row.value }
+          };
+        }
+        return { ...kept, key: row.key, value: row.value, description: row.description };
+      });
+      return { ...p2, vars };
+    });
     const updatedFlow = {
       ...flow,
-      profiles: (flow.profiles ?? []).map((p2) => ({
-        ...p2,
-        vars: [...p2.vars, { key: "", value: "", description: "" }]
-      })),
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    set2({ currentFlow: updatedFlow });
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
-  },
-  updateVarKeyInAllProfiles: async (index, newKey) => {
-    const flow = get2().currentFlow;
-    if (!flow) return;
-    const updatedFlow = {
-      ...flow,
-      profiles: (flow.profiles ?? []).map((p2) => ({
-        ...p2,
-        vars: p2.vars.map((v2, i) => i === index ? { ...v2, key: newKey } : v2)
-      })),
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    set2({ currentFlow: updatedFlow });
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
-  },
-  deleteVarFromAllProfiles: async (index) => {
-    const flow = get2().currentFlow;
-    if (!flow) return;
-    const updatedFlow = {
-      ...flow,
-      profiles: (flow.profiles ?? []).map((p2) => ({
-        ...p2,
-        vars: p2.vars.filter((_, i) => i !== index)
-      })),
+      profiles: updatedProfiles,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     set2({ currentFlow: updatedFlow });
@@ -8022,13 +8051,16 @@ const useFlowStore = create$1((set2, get2) => ({
     set2({ projects: list });
     return project;
   },
+  // In-place project mutators set() BEFORE saving (mirroring the flow actions), because the
+  // history subscription can only observe a set() transition and undo has to be able to
+  // re-persist whatever it restored.
   addEnvironmentToProject: async (name) => {
     const project = get2().currentProject;
     if (!project) return;
     const newEnv = { id: v4(), name };
     const updatedProject = { ...project, environments: [...project.environments, newEnv] };
-    await window.electronAPI.saveProject(updatedProject);
     set2({ currentProject: updatedProject });
+    await window.electronAPI.saveProject(updatedProject).catch(console.error);
   },
   renameEnvironment: async (envId, name) => {
     const project = get2().currentProject;
@@ -8037,8 +8069,8 @@ const useFlowStore = create$1((set2, get2) => ({
       ...project,
       environments: project.environments.map((e) => e.id === envId ? { ...e, name } : e)
     };
-    await window.electronAPI.saveProject(updatedProject);
     set2({ currentProject: updatedProject });
+    await window.electronAPI.saveProject(updatedProject).catch(console.error);
   },
   duplicateEnvironment: async (envId) => {
     const project = get2().currentProject;
@@ -8055,8 +8087,8 @@ const useFlowStore = create$1((set2, get2) => ({
         values: { ...v2.values, [newEnv.id]: v2.values[envId] ?? "" }
       }))
     };
-    await window.electronAPI.saveProject(updatedProject);
     set2({ currentProject: updatedProject, activeEnvironmentId: newEnv.id });
+    await window.electronAPI.saveProject(updatedProject).catch(console.error);
   },
   deleteEnvironment: async (envId) => {
     const project = get2().currentProject;
@@ -8070,12 +8102,12 @@ const useFlowStore = create$1((set2, get2) => ({
         return { ...v2, values: rest };
       })
     };
-    await window.electronAPI.saveProject(updatedProject);
     const { activeEnvironmentId } = get2();
     set2({
       currentProject: updatedProject,
       activeEnvironmentId: activeEnvironmentId === envId ? updatedProject.environments[0]?.id ?? null : activeEnvironmentId
     });
+    await window.electronAPI.saveProject(updatedProject).catch(console.error);
   },
   deleteProject: async (projectId) => {
     const allFlows = await window.electronAPI.listFlows();
@@ -8099,13 +8131,10 @@ const useFlowStore = create$1((set2, get2) => ({
     const full = await window.electronAPI.loadProject(projectId);
     if (!full) return;
     const updated = { ...full, name, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-    await window.electronAPI.saveProject(updated);
+    if (get2().currentProject?.id === projectId) set2({ currentProject: updated });
+    await window.electronAPI.saveProject(updated).catch(console.error);
     const list = await window.electronAPI.listProjects();
-    const { currentProject } = get2();
-    set2({
-      projects: list,
-      ...currentProject?.id === projectId ? { currentProject: updated } : {}
-    });
+    set2({ projects: list });
   },
   duplicateProject: async (projectId) => {
     const full = await window.electronAPI.loadProject(projectId);
@@ -8157,59 +8186,38 @@ const useFlowStore = create$1((set2, get2) => ({
       set2({ currentFlow: updatedFlow });
     }
   },
-  addProjectEnvVar: async (key) => {
+  commitProjectEnvVars: async (rows, envId) => {
     const project = get2().currentProject;
     if (!project) return;
-    const envVars = project.envVars ?? [];
-    if (envVars.some((v2) => v2.key === key)) return;
-    const updatedProject = { ...project, envVars: [...envVars, { key, values: {} }] };
-    await window.electronAPI.saveProject(updatedProject);
+    const existing = project.envVars ?? [];
+    const byKey = new Map(existing.map((v2) => [v2.key, v2]));
+    const envVars = rows.map((row) => {
+      const base = row.origKey !== null ? byKey.get(row.origKey) : void 0;
+      const key = base?.key === DOMAIN_ENV_KEY ? DOMAIN_ENV_KEY : row.key;
+      return {
+        ...base ?? {},
+        key,
+        values: { ...base?.values ?? {}, [envId]: row.value }
+      };
+    });
+    const updatedProject = { ...project, envVars };
     set2({ currentProject: updatedProject });
-  },
-  renameProjectEnvVarKey: async (oldKey, newKey) => {
-    const project = get2().currentProject;
-    if (!project) return;
-    const envVars = project.envVars ?? [];
-    if (oldKey === newKey || envVars.some((v2) => v2.key === newKey)) return;
-    const updatedProject = {
-      ...project,
-      envVars: envVars.map((v2) => v2.key === oldKey ? { ...v2, key: newKey } : v2)
-    };
-    await window.electronAPI.saveProject(updatedProject);
-    set2({ currentProject: updatedProject });
-  },
-  deleteProjectEnvVar: async (key) => {
-    const project = get2().currentProject;
-    if (!project) return;
-    const updatedProject = {
-      ...project,
-      envVars: (project.envVars ?? []).filter((v2) => v2.key !== key)
-    };
-    await window.electronAPI.saveProject(updatedProject);
-    set2({ currentProject: updatedProject });
-  },
-  setProjectEnvVarValue: async (key, envId, value) => {
-    const project = get2().currentProject;
-    if (!project) return;
-    const updatedProject = {
-      ...project,
-      envVars: (project.envVars ?? []).map(
-        (v2) => v2.key === key ? { ...v2, values: { ...v2.values, [envId]: value } } : v2
-      )
-    };
-    await window.electronAPI.saveProject(updatedProject);
-    set2({ currentProject: updatedProject });
+    await window.electronAPI.saveProject(updatedProject).catch(console.error);
   }
 }));
 useFlowStore.subscribe((state, prev) => {
-  if (isTimeTraveling || suppressHistory) return;
-  const curr = state.currentFlow;
-  const before = prev.currentFlow;
-  if (!curr || !before || curr === before) return;
-  if (curr.id !== before.id) return;
+  if (isTimeTraveling || historySuppressed()) return;
   if (state.isRecording || state.isReplaying) return;
+  const entries = [];
+  const cf2 = state.currentFlow;
+  const pf2 = prev.currentFlow;
+  if (cf2 && pf2 && cf2 !== pf2 && cf2.id === pf2.id) entries.push({ kind: "flow", flow: pf2 });
+  const cp = state.currentProject;
+  const pp = prev.currentProject;
+  if (cp && pp && cp !== pp && cp.id === pp.id) entries.push({ kind: "project", project: pp });
+  if (entries.length === 0) return;
   useFlowStore.setState((s) => ({
-    past: [...s.past, before].slice(-50),
+    past: [...s.past, ...entries].slice(-50),
     future: []
   }));
 });
@@ -8395,6 +8403,230 @@ function usePlaywright() {
   );
   return { startRecording, startBranchRecording, stopRecording, replayToNode };
 }
+let nextId = 1;
+const useConfirmStore = create$1((set2, get2) => ({
+  queue: [],
+  ask: (req) => new Promise((resolve) => {
+    set2((s) => ({ queue: [...s.queue, { ...req, id: nextId++, resolve }] }));
+  }),
+  answer: (actionId) => {
+    const [front, ...rest] = get2().queue;
+    if (!front) return;
+    set2({ queue: rest });
+    front.resolve(actionId);
+  }
+}));
+const CONFIRM_CANCEL = "cancel";
+const CONFIRM_OK = "ok";
+async function confirm(opts) {
+  const answer = await useConfirmStore.getState().ask({
+    title: opts.title,
+    message: opts.message,
+    detail: opts.detail,
+    actions: [
+      { id: CONFIRM_CANCEL, label: opts.cancelLabel ?? "取消", tone: "ghost" },
+      { id: CONFIRM_OK, label: opts.confirmLabel ?? "確認", tone: opts.danger ? "danger" : "primary" }
+    ],
+    defaultActionId: opts.danger ? CONFIRM_CANCEL : CONFIRM_OK
+  });
+  return answer === CONFIRM_OK;
+}
+async function confirmDiscard(label) {
+  const answer = await useConfirmStore.getState().ask({
+    title: "尚有未儲存的變更",
+    message: `${label} 有尚未儲存的編輯內容。`,
+    detail: "要先儲存再繼續嗎？",
+    actions: [
+      { id: "cancel", label: "取消", tone: "ghost" },
+      { id: "discard", label: "捨棄變更", tone: "danger" },
+      { id: "save", label: "儲存", tone: "primary" }
+    ],
+    defaultActionId: "save"
+  });
+  return answer ?? "cancel";
+}
+function shallowEq(a, b) {
+  if (a === b) return true;
+  const keys = /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k2 of keys) {
+    if (!Object.is(a[k2], b[k2])) return false;
+  }
+  return true;
+}
+const guards = /* @__PURE__ */ new Map();
+function registerDraftGuard(id2, entry) {
+  guards.set(id2, entry);
+  return () => {
+    guards.delete(id2);
+  };
+}
+async function ensureNoUnsavedDrafts() {
+  const dirty = [...guards.values()].filter((g) => g.isDirty());
+  if (dirty.length === 0) return true;
+  const label = dirty.length === 1 ? dirty[0].label : `${dirty.length} 個編輯區塊`;
+  const choice = await confirmDiscard(label);
+  if (choice === "cancel") return false;
+  if (choice === "discard") {
+    dirty.forEach((g) => g.reset());
+    return true;
+  }
+  for (const g of dirty) {
+    if (!await g.commit()) return false;
+  }
+  return true;
+}
+function useDraftForm(opts) {
+  const { source, resetKey, onCommit, validate, equals, guardLabel } = opts;
+  const eq = equals ?? shallowEq;
+  const [values, setValues] = reactExports.useState(source);
+  const [error, setError] = reactExports.useState(null);
+  const baseline = reactExports.useRef(source);
+  const prevKey = reactExports.useRef(resetKey);
+  const isDirty = !eq(values, baseline.current);
+  if (prevKey.current !== resetKey || !isDirty && !eq(source, baseline.current)) {
+    prevKey.current = resetKey;
+    baseline.current = source;
+    setValues(source);
+    if (error) setError(null);
+  }
+  const isStale = isDirty && !eq(source, baseline.current);
+  const setField = reactExports.useCallback((key, v2) => {
+    setValues((prev) => ({ ...prev, [key]: v2 }));
+  }, []);
+  const patch = reactExports.useCallback((p2) => {
+    setValues((prev) => ({ ...prev, ...p2 }));
+  }, []);
+  const reset = reactExports.useCallback(() => {
+    setValues(baseline.current);
+    setError(null);
+  }, []);
+  const latest = reactExports.useRef({ values, isDirty, onCommit, validate });
+  latest.current = { values, isDirty, onCommit, validate };
+  const commit = reactExports.useCallback(async () => {
+    const { values: v2, isDirty: dirty, onCommit: doCommit, validate: doValidate } = latest.current;
+    if (!dirty) return true;
+    const err = doValidate?.(v2) ?? null;
+    if (err) {
+      setError(err);
+      return false;
+    }
+    try {
+      await doCommit(v2);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+    baseline.current = v2;
+    setValues(v2);
+    setError(null);
+    return true;
+  }, []);
+  const guardedRun = reactExports.useCallback(
+    async (proceed) => {
+      if (!latest.current.isDirty) {
+        await proceed();
+        return;
+      }
+      const choice = await confirmDiscard(guardLabel ?? "目前的編輯");
+      if (choice === "cancel") return;
+      if (choice === "save" && !await commit()) return;
+      if (choice === "discard") reset();
+      await proceed();
+    },
+    [commit, reset, guardLabel]
+  );
+  const fieldKeyDown = reactExports.useCallback(
+    (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void commit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        reset();
+      }
+    },
+    [commit, reset]
+  );
+  const guardId = reactExports.useRef();
+  if (!guardId.current) guardId.current = v4();
+  const guardState = reactExports.useRef({ isDirty, commit, reset });
+  guardState.current = { isDirty, commit, reset };
+  reactExports.useEffect(() => {
+    if (!guardLabel) return;
+    return registerDraftGuard(guardId.current, {
+      label: guardLabel,
+      isDirty: () => guardState.current.isDirty,
+      commit: () => guardState.current.commit(),
+      reset: () => guardState.current.reset()
+    });
+  }, [guardLabel]);
+  return { values, setField, patch, isDirty, isStale, error, commit, reset, fieldKeyDown, guardedRun };
+}
+function useDraftRows(opts) {
+  const { source, resetKey, onCommit, validate, rowEquals, guardLabel } = opts;
+  const rowEq = rowEquals ?? shallowEq;
+  const sourceRows = source.map((r2, i) => ({ ...r2, _rid: `src:${i}`, _origIndex: i }));
+  const form = useDraftForm({
+    source: { rows: sourceRows },
+    resetKey,
+    onCommit: (v2) => onCommit(v2.rows),
+    validate: validate ? (v2) => validate(v2.rows) : void 0,
+    equals: (a, b) => {
+      if (a.rows.length !== b.rows.length) return false;
+      return a.rows.every((r2, i) => {
+        const o = b.rows[i];
+        return r2._rid === o._rid && r2._origIndex === o._origIndex && rowEq(r2, o);
+      });
+    },
+    guardLabel
+  });
+  const { values, patch } = form;
+  const rows = values.rows;
+  const setCell = reactExports.useCallback(
+    (rid, key, v2) => {
+      patch({ rows: rows.map((r2) => r2._rid === rid ? { ...r2, [key]: v2 } : r2) });
+    },
+    [rows, patch]
+  );
+  const addRow = reactExports.useCallback(
+    (init2) => {
+      const rid = `new:${v4()}`;
+      patch({ rows: [...rows, { ...init2, _rid: rid, _origIndex: null }] });
+      return rid;
+    },
+    [rows, patch]
+  );
+  const removeRow = reactExports.useCallback(
+    (rid) => {
+      patch({ rows: rows.filter((r2) => r2._rid !== rid) });
+    },
+    [rows, patch]
+  );
+  const isRowDirty = reactExports.useCallback(
+    (rid) => {
+      const row = rows.find((r2) => r2._rid === rid);
+      if (!row) return false;
+      if (row._origIndex === null) return true;
+      const orig = source[row._origIndex];
+      return !orig || !rowEq(row, orig);
+    },
+    [rows, source, rowEq]
+  );
+  return {
+    rows,
+    setCell,
+    addRow,
+    removeRow,
+    isRowDirty,
+    isDirty: form.isDirty,
+    isStale: form.isStale,
+    error: form.error,
+    commit: form.commit,
+    reset: form.reset,
+    fieldKeyDown: form.fieldKeyDown,
+    guardedRun: form.guardedRun
+  };
+}
 function useFlowManager() {
   const { setFlows, createFlow, setCurrentFlow } = useFlowStore();
   const refreshFlowList = reactExports.useCallback(async () => {
@@ -8407,6 +8639,7 @@ function useFlowManager() {
   }, []);
   const openFlow = reactExports.useCallback(
     async (flowId) => {
+      if (!await ensureNoUnsavedDrafts()) return;
       const flow = await window.electronAPI.loadFlow(flowId);
       if (!flow) return;
       setCurrentFlow(flow);
@@ -8436,11 +8669,6 @@ function useFlowManager() {
     },
     [createFlow, refreshFlowList]
   );
-  const saveCurrentFlow = reactExports.useCallback(async () => {
-    const flow = useFlowStore.getState().currentFlow;
-    if (!flow) return;
-    await window.electronAPI.saveFlow(flow);
-  }, []);
   const deleteCurrentFlow = reactExports.useCallback(async () => {
     const flow = useFlowStore.getState().currentFlow;
     if (!flow) return;
@@ -8448,7 +8676,7 @@ function useFlowManager() {
     setCurrentFlow(null);
     await refreshFlowList();
   }, [setCurrentFlow, refreshFlowList]);
-  return { refreshFlowList, refreshProjectList, openFlow, newFlow, saveCurrentFlow, deleteCurrentFlow };
+  return { refreshFlowList, refreshProjectList, openFlow, newFlow, deleteCurrentFlow };
 }
 function TestOutputModal({ lines, finished, onClose }) {
   const bottomRef = reactExports.useRef(null);
@@ -8576,6 +8804,34 @@ function TestOutputModal({ lines, finished, onClose }) {
     }
   );
 }
+function DirtyBadge({ isDirty, isStale }) {
+  if (!isDirty) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: 6 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "span",
+      {
+        style: {
+          fontSize: 11,
+          color: "#fbbf24",
+          background: "rgba(251,191,36,0.12)",
+          border: "1px solid rgba(251,191,36,0.35)",
+          borderRadius: 10,
+          padding: "2px 8px",
+          whiteSpace: "nowrap"
+        },
+        children: "● 未儲存"
+      }
+    ),
+    isStale && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "span",
+      {
+        style: { fontSize: 11, color: "#f87171", whiteSpace: "nowrap" },
+        title: "此資料已在別處被更新，儲存將以你的編輯為準",
+        children: "⚠ 外部已更新"
+      }
+    )
+  ] });
+}
 function ProfileEditorModal({ onClose }) {
   const {
     currentFlow,
@@ -8585,9 +8841,7 @@ function ProfileEditorModal({ onClose }) {
     updateProfile,
     deleteProfile,
     duplicateProfile,
-    addVarToAllProfiles,
-    updateVarKeyInAllProfiles,
-    deleteVarFromAllProfiles,
+    commitProfileVars,
     currentProject,
     activeEnvironmentId,
     setActiveEnvironment
@@ -8602,15 +8856,34 @@ function ProfileEditorModal({ onClose }) {
   const [addingProfile, setAddingProfile] = reactExports.useState(false);
   const [renamingId, setRenamingId] = reactExports.useState(null);
   const [renameInput, setRenameInput] = reactExports.useState("");
+  const [envPopoverAnchor, setEnvPopoverAnchor] = reactExports.useState(null);
+  const [envSearch, setEnvSearch] = reactExports.useState("");
+  const [copiedKey, setCopiedKey] = reactExports.useState(null);
+  const [copiedMode, setCopiedMode] = reactExports.useState("copy");
+  const envBtnRef = reactExports.useRef(null);
+  const envPopoverRef = reactExports.useRef(null);
+  const valueInputRefs = reactExports.useRef({});
+  const lastValueCaret = reactExports.useRef(null);
   const selectedProfile = profiles.find((p2) => p2.id === selectedProfileId) ?? profiles[0] ?? null;
   const activeEnvName = environments.find((e) => e.id === activeEnvironmentId)?.name;
+  const selectProfile = async (id2) => {
+    if (id2 === selectedProfileId) return;
+    if (!await ensureNoUnsavedDrafts()) return;
+    if (document.activeElement instanceof HTMLInputElement) document.activeElement.blur();
+    lastValueCaret.current = null;
+    setSelectedProfileId(id2);
+  };
+  const jumpToProfile = (id2) => {
+    lastValueCaret.current = null;
+    setSelectedProfileId(id2);
+  };
   const handleAddProfile = async () => {
     const name = newProfileName.trim();
     if (!name) return;
     await addProfile(name);
     const updated = useFlowStore.getState().currentFlow?.profiles ?? [];
     const last = updated[updated.length - 1];
-    if (last) setSelectedProfileId(last.id);
+    if (last) jumpToProfile(last.id);
     setNewProfileName("");
     setAddingProfile(false);
   };
@@ -8620,30 +8893,139 @@ function ProfileEditorModal({ onClose }) {
     setRenamingId(null);
     setRenameInput("");
   };
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameInput("");
+  };
   const handleDuplicateProfile = async (id2) => {
     await duplicateProfile(id2);
     const updated = useFlowStore.getState().currentFlow?.profiles ?? [];
     const last = updated[updated.length - 1];
-    if (last) setSelectedProfileId(last.id);
+    if (last) jumpToProfile(last.id);
   };
   const handleDeleteProfile = async (id2) => {
+    const name = profiles.find((p2) => p2.id === id2)?.name ?? "";
+    const ok2 = await confirm({
+      title: `刪除配置「${name}」？`,
+      detail: "此配置的所有變數值將一併移除。",
+      confirmLabel: "刪除",
+      danger: true
+    });
+    if (!ok2) return;
     const nextProfile = profiles.find((p2) => p2.id !== id2);
     await deleteProfile(id2);
+    lastValueCaret.current = null;
     if (selectedProfileId === id2 && nextProfile) {
-      setSelectedProfileId(nextProfile.id);
+      jumpToProfile(nextProfile.id);
     }
   };
-  const handleVarField = (index, field, raw) => {
-    if (!selectedProfile) return;
-    const newVars = selectedProfile.vars.map((v2, i) => {
-      if (i !== index) return v2;
-      if (field === "value" && activeEnvironmentId) {
-        return { ...v2, envValues: { ...v2.envValues, [activeEnvironmentId]: raw } };
-      }
-      return { ...v2, [field]: raw };
+  const varSource = reactExports.useMemo(
+    () => (selectedProfile?.vars ?? []).map((v2) => ({
+      key: v2.key,
+      value: activeEnvironmentId ? v2.envValues?.[activeEnvironmentId] ?? "" : v2.value,
+      description: v2.description ?? "",
+      fallback: v2.value
+    })),
+    [selectedProfile, activeEnvironmentId]
+  );
+  const table = useDraftRows({
+    source: varSource,
+    // Value column is per-environment and per-profile, so both belong in the reset key.
+    resetKey: selectedProfile ? `${currentFlow?.id ?? ""}:${selectedProfile.id}:${activeEnvironmentId ?? ""}` : null,
+    onCommit: async (rows) => {
+      if (!selectedProfile) return;
+      await commitProfileVars(
+        selectedProfile.id,
+        rows.map((r2) => ({
+          origIndex: r2._origIndex,
+          key: r2.key.trim(),
+          value: r2.value,
+          description: r2.description
+        })),
+        activeEnvironmentId
+      );
+    },
+    validate: (rows) => {
+      const keys = rows.map((r2) => r2.key.trim());
+      if (keys.some((k2) => !k2)) return "變數名稱不可為空";
+      const dup = keys.find((k2, i) => keys.indexOf(k2) !== i);
+      if (dup) return `變數名稱重複：${dup}`;
+      return null;
+    },
+    guardLabel: "環境配置變數"
+  });
+  const handleDeleteVar = async (rid) => {
+    const key = table.rows.find((r2) => r2._rid === rid)?.key ?? "";
+    const ok2 = await confirm({
+      title: key ? `刪除變數 {{${key}}}？` : "刪除此變數？",
+      detail: "此變數將從「所有配置」中移除，引用它的節點將無法解析。儲存後生效。",
+      confirmLabel: "刪除",
+      danger: true
     });
-    updateProfile(selectedProfile.id, { vars: newVars });
+    if (!ok2) return;
+    table.removeRow(rid);
   };
+  const rememberCaret = (rid, el2) => {
+    lastValueCaret.current = {
+      rid,
+      start: el2.selectionStart ?? el2.value.length,
+      end: el2.selectionEnd ?? el2.value.length
+    };
+  };
+  const envVarValueFor = (ev) => activeEnvironmentId ? ev.values[activeEnvironmentId] ?? "" : "";
+  const visibleEnvVars = (() => {
+    const q2 = envSearch.trim().toLowerCase();
+    if (!q2) return projectEnvVars;
+    return projectEnvVars.filter(
+      (ev) => ev.key.toLowerCase().includes(q2) || envVarValueFor(ev).toLowerCase().includes(q2)
+    );
+  })();
+  const handlePickEnvVar = (key) => {
+    const token = `{{${key}}}`;
+    const caret = lastValueCaret.current;
+    const row = caret ? table.rows.find((r2) => r2._rid === caret.rid) : void 0;
+    if (caret && row) {
+      const current = row.value;
+      table.setCell(row._rid, "value", current.slice(0, caret.start) + token + current.slice(caret.end));
+      const pos = caret.start + token.length;
+      lastValueCaret.current = { rid: caret.rid, start: pos, end: pos };
+      requestAnimationFrame(() => {
+        const el2 = valueInputRefs.current[caret.rid];
+        el2?.focus();
+        el2?.setSelectionRange(pos, pos);
+      });
+      setCopiedMode("insert");
+    } else {
+      navigator.clipboard?.writeText(token);
+      setCopiedMode("copy");
+    }
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1500);
+  };
+  const closeEnvPopover = () => {
+    setEnvPopoverAnchor(null);
+    setEnvSearch("");
+  };
+  reactExports.useEffect(() => {
+    if (!envPopoverAnchor) return;
+    const onMouseDown = (e) => {
+      const target = e.target;
+      if (envPopoverRef.current?.contains(target) || envBtnRef.current?.contains(target)) return;
+      closeEnvPopover();
+    };
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeEnvPopover();
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [envPopoverAnchor]);
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
     "div",
     {
@@ -8663,7 +9045,7 @@ function ProfileEditorModal({ onClose }) {
             background: "#1e293b",
             border: "1px solid #334155",
             borderRadius: 12,
-            width: 780,
+            width: 960,
             maxHeight: "80vh",
             display: "flex",
             flexDirection: "column",
@@ -8686,7 +9068,7 @@ function ProfileEditorModal({ onClose }) {
                   /* @__PURE__ */ jsxRuntimeExports.jsx(
                     "button",
                     {
-                      onClick: onClose,
+                      onClick: () => void table.guardedRun(onClose),
                       style: { background: "transparent", border: "none", color: "#64748b", fontSize: 18, cursor: "pointer" },
                       children: "✕"
                     }
@@ -8728,7 +9110,7 @@ function ProfileEditorModal({ onClose }) {
                         "div",
                         {
                           onClick: () => {
-                            if (!isRenaming) setSelectedProfileId(p2.id);
+                            if (!isRenaming) selectProfile(p2.id);
                           },
                           style: {
                             padding: "8px 12px",
@@ -8746,24 +9128,46 @@ function ProfileEditorModal({ onClose }) {
                           onMouseLeave: (e) => {
                             if (!isSelected) e.currentTarget.style.background = "transparent";
                           },
-                          children: isRenaming ? /* @__PURE__ */ jsxRuntimeExports.jsx(
-                            "input",
-                            {
-                              autoFocus: true,
-                              value: renameInput,
-                              onChange: (e) => setRenameInput(e.target.value),
-                              onBlur: () => handleRenameCommit(p2.id),
-                              onKeyDown: (e) => {
-                                if (e.key === "Enter") handleRenameCommit(p2.id);
-                                if (e.key === "Escape") {
-                                  setRenamingId(null);
-                                  setRenameInput("");
-                                }
-                              },
-                              onClick: (e) => e.stopPropagation(),
-                              style: inlineInputStyle
-                            }
-                          ) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+                          children: isRenaming ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "input",
+                              {
+                                autoFocus: true,
+                                value: renameInput,
+                                onChange: (e) => setRenameInput(e.target.value),
+                                onKeyDown: (e) => {
+                                  if (e.key === "Enter") handleRenameCommit(p2.id);
+                                  if (e.key === "Escape") cancelRename();
+                                },
+                                onClick: (e) => e.stopPropagation(),
+                                style: inlineInputStyle
+                              }
+                            ),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "button",
+                              {
+                                onClick: (e) => {
+                                  e.stopPropagation();
+                                  handleRenameCommit(p2.id);
+                                },
+                                title: "確認",
+                                style: renameActionBtnStyle("#4ade80"),
+                                children: "✓"
+                              }
+                            ),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "button",
+                              {
+                                onClick: (e) => {
+                                  e.stopPropagation();
+                                  cancelRename();
+                                },
+                                title: "取消",
+                                style: renameActionBtnStyle("#94a3b8"),
+                                children: "✕"
+                              }
+                            )
+                          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
                             /* @__PURE__ */ jsxRuntimeExports.jsx(
                               "span",
                               {
@@ -8932,60 +9336,154 @@ function ProfileEditorModal({ onClose }) {
                           " 引用）"
                         ] })
                       ] }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        "button",
-                        {
-                          onClick: () => {
-                            setActiveProfile(selectedProfile.id);
-                            onClose();
-                          },
-                          style: {
-                            padding: "4px 12px",
-                            borderRadius: 4,
-                            border: "none",
-                            background: activeProfileId === selectedProfile.id ? "#374151" : "#3b82f6",
-                            color: activeProfileId === selectedProfile.id ? "#6b7280" : "#fff",
-                            fontSize: 12,
-                            cursor: activeProfileId === selectedProfile.id ? "default" : "pointer"
-                          },
-                          children: activeProfileId === selectedProfile.id ? "目前使用中" : "切換為此配置"
-                        }
-                      )
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
+                        projectEnvVars.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                          "button",
+                          {
+                            ref: envBtnRef,
+                            onClick: () => envPopoverAnchor ? closeEnvPopover() : setEnvPopoverAnchor(envBtnRef.current?.getBoundingClientRect() ?? null),
+                            title: `瀏覽專案環境變數，點擊插入或複製 ${"{{key}}"}`,
+                            style: {
+                              ...envRefBtnStyle,
+                              ...envPopoverAnchor ? { borderColor: "#4ade80" } : {}
+                            },
+                            children: [
+                              "🌐 專案環境變數 (",
+                              projectEnvVars.length,
+                              ") ",
+                              envPopoverAnchor ? "▴" : "▾"
+                            ]
+                          }
+                        ),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(
+                          "button",
+                          {
+                            onClick: () => {
+                              setActiveProfile(selectedProfile.id);
+                              onClose();
+                            },
+                            style: {
+                              padding: "4px 12px",
+                              borderRadius: 4,
+                              border: "none",
+                              background: activeProfileId === selectedProfile.id ? "#374151" : "#3b82f6",
+                              color: activeProfileId === selectedProfile.id ? "#6b7280" : "#fff",
+                              fontSize: 12,
+                              cursor: activeProfileId === selectedProfile.id ? "default" : "pointer"
+                            },
+                            children: activeProfileId === selectedProfile.id ? "目前使用中" : "切換為此配置"
+                          }
+                        )
+                      ] })
                     ]
                   }
                 ),
-                projectEnvVars.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                envPopoverAnchor && /* @__PURE__ */ jsxRuntimeExports.jsxs(
                   "div",
                   {
+                    ref: envPopoverRef,
                     style: {
-                      padding: "6px 16px",
-                      borderBottom: "1px solid #334155",
+                      position: "fixed",
+                      top: envPopoverAnchor.bottom + 4,
+                      left: Math.max(8, envPopoverAnchor.right - 340),
+                      width: 340,
+                      zIndex: 2100,
+                      background: "#1e293b",
+                      border: "1px solid #334155",
+                      borderRadius: 8,
+                      boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
                       display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      flexWrap: "wrap",
-                      flexShrink: 0
+                      flexDirection: "column",
+                      overflow: "hidden"
                     },
                     children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", whiteSpace: "nowrap" }, children: "🌐 專案環境變數（點擊複製引用）:" }),
-                      projectEnvVars.map((ev) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        "button",
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                        "div",
                         {
-                          onClick: () => navigator.clipboard?.writeText(`{{${ev.key}}}`),
-                          title: `複製 {{${ev.key}}}`,
                           style: {
-                            padding: "2px 8px",
-                            borderRadius: 10,
-                            border: "1px solid #166534",
-                            background: "#14532d",
-                            color: "#4ade80",
-                            fontSize: 11,
-                            cursor: "pointer"
+                            padding: "8px 10px",
+                            borderBottom: "1px solid #334155",
+                            flexShrink: 0
                           },
-                          children: `{{${ev.key}}}`
-                        },
-                        ev.key
-                      ))
+                          children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "input",
+                              {
+                                autoFocus: true,
+                                value: envSearch,
+                                onChange: (e) => setEnvSearch(e.target.value),
+                                placeholder: "🔍 搜尋變數…",
+                                style: cellInputStyle$1
+                              }
+                            ),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 5 }, children: table.rows.some((r2) => r2._rid === lastValueCaret.current?.rid) ? "點擊插入至編輯中的「值」欄位" : `點擊複製 ${"{{key}}"}（先點一個「值」欄位可直接插入）` })
+                          ]
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { overflowY: "auto", maxHeight: 240 }, children: [
+                        visibleEnvVars.map((ev) => {
+                          const value = envVarValueFor(ev);
+                          return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                            "div",
+                            {
+                              onClick: () => handlePickEnvVar(ev.key),
+                              title: `{{${ev.key}}}`,
+                              style: {
+                                padding: "6px 10px",
+                                cursor: "pointer",
+                                borderBottom: "1px solid #0f172a",
+                                userSelect: "none"
+                              },
+                              onMouseEnter: (e) => {
+                                e.currentTarget.style.background = "#08140c";
+                              },
+                              onMouseLeave: (e) => {
+                                e.currentTarget.style.background = "transparent";
+                              },
+                              children: [
+                                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+                                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                                    "code",
+                                    {
+                                      style: {
+                                        fontSize: 11,
+                                        background: "#0f172a",
+                                        color: "#4ade80",
+                                        padding: "1px 5px",
+                                        borderRadius: 3,
+                                        border: "1px solid #166534",
+                                        overflow: "hidden",
+                                        textOverflow: "ellipsis",
+                                        whiteSpace: "nowrap"
+                                      },
+                                      children: `{{${ev.key}}}`
+                                    }
+                                  ),
+                                  ev.key === DOMAIN_ENV_KEY && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10 }, title: "保留變數", children: "🔒" }),
+                                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1 } }),
+                                  copiedKey === ev.key && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#4ade80", flexShrink: 0 }, children: copiedMode === "insert" ? "已插入" : "已複製" })
+                                ] }),
+                                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                                  "div",
+                                  {
+                                    style: {
+                                      fontSize: 10,
+                                      color: value ? "#78716c" : "#475569",
+                                      marginTop: 2,
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap"
+                                    },
+                                    children: activeEnvironmentId ? value || "(空)" : "—"
+                                  }
+                                )
+                              ]
+                            },
+                            ev.key
+                          );
+                        }),
+                        visibleEnvVars.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: 12, fontSize: 11, color: "#64748b" }, children: "找不到符合的變數" })
+                      ] })
                     ]
                   }
                 ),
@@ -9006,7 +9504,11 @@ function ProfileEditorModal({ onClose }) {
                         "select",
                         {
                           value: activeEnvironmentId ?? "",
-                          onChange: (e) => setActiveEnvironment(e.target.value || null),
+                          onChange: async (e) => {
+                            const next = e.target.value || null;
+                            if (!await ensureNoUnsavedDrafts()) return;
+                            setActiveEnvironment(next);
+                          },
                           style: {
                             background: "#0f172a",
                             border: "1px solid #334155",
@@ -9032,7 +9534,7 @@ function ProfileEditorModal({ onClose }) {
                     {
                       style: {
                         display: "grid",
-                        gridTemplateColumns: "1fr 1fr 1fr 32px",
+                        gridTemplateColumns: gridCols,
                         gap: 8,
                         padding: "4px 16px 8px",
                         borderBottom: "1px solid #0f172a"
@@ -9048,14 +9550,13 @@ function ProfileEditorModal({ onClose }) {
                       ]
                     }
                   ),
-                  selectedProfile.vars.map((v2, i) => {
-                    const displayValue = activeEnvironmentId ? v2.envValues?.[activeEnvironmentId] ?? "" : v2.value;
+                  table.rows.map((row) => {
                     return /* @__PURE__ */ jsxRuntimeExports.jsxs(
                       "div",
                       {
                         style: {
                           display: "grid",
-                          gridTemplateColumns: "1fr 1fr 1fr 32px",
+                          gridTemplateColumns: gridCols,
                           gap: 8,
                           padding: "5px 16px",
                           alignItems: "center"
@@ -9064,19 +9565,29 @@ function ProfileEditorModal({ onClose }) {
                           /* @__PURE__ */ jsxRuntimeExports.jsx(
                             "input",
                             {
-                              value: v2.key,
-                              onChange: (e) => updateVarKeyInAllProfiles(i, e.target.value),
+                              value: row.key,
+                              onChange: (e) => table.setCell(row._rid, "key", e.target.value),
+                              onKeyDown: table.fieldKeyDown,
                               placeholder: "key",
                               style: cellInputStyle$1,
-                              title: "修改參數名稱將同步至所有配置"
+                              title: "修改參數名稱將同步至所有配置（儲存後生效）"
                             }
                           ),
                           /* @__PURE__ */ jsxRuntimeExports.jsx(
                             "input",
                             {
-                              value: displayValue,
-                              onChange: (e) => handleVarField(i, "value", e.target.value),
-                              placeholder: activeEnvironmentId ? `預設: ${v2.value || "(空)"}` : "value",
+                              ref: (el2) => {
+                                valueInputRefs.current[row._rid] = el2;
+                              },
+                              value: row.value,
+                              onChange: (e) => {
+                                rememberCaret(row._rid, e.currentTarget);
+                                table.setCell(row._rid, "value", e.target.value);
+                              },
+                              onFocus: (e) => rememberCaret(row._rid, e.currentTarget),
+                              onSelect: (e) => rememberCaret(row._rid, e.currentTarget),
+                              onKeyDown: table.fieldKeyDown,
+                              placeholder: activeEnvironmentId ? `預設: ${row.fallback || "(空)"}` : "value",
                               style: {
                                 ...cellInputStyle$1,
                                 ...activeEnvironmentId ? { borderColor: "#166534" } : {}
@@ -9086,8 +9597,9 @@ function ProfileEditorModal({ onClose }) {
                           /* @__PURE__ */ jsxRuntimeExports.jsx(
                             "input",
                             {
-                              value: v2.description ?? "",
-                              onChange: (e) => handleVarField(i, "description", e.target.value),
+                              value: row.description,
+                              onChange: (e) => table.setCell(row._rid, "description", e.target.value),
+                              onKeyDown: table.fieldKeyDown,
                               placeholder: "說明此參數用途…",
                               style: { ...cellInputStyle$1, color: "#94a3b8" }
                             }
@@ -9095,7 +9607,7 @@ function ProfileEditorModal({ onClose }) {
                           /* @__PURE__ */ jsxRuntimeExports.jsx(
                             "button",
                             {
-                              onClick: () => deleteVarFromAllProfiles(i),
+                              onClick: () => handleDeleteVar(row._rid),
                               title: "從所有配置刪除此變數",
                               style: {
                                 background: "transparent",
@@ -9119,27 +9631,62 @@ function ProfileEditorModal({ onClose }) {
                           )
                         ]
                       },
-                      i
+                      row._rid
                     );
                   }),
-                  selectedProfile.vars.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無變數。點擊下方「新增變數」。" })
+                  table.rows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無變數。點擊下方「新增變數」。" })
                 ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: 12, borderTop: "1px solid #334155", flexShrink: 0 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "button",
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "div",
                   {
-                    onClick: () => addVarToAllProfiles(),
                     style: {
-                      padding: "6px 14px",
-                      borderRadius: 4,
-                      border: "1px dashed #334155",
-                      background: "transparent",
-                      color: "#3b82f6",
-                      fontSize: 12,
-                      cursor: "pointer"
+                      padding: 12,
+                      borderTop: "1px solid #334155",
+                      flexShrink: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10
                     },
-                    children: "＋ 新增變數（所有配置同步）"
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "button",
+                        {
+                          onClick: () => table.addRow({ key: "", value: "", description: "", fallback: "" }),
+                          style: {
+                            padding: "6px 14px",
+                            borderRadius: 4,
+                            border: "1px dashed #334155",
+                            background: "transparent",
+                            color: "#3b82f6",
+                            fontSize: 12,
+                            cursor: "pointer"
+                          },
+                          children: "＋ 新增變數（所有配置同步）"
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1 } }),
+                      table.error && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#f87171", whiteSpace: "nowrap" }, children: table.error }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(DirtyBadge, { isDirty: table.isDirty, isStale: table.isStale }),
+                      table.isDirty && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: table.reset, style: ghostBtnStyle$1, title: "捨棄未儲存的變更", children: "還原" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "button",
+                        {
+                          onClick: () => void table.commit(),
+                          disabled: !table.isDirty,
+                          style: {
+                            padding: "6px 16px",
+                            borderRadius: 4,
+                            border: "none",
+                            fontSize: 12,
+                            fontWeight: 600,
+                            ...table.isDirty ? { background: "#3b82f6", color: "#fff", cursor: "pointer" } : { background: "#334155", color: "#64748b", cursor: "default" }
+                          },
+                          children: "儲存"
+                        }
+                      )
+                    ]
                   }
-                ) })
+                )
               ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: 24, color: "#64748b", fontSize: 13 }, children: "請從左側選擇或建立一個配置。" }) })
             ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -9152,7 +9699,7 @@ function ProfileEditorModal({ onClose }) {
                   justifyContent: "flex-end",
                   flexShrink: 0
                 },
-                children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, style: closeBtnStyle$1, children: "關閉" })
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => void table.guardedRun(onClose), style: closeBtnStyle$1, children: "關閉" })
               }
             )
           ]
@@ -9161,6 +9708,17 @@ function ProfileEditorModal({ onClose }) {
     }
   );
 }
+const gridCols = "1fr 1.3fr 1fr 32px";
+const envRefBtnStyle = {
+  padding: "3px 10px",
+  borderRadius: 4,
+  border: "1px solid #166534",
+  background: "#14532d",
+  color: "#4ade80",
+  fontSize: 11,
+  cursor: "pointer",
+  whiteSpace: "nowrap"
+};
 const inlineInputStyle = {
   padding: "3px 7px",
   background: "#0f172a",
@@ -9170,6 +9728,26 @@ const inlineInputStyle = {
   fontSize: 12,
   outline: "none",
   width: "100%"
+};
+const renameActionBtnStyle = (color2) => ({
+  flexShrink: 0,
+  background: "transparent",
+  border: "none",
+  cursor: "pointer",
+  color: color2,
+  fontSize: 12,
+  padding: "1px 3px",
+  borderRadius: 3,
+  lineHeight: 1
+});
+const ghostBtnStyle$1 = {
+  padding: "6px 12px",
+  borderRadius: 4,
+  border: "1px solid #475569",
+  background: "transparent",
+  color: "#94a3b8",
+  cursor: "pointer",
+  fontSize: 12
 };
 const cellInputStyle$1 = {
   padding: "4px 8px",
@@ -9200,27 +9778,44 @@ function ProjectEnvVarModal({ onClose }) {
     renameEnvironment,
     duplicateEnvironment,
     deleteEnvironment,
-    addProjectEnvVar,
-    renameProjectEnvVarKey,
-    deleteProjectEnvVar,
-    setProjectEnvVarValue
+    commitProjectEnvVars
   } = useFlowStore();
   const environments = currentProject?.environments ?? [];
   const envVars = currentProject?.envVars ?? [];
   const selectedEnv = environments.find((e) => e.id === activeEnvironmentId) ?? environments[0] ?? null;
-  const [newKey, setNewKey] = reactExports.useState("");
-  const [adding, setAdding] = reactExports.useState(false);
   const [renamingEnv, setRenamingEnv] = reactExports.useState(false);
   const [envRenameValue, setEnvRenameValue] = reactExports.useState("");
   const [addingEnv, setAddingEnv] = reactExports.useState(false);
   const [newEnvName, setNewEnvName] = reactExports.useState("");
-  const handleAdd = async () => {
-    const key = newKey.trim();
-    if (!key) return;
-    await addProjectEnvVar(key);
-    setNewKey("");
-    setAdding(false);
-  };
+  const varSource = reactExports.useMemo(
+    () => envVars.map((v2) => ({ key: v2.key, value: (selectedEnv && v2.values[selectedEnv.id]) ?? "" })),
+    [envVars, selectedEnv]
+  );
+  const table = useDraftRows({
+    source: varSource,
+    // The value column is per-environment, so the environment belongs in the reset key.
+    resetKey: currentProject && selectedEnv ? `${currentProject.id}:${selectedEnv.id}` : null,
+    onCommit: async (rows) => {
+      if (!selectedEnv) return;
+      await commitProjectEnvVars(
+        rows.map((r2) => ({
+          origKey: r2._origIndex !== null ? varSource[r2._origIndex]?.key ?? null : null,
+          key: r2.key.trim(),
+          value: r2.value
+        })),
+        selectedEnv.id
+      );
+    },
+    validate: (rows) => {
+      const keys = rows.map((r2) => r2.key.trim());
+      if (keys.some((k2) => !k2)) return "變數名稱不可為空";
+      const dup = keys.find((k2, i) => keys.indexOf(k2) !== i);
+      if (dup) return `變數名稱重複：${dup}`;
+      if (!keys.includes(DOMAIN_ENV_KEY)) return `${DOMAIN_ENV_KEY} 為保留變數，不可刪除或改名`;
+      return null;
+    },
+    guardLabel: "專案環境變數"
+  });
   const startRenameEnv = () => {
     if (!selectedEnv) return;
     setEnvRenameValue(selectedEnv.name);
@@ -9244,11 +9839,27 @@ function ProjectEnvVarModal({ onClose }) {
   const handleDeleteEnv = async () => {
     if (!selectedEnv) return;
     if (environments.length <= 1) return;
-    if (!window.confirm(`刪除環境「${selectedEnv.name}」？
-此環境在所有環境變數上的值將一併移除。`)) return;
+    const ok2 = await confirm({
+      title: `刪除環境「${selectedEnv.name}」？`,
+      detail: "此環境在所有環境變數上的值將一併移除。",
+      confirmLabel: "刪除",
+      danger: true
+    });
+    if (!ok2) return;
     await deleteEnvironment(selectedEnv.id);
   };
-  const gridCols = "1fr 1fr 32px";
+  const handleDeleteVar = async (rid) => {
+    const key = table.rows.find((r2) => r2._rid === rid)?.key ?? "";
+    const ok2 = await confirm({
+      title: key ? `刪除環境變數 {{${key}}}？` : "刪除此變數？",
+      detail: "此變數在所有環境上的值將一併移除，引用它的配置變數將無法解析。儲存後生效。",
+      confirmLabel: "刪除",
+      danger: true
+    });
+    if (!ok2) return;
+    table.removeRow(rid);
+  };
+  const gridCols2 = "1fr 1fr 32px";
   const envBtnStyle = {
     background: "transparent",
     border: "1px solid #334155",
@@ -9309,7 +9920,7 @@ function ProjectEnvVarModal({ onClose }) {
                   /* @__PURE__ */ jsxRuntimeExports.jsx(
                     "button",
                     {
-                      onClick: onClose,
+                      onClick: () => void table.guardedRun(onClose),
                       style: { background: "transparent", border: "none", color: "#64748b", fontSize: 18, cursor: "pointer" },
                       children: "✕"
                     }
@@ -9374,7 +9985,11 @@ function ProjectEnvVarModal({ onClose }) {
                       "select",
                       {
                         value: selectedEnv?.id ?? "",
-                        onChange: (e) => setActiveEnvironment(e.target.value || null),
+                        onChange: async (e) => {
+                          const next = e.target.value || null;
+                          if (!await ensureNoUnsavedDrafts()) return;
+                          setActiveEnvironment(next);
+                        },
                         style: {
                           background: "#0f172a",
                           border: "1px solid #334155",
@@ -9428,7 +10043,7 @@ function ProjectEnvVarModal({ onClose }) {
                 {
                   style: {
                     display: "grid",
-                    gridTemplateColumns: gridCols,
+                    gridTemplateColumns: gridCols2,
                     gap: 8,
                     padding: "4px 16px 8px",
                     borderBottom: "1px solid #0f172a"
@@ -9443,14 +10058,14 @@ function ProjectEnvVarModal({ onClose }) {
                   ]
                 }
               ),
-              envVars.map((v2) => {
-                const isDomain = v2.key === DOMAIN_ENV_KEY;
+              table.rows.map((row) => {
+                const isDomain = row.key === DOMAIN_ENV_KEY;
                 return /* @__PURE__ */ jsxRuntimeExports.jsxs(
                   "div",
                   {
                     style: {
                       display: "grid",
-                      gridTemplateColumns: gridCols,
+                      gridTemplateColumns: gridCols2,
                       gap: 8,
                       padding: "5px 16px",
                       alignItems: "center"
@@ -9459,13 +10074,10 @@ function ProjectEnvVarModal({ onClose }) {
                       /* @__PURE__ */ jsxRuntimeExports.jsx(
                         "input",
                         {
-                          defaultValue: v2.key,
+                          value: row.key,
                           readOnly: isDomain,
-                          onBlur: isDomain ? void 0 : (e) => {
-                            const next = e.target.value.trim();
-                            if (next && next !== v2.key) renameProjectEnvVarKey(v2.key, next);
-                            else e.target.value = v2.key;
-                          },
+                          onChange: (e) => table.setCell(row._rid, "key", e.target.value),
+                          onKeyDown: table.fieldKeyDown,
                           placeholder: "key",
                           style: isDomain ? { ...cellInputStyle, color: "#94a3b8", cursor: "not-allowed" } : cellInputStyle,
                           title: isDomain ? "domain 為保留變數，無法改名或刪除" : "變數名稱（配置以 {{key}} 引用）"
@@ -9474,10 +10086,9 @@ function ProjectEnvVarModal({ onClose }) {
                       /* @__PURE__ */ jsxRuntimeExports.jsx(
                         "input",
                         {
-                          value: (selectedEnv && v2.values[selectedEnv.id]) ?? "",
-                          onChange: (e) => {
-                            if (selectedEnv) setProjectEnvVarValue(v2.key, selectedEnv.id, e.target.value);
-                          },
+                          value: row.value,
+                          onChange: (e) => table.setCell(row._rid, "value", e.target.value),
+                          onKeyDown: table.fieldKeyDown,
                           placeholder: "(空)",
                           style: { ...cellInputStyle, borderColor: "#166534" }
                         }
@@ -9485,7 +10096,7 @@ function ProjectEnvVarModal({ onClose }) {
                       isDomain ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: "domain 為保留變數，無法刪除", style: { textAlign: "center", color: "#475569", fontSize: 13 }, children: "🔒" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
                         "button",
                         {
-                          onClick: () => deleteProjectEnvVar(v2.key),
+                          onClick: () => handleDeleteVar(row._rid),
                           title: "刪除此變數",
                           style: {
                             background: "transparent",
@@ -9509,42 +10120,16 @@ function ProjectEnvVarModal({ onClose }) {
                       )
                     ]
                   },
-                  v2.key
+                  row._rid
                 );
               }),
-              envVars.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無環境變數。點擊下方「新增變數」。" })
+              table.rows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無環境變數。點擊下方「新增變數」。" })
             ] }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: 12, borderTop: "1px solid #334155", flexShrink: 0, display: "flex", gap: 8, alignItems: "center" }, children: [
-              environments.length > 0 && (adding ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6, flex: 1 }, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "input",
-                  {
-                    autoFocus: true,
-                    value: newKey,
-                    onChange: (e) => setNewKey(e.target.value),
-                    onKeyDown: (e) => {
-                      if (e.key === "Enter") handleAdd();
-                      if (e.key === "Escape") {
-                        setAdding(false);
-                        setNewKey("");
-                      }
-                    },
-                    placeholder: "變數名稱，例如 leave_user_name",
-                    style: { ...cellInputStyle, flex: 1, border: "1px solid #3b82f6" }
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "button",
-                  {
-                    onClick: handleAdd,
-                    style: { padding: "4px 12px", borderRadius: 4, border: "none", background: "#3b82f6", color: "#fff", fontSize: 12, cursor: "pointer" },
-                    children: "新增"
-                  }
-                )
-              ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+              environments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "button",
                 {
-                  onClick: () => setAdding(true),
+                  onClick: () => table.addRow({ key: "", value: "" }),
                   style: {
                     padding: "6px 14px",
                     borderRadius: 4,
@@ -9556,9 +10141,28 @@ function ProjectEnvVarModal({ onClose }) {
                   },
                   children: "＋ 新增變數"
                 }
-              )),
+              ),
               /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1 } }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, style: closeBtnStyle, children: "關閉" })
+              table.error && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#f87171", whiteSpace: "nowrap" }, children: table.error }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(DirtyBadge, { isDirty: table.isDirty, isStale: table.isStale }),
+              table.isDirty && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: table.reset, style: ghostBtnStyle, title: "捨棄未儲存的變更", children: "還原" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: () => void table.commit(),
+                  disabled: !table.isDirty,
+                  style: {
+                    padding: "6px 16px",
+                    borderRadius: 4,
+                    border: "none",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    ...table.isDirty ? { background: "#3b82f6", color: "#fff", cursor: "pointer" } : { background: "#334155", color: "#64748b", cursor: "default" }
+                  },
+                  children: "儲存"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => void table.guardedRun(onClose), style: closeBtnStyle, children: "關閉" })
             ] })
           ]
         }
@@ -9566,6 +10170,15 @@ function ProjectEnvVarModal({ onClose }) {
     }
   );
 }
+const ghostBtnStyle = {
+  padding: "6px 12px",
+  borderRadius: 4,
+  border: "1px solid #475569",
+  background: "transparent",
+  color: "#94a3b8",
+  cursor: "pointer",
+  fontSize: 12
+};
 const cellInputStyle = {
   padding: "4px 8px",
   background: "#0f172a",
@@ -17804,7 +18417,7 @@ function ExtractSubflowModal({
 }
 function GroupNameModal({ selectedCount, onConfirm, onClose }) {
   const [name, setName] = reactExports.useState("群組");
-  const confirm = () => {
+  const confirm2 = () => {
     onConfirm(name.trim() || "群組");
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -17833,7 +18446,7 @@ function GroupNameModal({ selectedCount, onConfirm, onClose }) {
             value: name,
             onChange: (e) => setName(e.target.value),
             onKeyDown: (e) => {
-              if (e.key === "Enter") confirm();
+              if (e.key === "Enter") confirm2();
               if (e.key === "Escape") onClose();
             },
             placeholder: "群組名稱",
@@ -17872,7 +18485,7 @@ function GroupNameModal({ selectedCount, onConfirm, onClose }) {
           /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
-              onClick: confirm,
+              onClick: confirm2,
               style: {
                 padding: "6px 16px",
                 borderRadius: 6,
@@ -18449,7 +19062,7 @@ function AddNodeModal({ onConfirm, onClose }) {
     });
   };
   const canConfirm = code.trim().length > 0;
-  const confirm = () => {
+  const confirm2 = () => {
     if (!canConfirm) return;
     const action = {
       id: v4(),
@@ -18618,7 +19231,7 @@ function AddNodeModal({ onConfirm, onClose }) {
               /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "button",
                 {
-                  onClick: confirm,
+                  onClick: confirm2,
                   disabled: !canConfirm,
                   style: {
                     padding: "6px 16px",
@@ -18659,9 +19272,9 @@ function validateExtraction(allNodes, selectedIds) {
       error: exitNodes.length === 0 ? "選取的節點必須有唯一的出口節點" : "選取的節點有多個出口（請確保選取範圍底部只有一個節點連接到外部）"
     };
   }
-  const entryId = entryNodes[0].id;
+  const entryId2 = entryNodes[0].id;
   const visited = /* @__PURE__ */ new Set();
-  const queue = [entryId];
+  const queue = [entryId2];
   while (queue.length > 0) {
     const cur = queue.shift();
     if (visited.has(cur)) continue;
@@ -18677,7 +19290,7 @@ function validateExtraction(allNodes, selectedIds) {
       return { valid: false, error: "選取的節點必須是相互連接的（不能有孤立的節點）" };
     }
   }
-  return { valid: true, entryNodeId: entryId, exitNodeId: exitNodes[0].id };
+  return { valid: true, entryNodeId: entryId2, exitNodeId: exitNodes[0].id };
 }
 function extractSubflow(parentFlow, selectedIds, entryNodeId, exitNodeId, subFlowName, subFlowId, callFlowNodeId) {
   const allNodes = parentFlow.nodes;
@@ -18789,6 +19402,7 @@ function FlowCanvasInner() {
   const [extractionInfo, setExtractionInfo] = reactExports.useState(null);
   const [groupModal, setGroupModal] = reactExports.useState(false);
   const saveTimerRef = reactExports.useRef(null);
+  const pendingSaveRef = reactExports.useRef(null);
   const dragPosRef = reactExports.useRef(/* @__PURE__ */ new Map());
   const onToggleGroup = reactExports.useCallback(
     (groupId) => {
@@ -18885,10 +19499,21 @@ function FlowCanvasInner() {
   reactExports.useEffect(() => {
     if (!currentFlow || currentFlow.positionsFinalized || !currentFlow.rootNodeId) return;
     const layout = computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId);
-    runWithoutHistory(() => materializeLayout(layout));
+    materializeLayout(layout);
     const updated = useFlowStore.getState().currentFlow;
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
-  }, [currentFlow?.id, materializeLayout, runWithoutHistory]);
+  }, [currentFlow?.id, materializeLayout]);
+  reactExports.useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      const pending = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      if (pending) window.electronAPI.saveFlow(pending).catch(console.error);
+    };
+  }, [currentFlow?.id]);
   reactExports.useEffect(() => {
     setNodes(rfNodes);
   }, [rfNodes, setNodes]);
@@ -18896,9 +19521,10 @@ function FlowCanvasInner() {
     setEdges(rfEdges);
   }, [rfEdges, setEdges]);
   const onNodeClick = reactExports.useCallback(
-    (_, node) => {
+    async (_, node) => {
       if (node.id.startsWith("group:") || node.id.startsWith("groupbox:")) return;
       if (selectedNodeIds.size <= 1) {
+        if (!await ensureNoUnsavedDrafts()) return;
         selectNode(node.id);
       }
     },
@@ -18924,22 +19550,25 @@ function FlowCanvasInner() {
               if (c.id.startsWith("group:")) {
                 const gid = c.id.slice("group:".length);
                 const cf2 = useFlowStore.getState().currentFlow;
-                const entryId = cf2 ? getGroupBoundary(cf2.nodes, gid)?.entryId : void 0;
-                if (!entryId) {
+                const entryId2 = cf2 ? getGroupBoundary(cf2.nodes, gid)?.entryId : void 0;
+                if (!entryId2) {
                   dragPosRef.current.delete(c.id);
                   return;
                 }
-                targetId = entryId;
+                targetId = entryId2;
               }
               updateNode(targetId, { position: pos });
               dragPosRef.current.delete(c.id);
             }
           });
         });
+        pendingSaveRef.current = useFlowStore.getState().currentFlow ?? null;
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = setTimeout(async () => {
-          const updated = useFlowStore.getState().currentFlow;
-          if (updated) await window.electronAPI.saveFlow(updated).catch(console.error);
+        saveTimerRef.current = setTimeout(() => {
+          saveTimerRef.current = null;
+          const pending = pendingSaveRef.current;
+          pendingSaveRef.current = null;
+          if (pending) window.electronAPI.saveFlow(pending).catch(console.error);
         }, 500);
       }
     },
@@ -18948,10 +19577,11 @@ function FlowCanvasInner() {
   const onSelectionChange = reactExports.useCallback(({ nodes: selNodes }) => {
     setSelectedNodeIds(new Set(selNodes.map((n2) => n2.id).filter((id2) => !id2.startsWith("group"))));
   }, []);
-  const onPaneClick = reactExports.useCallback(() => {
-    selectNode(null);
+  const onPaneClick = reactExports.useCallback(async () => {
     setContextMenu(null);
     setPaneMenu(null);
+    if (!await ensureNoUnsavedDrafts()) return;
+    selectNode(null);
     setSelectedNodeIds(/* @__PURE__ */ new Set());
   }, [selectNode]);
   const onPaneContextMenu = reactExports.useCallback(
@@ -18964,9 +19594,10 @@ function FlowCanvasInner() {
     [screenToFlowPosition]
   );
   const onNodeContextMenu = reactExports.useCallback(
-    (event, node) => {
+    async (event, node) => {
       event.preventDefault();
       if (node.id.startsWith("group:") || node.id.startsWith("groupbox:")) return;
+      if (!await ensureNoUnsavedDrafts()) return;
       selectNode(node.id);
       setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
     },
@@ -19374,12 +20005,23 @@ function FlowList() {
     setContextMenu(null);
   };
   const handleDeleteProject = async (projectId, projectName) => {
-    if (!window.confirm(`刪除專案「${projectName}」？
-此專案中的所有流程也將一併刪除，且無法復原。`)) return;
+    const ok2 = await confirm({
+      title: `刪除專案「${projectName}」？`,
+      detail: "此專案中的所有流程也將一併刪除，且無法復原。",
+      confirmLabel: "刪除",
+      danger: true
+    });
+    if (!ok2) return;
     await deleteProject(projectId);
     await refreshFlowList();
   };
-  const handleDuplicateProject = async (projectId) => {
+  const handleDuplicateProject = async (projectId, projectName) => {
+    const ok2 = await confirm({
+      title: `建立專案「${projectName}」的副本？`,
+      detail: "將一併複製此專案中的所有流程。",
+      confirmLabel: "建立副本"
+    });
+    if (!ok2) return;
     await duplicateProject(projectId);
     await refreshProjectList();
     await refreshFlowList();
@@ -19427,7 +20069,13 @@ function FlowList() {
     setContextMenu(null);
   };
   const handleDeleteFlow = async (flowId, flowName) => {
-    if (!window.confirm(`刪除流程「${flowName}」？`)) return;
+    const ok2 = await confirm({
+      title: `刪除流程「${flowName}」？`,
+      detail: "此操作無法復原。",
+      confirmLabel: "刪除",
+      danger: true
+    });
+    if (!ok2) return;
     if (flowId === currentFlow?.id) {
       await deleteCurrentFlow();
     } else {
@@ -19711,7 +20359,7 @@ function FlowList() {
                 "div",
                 {
                   onClick: () => {
-                    handleDuplicateProject(projectMenu.projectId);
+                    handleDuplicateProject(projectMenu.projectId, projectMenu.name);
                   },
                   style: { padding: "7px 12px", cursor: "pointer", color: "#cbd5e1", fontSize: 13 },
                   onMouseEnter: (e) => {
@@ -20299,30 +20947,89 @@ function VariableList() {
     }
   );
 }
+function draftEquals(a, b) {
+  if (a.desc !== b.desc || a.selector !== b.selector || a.locatorExpr !== b.locatorExpr || a.value !== b.value || a.code !== b.code) {
+    return false;
+  }
+  const ak2 = Object.keys(a.profileMapping);
+  const bk2 = Object.keys(b.profileMapping);
+  if (ak2.length !== bk2.length) return false;
+  return ak2.every((k2) => a.profileMapping[k2] === b.profileMapping[k2]);
+}
 function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode } = useFlowStore();
   const selectedNode = currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
-  const [desc, setDesc] = reactExports.useState("");
-  const [selector2, setSelector] = reactExports.useState("");
-  const [locatorExpr, setLocatorExpr] = reactExports.useState("");
-  const [value, setValue] = reactExports.useState("");
-  const [code, setCode] = reactExports.useState("");
   const [subFlowProfiles, setSubFlowProfiles] = reactExports.useState([]);
-  const [profileMapping, setProfileMapping] = reactExports.useState({});
   const [subFlowLoading, setSubFlowLoading] = reactExports.useState(false);
-  reactExports.useEffect(() => {
-    if (selectedNode) {
-      setDesc(selectedNode.action.description);
-      setSelector(selectedNode.action.selector);
-      setLocatorExpr(selectedNode.action.locatorExpr ?? "");
-      setValue(selectedNode.action.value ?? "");
-      setCode(selectedNode.action.code ?? "");
-    }
-  }, [selectedNodeId, selectedNode]);
+  const source = reactExports.useMemo(
+    () => ({
+      desc: selectedNode?.action.description ?? "",
+      selector: selectedNode?.action.selector ?? "",
+      locatorExpr: selectedNode?.action.locatorExpr ?? "",
+      value: selectedNode?.action.value ?? "",
+      code: selectedNode?.action.code ?? "",
+      profileMapping: selectedNode?.action.subFlowProfileMapping ?? {}
+    }),
+    [selectedNode]
+  );
+  const commitNode = reactExports.useCallback(
+    async (v2) => {
+      if (!selectedNodeId) return;
+      const node = useFlowStore.getState().currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
+      if (!node) return;
+      const isCallFlow2 = node.action.type === "callFlow";
+      let callFlowUpdates = {};
+      if (isCallFlow2) {
+        const keys = Object.keys(v2.profileMapping);
+        if (keys.length === 1) {
+          const subProfileId = v2.profileMapping[keys[0]] ?? subFlowProfiles[0]?.id ?? null;
+          const subProfileName = subFlowProfiles.find((p2) => p2.id === subProfileId)?.name;
+          callFlowUpdates = {
+            subFlowProfileMapping: v2.profileMapping,
+            ...subProfileId ? { subFlowProfileId: subProfileId, subFlowProfileName: subProfileName } : {}
+          };
+        } else {
+          callFlowUpdates = { subFlowProfileMapping: v2.profileMapping };
+        }
+      }
+      updateNode(node.id, {
+        action: {
+          ...node.action,
+          description: v2.desc,
+          selector: v2.selector,
+          // Written verbatim so a cleared field actually clears. Only include locatorExpr for
+          // nodes that already have one, so nodes without a locator don't gain an empty string.
+          ...node.action.locatorExpr !== void 0 ? { locatorExpr: v2.locatorExpr } : {},
+          value: v2.value,
+          // Multi-select nodes keep values[] in sync with the comma-joined value field
+          ...node.action.values ? { values: v2.value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+          // Upload nodes do the same for filePaths[], which replay/export read first
+          ...node.action.type === "upload" ? { filePaths: v2.value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+          ...node.action.type === "code" ? { code: v2.code } : {},
+          ...callFlowUpdates
+        }
+      });
+      const updated = useFlowStore.getState().currentFlow;
+      if (updated) await window.electronAPI.saveFlow(updated);
+    },
+    [selectedNodeId, subFlowProfiles, updateNode]
+  );
+  const draft = useDraftForm({
+    source,
+    // Keyed on the node ID only — a new node OBJECT for the same node (drag, ACTION_UPDATED)
+    // must not wipe in-progress typing.
+    resetKey: selectedNodeId,
+    onCommit: commitNode,
+    equals: draftEquals,
+    guardLabel: "節點屬性"
+  });
+  const { values, setField, patch, isDirty, isStale, commit, reset, fieldKeyDown } = draft;
+  const { desc, selector: selector2, locatorExpr, value, code, profileMapping } = values;
+  const draftRef = React$2.useRef({ isDirty, patch });
+  draftRef.current = { isDirty, patch };
   reactExports.useEffect(() => {
     if (selectedNode?.action.type !== "callFlow") {
       setSubFlowProfiles([]);
-      setProfileMapping({});
       return;
     }
     const subFlowId = selectedNode.action.subFlowId;
@@ -20343,48 +21050,15 @@ function PropertyPanel() {
           initialMapping[pp.id] = legacySubProfileId ?? defaultSubProfileId;
         }
       });
-      setProfileMapping(initialMapping);
+      if (!draftRef.current.isDirty) draftRef.current.patch({ profileMapping: initialMapping });
       setSubFlowLoading(false);
     });
-  }, [selectedNodeId, selectedNode?.action.subFlowId]);
+  }, [selectedNodeId, selectedNode?.action.type, selectedNode?.action.subFlowId]);
   if (!currentFlow) return null;
-  const saveNode = () => {
-    if (!selectedNode) return;
-    const isCallFlow2 = selectedNode.action.type === "callFlow";
-    let callFlowUpdates = {};
-    if (isCallFlow2) {
-      const keys = Object.keys(profileMapping);
-      if (keys.length === 1) {
-        const subProfileId = profileMapping[keys[0]] ?? subFlowProfiles[0]?.id ?? null;
-        const subProfileName = subFlowProfiles.find((p2) => p2.id === subProfileId)?.name;
-        callFlowUpdates = {
-          subFlowProfileMapping: profileMapping,
-          ...subProfileId ? { subFlowProfileId: subProfileId, subFlowProfileName: subProfileName } : {}
-        };
-      } else {
-        callFlowUpdates = { subFlowProfileMapping: profileMapping };
-      }
-    }
-    updateNode(selectedNode.id, {
-      action: {
-        ...selectedNode.action,
-        description: desc,
-        selector: selector2,
-        locatorExpr: locatorExpr || selectedNode.action.locatorExpr,
-        value: value || void 0,
-        // Multi-select nodes keep values[] in sync with the comma-joined value field
-        ...selectedNode.action.values ? { values: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
-        // Upload nodes do the same for filePaths[], which replay/export read first
-        ...selectedNode.action.type === "upload" ? { filePaths: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
-        ...selectedNode.action.type === "code" ? { code } : {},
-        ...callFlowUpdates
-      }
-    });
-    window.electronAPI.saveFlow(useFlowStore.getState().currentFlow).catch(console.error);
-  };
+  const saveNode = () => void commit();
   const pickFiles = async () => {
     const picked = await window.electronAPI.pickFiles(true);
-    if (picked.length) setValue(picked.join(", "));
+    if (picked.length) setField("value", picked.join(", "));
   };
   const parentProfiles = currentFlow.profiles ?? [];
   const isCallFlow = selectedNode?.action.type === "callFlow";
@@ -20405,7 +21079,8 @@ function PropertyPanel() {
           "input",
           {
             value: desc,
-            onChange: (e) => setDesc(e.target.value),
+            onChange: (e) => setField("desc", e.target.value),
+            onKeyDown: fieldKeyDown,
             style: inputStyle
           }
         ) }),
@@ -20413,7 +21088,8 @@ function PropertyPanel() {
           "input",
           {
             value: selector2,
-            onChange: (e) => setSelector(e.target.value),
+            onChange: (e) => setField("selector", e.target.value),
+            onKeyDown: fieldKeyDown,
             style: inputStyle
           }
         ) }),
@@ -20422,7 +21098,8 @@ function PropertyPanel() {
             "input",
             {
               value: locatorExpr,
-              onChange: (e) => setLocatorExpr(e.target.value),
+              onChange: (e) => setField("locatorExpr", e.target.value),
+              onKeyDown: fieldKeyDown,
               style: { ...inputStyle, width: 260 }
             }
           ),
@@ -20437,7 +21114,8 @@ function PropertyPanel() {
               "input",
               {
                 value,
-                onChange: (e) => setValue(e.target.value),
+                onChange: (e) => setField("value", e.target.value),
+                onKeyDown: fieldKeyDown,
                 style: inputStyle
               }
             ),
@@ -20454,7 +21132,7 @@ function PropertyPanel() {
             "textarea",
             {
               value: code,
-              onChange: (e) => setCode(e.target.value),
+              onChange: (e) => setField("code", e.target.value),
               spellCheck: false,
               style: {
                 display: "block",
@@ -20529,10 +21207,10 @@ function PropertyPanel() {
                     "select",
                     {
                       value: profileMapping[pp.id] ?? (subFlowProfiles[0]?.id ?? ""),
-                      onChange: (e) => setProfileMapping((prev) => ({
-                        ...prev,
+                      onChange: (e) => setField("profileMapping", {
+                        ...profileMapping,
                         [pp.id]: e.target.value || null
-                      })),
+                      }),
                       style: {
                         background: "#0f172a",
                         color: "#e2e8f0",
@@ -20552,7 +21230,22 @@ function PropertyPanel() {
             ))
           ] })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "flex-end" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: saveNode, style: saveBtnStyle, children: "儲存" }) })
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(DirtyBadge, { isDirty, isStale }),
+          isDirty && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: reset, style: revertBtnStyle, title: "捨棄未儲存的變更", children: "還原" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: saveNode,
+              disabled: !isDirty,
+              style: {
+                ...saveBtnStyle,
+                ...isDirty ? {} : { background: "#334155", color: "#64748b", cursor: "default" }
+              },
+              children: "儲存"
+            }
+          )
+        ] })
       ] }) : null })
     }
   );
@@ -20582,6 +21275,15 @@ const pickBtnStyle = {
   cursor: "pointer",
   fontSize: 12,
   whiteSpace: "nowrap"
+};
+const revertBtnStyle = {
+  padding: "5px 12px",
+  borderRadius: 5,
+  border: "1px solid #475569",
+  background: "transparent",
+  color: "#94a3b8",
+  cursor: "pointer",
+  fontSize: 12
 };
 const saveBtnStyle = {
   padding: "5px 16px",
@@ -20633,9 +21335,16 @@ function SessionVarList() {
       cancelled = true;
     };
   }, [ancestorCallFlowNodes]);
-  const deleteVar = (nodeId) => {
+  const deleteVar = async (nodeId) => {
     const node = currentFlow?.nodes.find((n2) => n2.id === nodeId);
     if (!node) return;
+    const ok2 = await confirm({
+      title: `刪除區域變數 {{${node.action.captureAs}}}？`,
+      detail: "引用此變數的節點將無法解析。",
+      confirmLabel: "刪除",
+      danger: true
+    });
+    if (!ok2) return;
     updateNode(nodeId, { action: { ...node.action, captureAs: void 0 } });
     const updated = useFlowStore.getState().currentFlow;
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
@@ -21110,6 +21819,86 @@ function ProjectEnvVarList() {
     }
   );
 }
+function ConfirmHost() {
+  const queue = useConfirmStore((s) => s.queue);
+  const answer = useConfirmStore((s) => s.answer);
+  const front = queue[0];
+  const defaultBtnRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    if (!front) return;
+    defaultBtnRef.current?.focus();
+  }, [front?.id]);
+  reactExports.useEffect(() => {
+    if (!front) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        answer(null);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        answer(front.defaultActionId ?? null);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [front?.id, front?.defaultActionId, answer]);
+  if (!front) return null;
+  const actions = front.actions ?? [
+    { id: "cancel", label: "取消", tone: "ghost" },
+    { id: "ok", label: "確認", tone: "primary" }
+  ];
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 4e3
+      },
+      onMouseDown: () => answer(null),
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          onMouseDown: (e) => e.stopPropagation(),
+          style: {
+            background: "#1e293b",
+            border: "1px solid #334155",
+            borderRadius: 12,
+            padding: 24,
+            minWidth: 340,
+            maxWidth: 460
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: 16, color: "#e2e8f0", margin: "0 0 6px" }, children: front.title }),
+            front.message && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, color: "#cbd5e1", marginBottom: front.detail ? 6 : 16, lineHeight: 1.6 }, children: front.message }),
+            front.detail && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#64748b", marginBottom: 16, lineHeight: 1.6 }, children: front.detail }),
+            !front.message && !front.detail && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginBottom: 16 } }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" }, children: actions.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                ref: a.id === front.defaultActionId ? defaultBtnRef : void 0,
+                onClick: () => answer(a.id),
+                style: {
+                  padding: "6px 16px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  cursor: "pointer",
+                  ...a.tone === "danger" ? { border: "none", background: "#dc2626", color: "#fff" } : a.tone === "primary" ? { border: "none", background: "#6366f1", color: "#fff" } : { border: "1px solid #475569", background: "transparent", color: "#94a3b8" }
+                },
+                children: a.label
+              },
+              a.id
+            )) })
+          ]
+        }
+      )
+    }
+  );
+}
 function usePlaywrightEvents() {
   const { setReplayStatus, setReplayingNode, setIsReplaying } = useFlowStore();
   reactExports.useEffect(() => {
@@ -21210,7 +21999,8 @@ function App() {
         /* @__PURE__ */ jsxRuntimeExports.jsx(ProjectEnvVarList, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx(SessionVarList, {})
       ] })
-    ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(ConfirmHost, {})
   ] });
 }
 client.createRoot(document.getElementById("root")).render(

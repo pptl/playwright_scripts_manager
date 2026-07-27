@@ -10,11 +10,29 @@ const NODE_START_X = 300
 
 /** Max number of undo snapshots kept per flow editing session. */
 const HISTORY_LIMIT = 50
+
+/**
+ * One undo step. Flow edits and project edits share a single chronological stack so Ctrl+Z
+ * reverses the user's actions in true order regardless of which entity they touched.
+ * Each entry holds the PREVIOUS state of the entity that changed.
+ *
+ * Not covered (they create or delete whole files, so there is no in-memory state to restore):
+ * createProject / deleteProject / duplicateProject, and renameProject / assignFlowToProject
+ * when they target a project or flow that is not the one currently open. Those are guarded by
+ * a confirm dialog instead.
+ */
+type HistoryEntry =
+  | { kind: 'flow'; flow: Flow }
+  | { kind: 'project'; project: Project }
+
+const entryId = (e: HistoryEntry) => (e.kind === 'flow' ? e.flow.id : e.project.id)
 /** Guards the history subscription so undo/redo restores don't get re-recorded. */
 let isTimeTraveling = false
-/** When true, currentFlow mutations are not pushed onto the undo stack
- *  (e.g. node-drag position updates, which would otherwise flood history). */
-let suppressHistory = false
+/** Depth counter (not a boolean) so nested suppression can't be lifted early by an inner scope. */
+let suppressDepth = 0
+/** When >0, mutations are not pushed onto the undo stack (node drags, layout materialization,
+ *  group collapse — all of which would otherwise flood or pollute history). */
+const historySuppressed = () => suppressDepth > 0
 
 interface FlowStore {
   // State
@@ -29,12 +47,12 @@ interface FlowStore {
   recordingHeadId: string | null
   replaySpeed: number
 
-  // Undo/redo history (snapshots of currentFlow; cleared on flow switch)
-  past: Flow[]
-  future: Flow[]
-  /** Restore the previous flow snapshot. No-op if nothing to undo. */
+  // Undo/redo history (interleaved flow + project snapshots; cleared on flow switch)
+  past: HistoryEntry[]
+  future: HistoryEntry[]
+  /** Restore the previous snapshot (flow or project). No-op if nothing to undo. */
   undo: () => void
-  /** Re-apply the most recently undone flow snapshot. No-op if nothing to redo. */
+  /** Re-apply the most recently undone snapshot. No-op if nothing to redo. */
   redo: () => void
   /** Run flow mutations without recording an undo snapshot (e.g. node drag). */
   runWithoutHistory: (fn: () => void) => void
@@ -62,8 +80,6 @@ interface FlowStore {
   insertCallFlowBefore: (nodeId: string, callFlowAction: Action) => FlowNode
   /** Append a callFlow node as the sole child of nodeId. Throws if nodeId already has children. */
   appendCallFlowAfter: (nodeId: string, callFlowAction: Action) => FlowNode
-  /** Flip positionsFinalized on the current flow */
-  setPositionsFinalized: (v: boolean) => void
   /** Write computed tree-layout positions into every node and mark positions finalized.
    *  One-shot; no-op if already finalized. Makes fn.position the single source of truth. */
   materializeLayout: (positions: Map<string, NodePosition>) => void
@@ -108,12 +124,20 @@ interface FlowStore {
   deleteProfile: (id: string) => Promise<void>
   /** Duplicate an existing profile, deep-copying its vars (incl. envValues) */
   duplicateProfile: (id: string) => Promise<void>
-  /** Append a new empty variable row to EVERY profile (keys must stay in sync) */
-  addVarToAllProfiles: () => Promise<void>
-  /** Rename the variable at the given index across ALL profiles */
-  updateVarKeyInAllProfiles: (index: number, newKey: string) => Promise<void>
-  /** Delete the variable at the given index from ALL profiles */
-  deleteVarFromAllProfiles: (index: number) => Promise<void>
+  /**
+   * Commit the whole profile-variable table in one shot — one store write, one disk write,
+   * one undo entry (replaces the old per-keystroke add/rename/delete actions).
+   *
+   * Variable KEYS are shared across every profile (index-aligned); VALUE and DESCRIPTION
+   * belong to `profileId` only, and VALUE targets `envValues[envId]` when an environment
+   * is active. `origIndex === null` marks a row added in this draft (appended to every
+   * profile); original indices absent from `rows` are deletions (removed from every profile).
+   */
+  commitProfileVars: (
+    profileId: string,
+    rows: { origIndex: number | null; key: string; value: string; description: string }[],
+    envId: string | null,
+  ) => Promise<void>
 
   // Projects and environments
   projects: Pick<Project, 'id' | 'name' | 'updatedAt'>[]
@@ -134,11 +158,18 @@ interface FlowStore {
   duplicateProject: (projectId: string) => Promise<void>
   /** Assign any flow (by ID) to a project. Pass null to detach. */
   assignFlowToProject: (flowId: string, projectId: string | null) => Promise<void>
-  // Project-level environment variables (shared across flows in the project)
-  addProjectEnvVar: (key: string) => Promise<void>
-  renameProjectEnvVarKey: (oldKey: string, newKey: string) => Promise<void>
-  deleteProjectEnvVar: (key: string) => Promise<void>
-  setProjectEnvVarValue: (key: string, envId: string, value: string) => Promise<void>
+  /**
+   * Commit the whole project env-var table in one shot — one store write, one disk write,
+   * one undo entry (replaces the old per-keystroke add/rename/delete/set actions).
+   *
+   * `origKey === null` marks a row added in this draft; original keys absent from `rows` are
+   * deletions. Values for OTHER environments are carried over by `origKey`, so a rename keeps
+   * them. The reserved `domain` key is never renamed, whatever the draft says.
+   */
+  commitProjectEnvVars: (
+    rows: { origKey: string | null; key: string; value: string }[],
+    envId: string,
+  ) => Promise<void>
 }
 
 /** Migrate legacy callFlow actions that have subFlowProfileId but no subFlowProfileMapping.
@@ -177,6 +208,49 @@ function migrateDomainsToProfiles(flow: Flow): FlowProfile[] {
     }))
   }
   return []
+}
+
+/** Current state of the entity a history entry refers to, as an entry itself. */
+function snapshotOf(kind: HistoryEntry['kind'], state: FlowStore): HistoryEntry | null {
+  if (kind === 'flow') return state.currentFlow ? { kind: 'flow', flow: state.currentFlow } : null
+  return state.currentProject ? { kind: 'project', project: state.currentProject } : null
+}
+
+/** The state patch that restores a history entry. */
+function applyEntry(entry: HistoryEntry, state: FlowStore): Partial<FlowStore> {
+  if (entry.kind === 'flow') {
+    return { currentFlow: entry.flow, selectedNodeId: null }
+  }
+  // Undoing an "add environment" can leave activeEnvironmentId pointing at an environment
+  // that no longer exists, which blanks every env dropdown — revalidate it.
+  const envs = entry.project.environments
+  const envStillValid = !!state.activeEnvironmentId && envs.some((e) => e.id === state.activeEnvironmentId)
+  return {
+    currentProject: entry.project,
+    activeEnvironmentId: envStillValid ? state.activeEnvironmentId : (envs[0]?.id ?? null),
+  }
+}
+
+/** Write a restored entry back to disk (and refresh the project list so names follow). */
+async function persistEntry(entry: HistoryEntry): Promise<void> {
+  if (entry.kind === 'flow') {
+    await window.electronAPI.saveFlow(entry.flow).catch(console.error)
+    return
+  }
+  await window.electronAPI.saveProject(entry.project).catch(console.error)
+  const list = await window.electronAPI.listProjects().catch(() => null)
+  if (list) useFlowStore.setState({ projects: list })
+}
+
+/** Apply a state change without recording an undo entry. Used by actions that are pure
+ *  view state (group collapse) or automatic bookkeeping (one-time layout materialization). */
+function setSilently(partial: Partial<FlowStore>) {
+  suppressDepth++
+  try {
+    useFlowStore.setState(partial)
+  } finally {
+    suppressDepth--
+  }
 }
 
 export const useFlowStore = create<FlowStore>((set, get) => ({
@@ -249,41 +323,47 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setRecordingHead: (id) => set({ recordingHeadId: id }),
 
   undo: () => {
-    const { past, future, currentFlow } = get()
-    if (past.length === 0 || !currentFlow) return
-    const previous = past[past.length - 1]
+    const state = get()
+    const { past, future } = state
+    if (past.length === 0) return
+    const entry = past[past.length - 1]
+    const current = snapshotOf(entry.kind, state)
+    // The entity the entry belongs to is no longer the open one — refuse rather than
+    // restoring a snapshot over a different flow/project.
+    if (!current || entryId(current) !== entryId(entry)) return
     isTimeTraveling = true
     set({
       past: past.slice(0, -1),
-      future: [currentFlow, ...future],
-      currentFlow: previous,
-      selectedNodeId: null,
+      future: [current, ...future],
+      ...applyEntry(entry, state),
     })
     isTimeTraveling = false
-    window.electronAPI.saveFlow(previous).catch(console.error)
+    void persistEntry(entry)
   },
 
   redo: () => {
-    const { past, future, currentFlow } = get()
-    if (future.length === 0 || !currentFlow) return
-    const next = future[0]
+    const state = get()
+    const { past, future } = state
+    if (future.length === 0) return
+    const entry = future[0]
+    const current = snapshotOf(entry.kind, state)
+    if (!current || entryId(current) !== entryId(entry)) return
     isTimeTraveling = true
     set({
-      past: [...past, currentFlow].slice(-HISTORY_LIMIT),
+      past: [...past, current].slice(-HISTORY_LIMIT),
       future: future.slice(1),
-      currentFlow: next,
-      selectedNodeId: null,
+      ...applyEntry(entry, state),
     })
     isTimeTraveling = false
-    window.electronAPI.saveFlow(next).catch(console.error)
+    void persistEntry(entry)
   },
 
   runWithoutHistory: (fn) => {
-    suppressHistory = true
+    suppressDepth++
     try {
       fn()
     } finally {
-      suppressHistory = false
+      suppressDepth--
     }
   },
 
@@ -508,16 +588,13 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     return callFlowNode
   },
 
-  setPositionsFinalized: (v) => {
-    const flow = get().currentFlow
-    if (!flow) return
-    set({ currentFlow: { ...flow, positionsFinalized: v, updatedAt: new Date().toISOString() } })
-  },
-
+  // One-time automatic bookkeeping on first load of a never-laid-out flow — not a user edit,
+  // so it must not consume an undo slot. Suppression lives here rather than at the call site
+  // so it can't be forgotten.
   materializeLayout: (positions) => {
     const flow = get().currentFlow
     if (!flow || flow.positionsFinalized) return
-    set({
+    setSilently({
       currentFlow: {
         ...flow,
         nodes: flow.nodes.map((n) => {
@@ -613,6 +690,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     return groupId
   },
 
+  // Collapse/expand is pure view state. It rewrites every node position (group-aware relayout),
+  // which would otherwise land on the undo stack and let a few toggles evict real edits.
+  // Still persisted by the caller — collapsed state belongs on disk.
   toggleGroupCollapsed: (groupId) => {
     const flow = get().currentFlow
     if (!flow) return
@@ -622,7 +702,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       const pos = positions.get(n.id)
       return pos ? { ...n, position: pos } : n
     })
-    set({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() } })
+    setSilently({
+      currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() },
+    })
   },
 
   ungroupGroup: (groupId) => {
@@ -774,45 +856,41 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
   },
 
-  addVarToAllProfiles: async () => {
+  commitProfileVars: async (profileId, rows, envId) => {
     const flow = get().currentFlow
     if (!flow) return
-    const updatedFlow: Flow = {
-      ...flow,
-      profiles: (flow.profiles ?? []).map((p) => ({
-        ...p,
-        vars: [...p.vars, { key: '', value: '', description: '' }],
-      })),
-      updatedAt: new Date().toISOString(),
-    }
-    set({ currentFlow: updatedFlow })
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
-  },
+    const profiles = flow.profiles ?? []
 
-  updateVarKeyInAllProfiles: async (index, newKey) => {
-    const flow = get().currentFlow
-    if (!flow) return
-    const updatedFlow: Flow = {
-      ...flow,
-      profiles: (flow.profiles ?? []).map((p) => ({
-        ...p,
-        vars: p.vars.map((v, i) => (i === index ? { ...v, key: newKey } : v)),
-      })),
-      updatedAt: new Date().toISOString(),
-    }
-    set({ currentFlow: updatedFlow })
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
-  },
+    const updatedProfiles = profiles.map((p) => {
+      const isEdited = p.id === profileId
+      const vars = rows.map((row) => {
+        // Existing row: keep this profile's own value/description/envValues, take only the key
+        // from the draft (keys are shared across every profile).
+        const base =
+          row.origIndex !== null
+            ? p.vars[row.origIndex]
+            : undefined
+        const kept = base ?? { key: row.key, value: '', description: '' }
+        if (!isEdited) return { ...kept, key: row.key }
 
-  deleteVarFromAllProfiles: async (index) => {
-    const flow = get().currentFlow
-    if (!flow) return
+        // The edited profile additionally takes value/description from the draft. With an
+        // active environment the value lands on envValues[envId] rather than the base value.
+        if (envId) {
+          return {
+            ...kept,
+            key: row.key,
+            description: row.description,
+            envValues: { ...kept.envValues, [envId]: row.value },
+          }
+        }
+        return { ...kept, key: row.key, value: row.value, description: row.description }
+      })
+      return { ...p, vars }
+    })
+
     const updatedFlow: Flow = {
       ...flow,
-      profiles: (flow.profiles ?? []).map((p) => ({
-        ...p,
-        vars: p.vars.filter((_, i) => i !== index),
-      })),
+      profiles: updatedProfiles,
       updatedAt: new Date().toISOString(),
     }
     set({ currentFlow: updatedFlow })
@@ -840,13 +918,16 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     return project
   },
 
+  // In-place project mutators set() BEFORE saving (mirroring the flow actions), because the
+  // history subscription can only observe a set() transition and undo has to be able to
+  // re-persist whatever it restored.
   addEnvironmentToProject: async (name) => {
     const project = get().currentProject
     if (!project) return
     const newEnv: ProjectEnvironment = { id: uuidv4(), name }
     const updatedProject: Project = { ...project, environments: [...project.environments, newEnv] }
-    await window.electronAPI.saveProject(updatedProject)
     set({ currentProject: updatedProject })
+    await window.electronAPI.saveProject(updatedProject).catch(console.error)
   },
 
   renameEnvironment: async (envId, name) => {
@@ -856,8 +937,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       ...project,
       environments: project.environments.map((e) => (e.id === envId ? { ...e, name } : e)),
     }
-    await window.electronAPI.saveProject(updatedProject)
     set({ currentProject: updatedProject })
+    await window.electronAPI.saveProject(updatedProject).catch(console.error)
   },
 
   duplicateEnvironment: async (envId) => {
@@ -875,8 +956,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
         values: { ...v.values, [newEnv.id]: v.values[envId] ?? '' },
       })),
     }
-    await window.electronAPI.saveProject(updatedProject)
     set({ currentProject: updatedProject, activeEnvironmentId: newEnv.id })
+    await window.electronAPI.saveProject(updatedProject).catch(console.error)
   },
 
   deleteEnvironment: async (envId) => {
@@ -891,7 +972,6 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
         return { ...v, values: rest }
       }),
     }
-    await window.electronAPI.saveProject(updatedProject)
     const { activeEnvironmentId } = get()
     set({
       currentProject: updatedProject,
@@ -900,6 +980,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
           ? (updatedProject.environments[0]?.id ?? null)
           : activeEnvironmentId,
     })
+    await window.electronAPI.saveProject(updatedProject).catch(console.error)
   },
 
   deleteProject: async (projectId) => {
@@ -931,13 +1012,12 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const full = await window.electronAPI.loadProject(projectId)
     if (!full) return
     const updated: Project = { ...full, name, updatedAt: new Date().toISOString() }
-    await window.electronAPI.saveProject(updated)
+    // Set before saving when this is the open project, so the rename lands on the undo stack.
+    // Renaming a project that is NOT open has no in-memory snapshot and stays un-undoable.
+    if (get().currentProject?.id === projectId) set({ currentProject: updated })
+    await window.electronAPI.saveProject(updated).catch(console.error)
     const list = await window.electronAPI.listProjects()
-    const { currentProject } = get()
-    set({
-      projects: list,
-      ...(currentProject?.id === projectId ? { currentProject: updated } : {}),
-    })
+    set({ projects: list })
   },
 
   duplicateProject: async (projectId) => {
@@ -999,65 +1079,53 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
   },
 
-  addProjectEnvVar: async (key) => {
+  commitProjectEnvVars: async (rows, envId) => {
     const project = get().currentProject
     if (!project) return
-    const envVars = project.envVars ?? []
-    if (envVars.some((v) => v.key === key)) return
-    const updatedProject: Project = { ...project, envVars: [...envVars, { key, values: {} }] }
-    await window.electronAPI.saveProject(updatedProject)
-    set({ currentProject: updatedProject })
-  },
+    const existing = project.envVars ?? []
+    const byKey = new Map(existing.map((v) => [v.key, v]))
 
-  renameProjectEnvVarKey: async (oldKey, newKey) => {
-    const project = get().currentProject
-    if (!project) return
-    const envVars = project.envVars ?? []
-    if (oldKey === newKey || envVars.some((v) => v.key === newKey)) return
-    const updatedProject: Project = {
-      ...project,
-      envVars: envVars.map((v) => (v.key === oldKey ? { ...v, key: newKey } : v)),
-    }
-    await window.electronAPI.saveProject(updatedProject)
-    set({ currentProject: updatedProject })
-  },
+    const envVars = rows.map((row) => {
+      // Existing row: carry every other environment's value across, keyed by the ORIGINAL key
+      // (the draft may have renamed it). New row: start from an empty value map.
+      const base = row.origKey !== null ? byKey.get(row.origKey) : undefined
+      // `domain` is reserved — its key can never change, whatever the draft says.
+      const key = base?.key === DOMAIN_ENV_KEY ? DOMAIN_ENV_KEY : row.key
+      return {
+        ...(base ?? {}),
+        key,
+        values: { ...(base?.values ?? {}), [envId]: row.value },
+      }
+    })
 
-  deleteProjectEnvVar: async (key) => {
-    const project = get().currentProject
-    if (!project) return
-    const updatedProject: Project = {
-      ...project,
-      envVars: (project.envVars ?? []).filter((v) => v.key !== key),
-    }
-    await window.electronAPI.saveProject(updatedProject)
+    const updatedProject: Project = { ...project, envVars }
     set({ currentProject: updatedProject })
-  },
-
-  setProjectEnvVarValue: async (key, envId, value) => {
-    const project = get().currentProject
-    if (!project) return
-    const updatedProject: Project = {
-      ...project,
-      envVars: (project.envVars ?? []).map((v) =>
-        v.key === key ? { ...v, values: { ...v.values, [envId]: value } } : v,
-      ),
-    }
-    await window.electronAPI.saveProject(updatedProject)
-    set({ currentProject: updatedProject })
+    await window.electronAPI.saveProject(updatedProject).catch(console.error)
   },
 }))
 
-// Record undo history whenever an edit replaces currentFlow with a new object.
-// One subscription covers every mutator, since all edits update currentFlow immutably.
+// Record undo history whenever an edit replaces currentFlow or currentProject with a new
+// object. One subscription covers every mutator, since all edits update them immutably.
 useFlowStore.subscribe((state, prev) => {
-  if (isTimeTraveling || suppressHistory) return
-  const curr = state.currentFlow
-  const before = prev.currentFlow
-  if (!curr || !before || curr === before) return // no flow change
-  if (curr.id !== before.id) return // switched flows, not an edit
+  if (isTimeTraveling || historySuppressed()) return
   if (state.isRecording || state.isReplaying) return // skip live capture
+
+  const entries: HistoryEntry[] = []
+
+  const cf = state.currentFlow
+  const pf = prev.currentFlow
+  // Same id required: a different id means the flow was switched, not edited.
+  if (cf && pf && cf !== pf && cf.id === pf.id) entries.push({ kind: 'flow', flow: pf })
+
+  const cp = state.currentProject
+  const pp = prev.currentProject
+  if (cp && pp && cp !== pp && cp.id === pp.id) entries.push({ kind: 'project', project: pp })
+
+  if (entries.length === 0) return
+  // No action currently mutates both in one set(); if one ever does, the two entries become
+  // two undo steps (a transaction id would be the fix).
   useFlowStore.setState((s) => ({
-    past: [...s.past, before].slice(-HISTORY_LIMIT),
+    past: [...s.past, ...entries].slice(-HISTORY_LIMIT),
     future: [],
   }))
 })

@@ -1,124 +1,93 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import type { FlowProfile } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
-import { useDraftForm } from '../../hooks/useDraftForm'
-import { DirtyBadge } from '../common/DirtyBadge'
-
-interface NodeDraft {
-  desc: string
-  selector: string
-  locatorExpr: string
-  value: string
-  code: string
-  profileMapping: Record<string, string | null>
-}
-
-/** Mapping is a nested object, so compare it by entries rather than by identity. */
-function draftEquals(a: NodeDraft, b: NodeDraft): boolean {
-  if (
-    a.desc !== b.desc ||
-    a.selector !== b.selector ||
-    a.locatorExpr !== b.locatorExpr ||
-    a.value !== b.value ||
-    a.code !== b.code
-  ) {
-    return false
-  }
-  const ak = Object.keys(a.profileMapping)
-  const bk = Object.keys(b.profileMapping)
-  if (ak.length !== bk.length) return false
-  return ak.every((k) => a.profileMapping[k] === b.profileMapping[k])
-}
 
 export function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode } = useFlowStore()
   const selectedNode = currentFlow?.nodes.find((n) => n.id === selectedNodeId)
 
-  // callFlow-specific state (loaded async; not part of the draft)
+  // callFlow-specific state (loaded async; not an edited field)
   const [subFlowProfiles, setSubFlowProfiles] = useState<FlowProfile[]>([])
   const [subFlowLoading, setSubFlowLoading] = useState(false)
 
-  const source = useMemo<NodeDraft>(
-    () => ({
-      desc: selectedNode?.action.description ?? '',
-      selector: selectedNode?.action.selector ?? '',
-      locatorExpr: selectedNode?.action.locatorExpr ?? '',
-      value: selectedNode?.action.value ?? '',
-      code: selectedNode?.action.code ?? '',
-      profileMapping: selectedNode?.action.subFlowProfileMapping ?? {},
-    }),
-    [selectedNode],
-  )
+  // Edited fields live here until 儲存 is pressed. Nothing tracks "unsaved" — switching
+  // nodes just overwrites them with the new node's values.
+  const [desc, setDesc] = useState('')
+  const [selector, setSelector] = useState('')
+  const [locatorExpr, setLocatorExpr] = useState('')
+  const [value, setValue] = useState('')
+  const [code, setCode] = useState('')
+  const [profileMapping, setProfileMapping] = useState<Record<string, string | null>>({})
+
+  // Re-sync on the node ID only — a new node OBJECT for the same node (drag, ACTION_UPDATED)
+  // must not wipe what the user is typing.
+  useEffect(() => {
+    const node = useFlowStore.getState().currentFlow?.nodes.find((n) => n.id === selectedNodeId)
+    setDesc(node?.action.description ?? '')
+    setSelector(node?.action.selector ?? '')
+    setLocatorExpr(node?.action.locatorExpr ?? '')
+    setValue(node?.action.value ?? '')
+    setCode(node?.action.code ?? '')
+    setProfileMapping(node?.action.subFlowProfileMapping ?? {})
+  }, [selectedNodeId])
 
   /**
-   * Commit re-reads the node from the store rather than using the captured `selectedNode`,
-   * so fields the recorder wrote while the draft was open (opensPage, pageAlias, framePath,
-   * clickCount…) are never clobbered by a stale draft.
+   * Save re-reads the node from the store rather than using the captured `selectedNode`,
+   * so fields the recorder wrote while the panel was open (opensPage, pageAlias, framePath,
+   * clickCount…) are never clobbered by what the panel happens to be holding.
    */
-  const commitNode = useCallback(
-    async (v: NodeDraft) => {
-      if (!selectedNodeId) return
-      const node = useFlowStore.getState().currentFlow?.nodes.find((n) => n.id === selectedNodeId)
-      if (!node) return
-      const isCallFlow = node.action.type === 'callFlow'
-      let callFlowUpdates: object = {}
-      if (isCallFlow) {
-        // When only 1 mapping entry, update the legacy badge fields so ActionNode reflects the change
-        const keys = Object.keys(v.profileMapping)
-        if (keys.length === 1) {
-          const subProfileId = v.profileMapping[keys[0]] ?? subFlowProfiles[0]?.id ?? null
-          const subProfileName = subFlowProfiles.find((p) => p.id === subProfileId)?.name
-          callFlowUpdates = {
-            subFlowProfileMapping: v.profileMapping,
-            ...(subProfileId ? { subFlowProfileId: subProfileId, subFlowProfileName: subProfileName } : {}),
-          }
-        } else {
-          callFlowUpdates = { subFlowProfileMapping: v.profileMapping }
+  const saveNode = useCallback(async () => {
+    if (!selectedNodeId) return
+    const node = useFlowStore.getState().currentFlow?.nodes.find((n) => n.id === selectedNodeId)
+    if (!node) return
+    const isCallFlow = node.action.type === 'callFlow'
+    let callFlowUpdates: object = {}
+    if (isCallFlow) {
+      // When only 1 mapping entry, update the legacy badge fields so ActionNode reflects the change
+      const keys = Object.keys(profileMapping)
+      if (keys.length === 1) {
+        const subProfileId = profileMapping[keys[0]] ?? subFlowProfiles[0]?.id ?? null
+        const subProfileName = subFlowProfiles.find((p) => p.id === subProfileId)?.name
+        callFlowUpdates = {
+          subFlowProfileMapping: profileMapping,
+          ...(subProfileId ? { subFlowProfileId: subProfileId, subFlowProfileName: subProfileName } : {}),
         }
+      } else {
+        callFlowUpdates = { subFlowProfileMapping: profileMapping }
       }
-      updateNode(node.id, {
-        action: {
-          ...node.action,
-          description: v.desc,
-          selector: v.selector,
-          // Written verbatim so a cleared field actually clears. Only include locatorExpr for
-          // nodes that already have one, so nodes without a locator don't gain an empty string.
-          ...(node.action.locatorExpr !== undefined ? { locatorExpr: v.locatorExpr } : {}),
-          value: v.value,
-          // Multi-select nodes keep values[] in sync with the comma-joined value field
-          ...(node.action.values
-            ? { values: v.value.split(',').map((s) => s.trim()).filter(Boolean) }
-            : {}),
-          // Upload nodes do the same for filePaths[], which replay/export read first
-          ...(node.action.type === 'upload'
-            ? { filePaths: v.value.split(',').map((s) => s.trim()).filter(Boolean) }
-            : {}),
-          ...(node.action.type === 'code' ? { code: v.code } : {}),
-          ...callFlowUpdates,
-        },
-      })
-      const updated = useFlowStore.getState().currentFlow
-      if (updated) await window.electronAPI.saveFlow(updated)
-    },
-    [selectedNodeId, subFlowProfiles, updateNode],
-  )
+    }
+    updateNode(node.id, {
+      action: {
+        ...node.action,
+        description: desc,
+        selector,
+        // Written verbatim so a cleared field actually clears. Only include locatorExpr for
+        // nodes that already have one, so nodes without a locator don't gain an empty string.
+        ...(node.action.locatorExpr !== undefined ? { locatorExpr } : {}),
+        value,
+        // Multi-select nodes keep values[] in sync with the comma-joined value field
+        ...(node.action.values
+          ? { values: value.split(',').map((s) => s.trim()).filter(Boolean) }
+          : {}),
+        // Upload nodes do the same for filePaths[], which replay/export read first
+        ...(node.action.type === 'upload'
+          ? { filePaths: value.split(',').map((s) => s.trim()).filter(Boolean) }
+          : {}),
+        ...(node.action.type === 'code' ? { code } : {}),
+        ...callFlowUpdates,
+      },
+    })
+    const updated = useFlowStore.getState().currentFlow
+    if (updated) await window.electronAPI.saveFlow(updated)
+  }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector, locatorExpr, value, code, profileMapping])
 
-  const draft = useDraftForm<NodeDraft>({
-    source,
-    // Keyed on the node ID only — a new node OBJECT for the same node (drag, ACTION_UPDATED)
-    // must not wipe in-progress typing.
-    resetKey: selectedNodeId,
-    onCommit: commitNode,
-    equals: draftEquals,
-    guardLabel: '節點屬性',
-  })
-
-  const { values, setField, patch, isDirty, isStale, commit, reset, fieldKeyDown } = draft
-  const { desc, selector, locatorExpr, value, code, profileMapping } = values
-
-  // Ref so the async seeding effect below doesn't need `patch`/`isDirty` in its deps.
-  const draftRef = React.useRef({ isDirty, patch })
-  draftRef.current = { isDirty, patch }
+  /** Enter saves; spread onto the single-line inputs. */
+  const fieldKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      void saveNode()
+    }
+  }
 
   // When a callFlow node is selected, load sub-flow profiles and seed the mapping defaults.
   useEffect(() => {
@@ -147,20 +116,17 @@ export function PropertyPanel() {
           initialMapping[pp.id] = legacySubProfileId ?? defaultSubProfileId
         }
       })
-      // Never let an async load stomp on typing — seed only while the draft is clean.
-      if (!draftRef.current.isDirty) draftRef.current.patch({ profileMapping: initialMapping })
+      setProfileMapping(initialMapping)
       setSubFlowLoading(false)
     })
   }, [selectedNodeId, selectedNode?.action.type, selectedNode?.action.subFlowId])
 
   if (!currentFlow) return null
 
-  const saveNode = () => void commit()
-
   // Native picker — main copies each pick into fixtures/ and hands back the stored paths.
   const pickFiles = async () => {
     const picked = await window.electronAPI.pickFiles(true)
-    if (picked.length) setField('value', picked.join(', '))
+    if (picked.length) setValue(picked.join(', '))
   }
 
   const parentProfiles = currentFlow.profiles ?? []
@@ -185,7 +151,7 @@ export function PropertyPanel() {
             <Field label="描述">
               <input
                 value={desc}
-                onChange={(e) => setField('desc', e.target.value)}
+                onChange={(e) => setDesc(e.target.value)}
                 onKeyDown={fieldKeyDown}
                 style={inputStyle}
               />
@@ -199,7 +165,7 @@ export function PropertyPanel() {
               <Field label="Selector">
                 <input
                   value={selector}
-                  onChange={(e) => setField('selector', e.target.value)}
+                  onChange={(e) => setSelector(e.target.value)}
                   onKeyDown={fieldKeyDown}
                   style={inputStyle}
                 />
@@ -213,7 +179,7 @@ export function PropertyPanel() {
               <Field label="Locator">
                 <input
                   value={locatorExpr}
-                  onChange={(e) => setField('locatorExpr', e.target.value)}
+                  onChange={(e) => setLocatorExpr(e.target.value)}
                   onKeyDown={fieldKeyDown}
                   style={{ ...inputStyle, width: 260 }}
                 />
@@ -233,7 +199,7 @@ export function PropertyPanel() {
                 <div style={{ display: 'flex', gap: 6 }}>
                   <input
                     value={value}
-                    onChange={(e) => setField('value', e.target.value)}
+                    onChange={(e) => setValue(e.target.value)}
                     onKeyDown={fieldKeyDown}
                     style={inputStyle}
                   />
@@ -259,7 +225,7 @@ export function PropertyPanel() {
                 </span>
                 <textarea
                   value={code}
-                  onChange={(e) => setField('code', e.target.value)}
+                  onChange={(e) => setCode(e.target.value)}
                   spellCheck={false}
                   style={{
                     display: 'block',
@@ -324,10 +290,10 @@ export function PropertyPanel() {
                         </div>
                         <select
                           value={profileMapping[pp.id] ?? (subFlowProfiles[0]?.id ?? '')}
-                          onChange={(e) => setField('profileMapping', {
-                            ...profileMapping,
+                          onChange={(e) => setProfileMapping((prev) => ({
+                            ...prev,
                             [pp.id]: e.target.value || null,
-                          })}
+                          }))}
                           style={{
                             background: '#0f172a', color: '#e2e8f0',
                             border: '1px solid #334155', borderRadius: 4,
@@ -346,20 +312,7 @@ export function PropertyPanel() {
             )}
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <DirtyBadge isDirty={isDirty} isStale={isStale} />
-              {isDirty && (
-                <button onClick={reset} style={revertBtnStyle} title="捨棄未儲存的變更">
-                  還原
-                </button>
-              )}
-              <button
-                onClick={saveNode}
-                disabled={!isDirty}
-                style={{
-                  ...saveBtnStyle,
-                  ...(isDirty ? {} : { background: '#334155', color: '#64748b', cursor: 'default' }),
-                }}
-              >
+              <button onClick={() => void saveNode()} style={saveBtnStyle}>
                 儲存
               </button>
             </div>
@@ -401,16 +354,6 @@ const pickBtnStyle: React.CSSProperties = {
   cursor: 'pointer',
   fontSize: 12,
   whiteSpace: 'nowrap',
-}
-
-const revertBtnStyle: React.CSSProperties = {
-  padding: '5px 12px',
-  borderRadius: 5,
-  border: '1px solid #475569',
-  background: 'transparent',
-  color: '#94a3b8',
-  cursor: 'pointer',
-  fontSize: 12,
 }
 
 const saveBtnStyle: React.CSSProperties = {

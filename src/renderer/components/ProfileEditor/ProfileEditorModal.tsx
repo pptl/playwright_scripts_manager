@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
 import { DOMAIN_ENV_KEY } from '@shared/types'
-import type { FlowProfile } from '@shared/types'
+import type { FlowProfile, ProfileVariable } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
-import { useDraftForm, useDraftRows, ensureNoUnsavedDrafts } from '../../hooks/useDraftForm'
-import { DirtyBadge } from '../common/DirtyBadge'
 
 interface ProfileEditorModalProps {
   onClose: () => void
@@ -16,6 +15,23 @@ interface VarRow {
   value: string
   description: string
   fallback: string
+}
+
+/** A row as edited in the table. `_rid` is a stable client id (used for React keys and for the
+ *  value-input caret map); `_origIndex` is the row's index in the store at load time —
+ *  `commitProfileVars` reads it to tell added rows from edited ones. */
+type EditRow = VarRow & { _rid: string; _origIndex: number | null }
+
+/** Store variables → table rows, resolved for the active environment. */
+function toEditRows(vars: ProfileVariable[], envId: string | null): EditRow[] {
+  return vars.map((v, i) => ({
+    key: v.key,
+    value: envId ? (v.envValues?.[envId] ?? '') : v.value,
+    description: v.description ?? '',
+    fallback: v.value,
+    _rid: `src:${i}`,
+    _origIndex: i,
+  }))
 }
 
 export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
@@ -62,18 +78,17 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
 
   // ── Profile list actions ──────────────────────────────────
 
-  /** Switching profiles re-baselines the variable table, so prompt for unsaved rows first.
+  /** Switching profiles reloads the variable table from the store; anything not saved is dropped.
    *  Blur before switching: React rewrites the focused value input during the re-render, which
    *  fires a `select` event that would otherwise re-arm the caret we just cleared. */
-  const selectProfile = async (id: string) => {
+  const selectProfile = (id: string) => {
     if (id === selectedProfileId) return
-    if (!(await ensureNoUnsavedDrafts())) return
     if (document.activeElement instanceof HTMLInputElement) document.activeElement.blur()
     lastValueCaret.current = null
     setSelectedProfileId(id)
   }
 
-  /** Same as selectProfile but for programmatic jumps after add/duplicate — nothing to guard. */
+  /** Same as selectProfile but for programmatic jumps after add/duplicate. */
   const jumpToProfile = (id: string) => {
     lastValueCaret.current = null
     setSelectedProfileId(id)
@@ -128,50 +143,75 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     }
   }
 
-  // ── Variable table (draft → 儲存) ──────────────────────────
+  // ── Variable table (edit locally → 儲存) ───────────────────
 
-  /** One draft row per variable. Key is shared across profiles; value/description are per-profile. */
-  const varSource = useMemo<VarRow[]>(
-    () =>
-      (selectedProfile?.vars ?? []).map((v) => ({
-        key: v.key,
-        value: activeEnvironmentId ? (v.envValues?.[activeEnvironmentId] ?? '') : v.value,
-        description: v.description ?? '',
-        fallback: v.value,
-      })),
+  /** One row per variable. Key is shared across profiles; value/description are per-profile. */
+  const varSource = useMemo<EditRow[]>(
+    () => toEditRows(selectedProfile?.vars ?? [], activeEnvironmentId),
     [selectedProfile, activeEnvironmentId],
   )
 
-  const table = useDraftRows<VarRow>({
-    source: varSource,
-    // Value column is per-environment and per-profile, so both belong in the reset key.
-    resetKey: selectedProfile ? `${currentFlow?.id ?? ''}:${selectedProfile.id}:${activeEnvironmentId ?? ''}` : null,
-    onCommit: async (rows) => {
-      if (!selectedProfile) return
-      await commitProfileVars(
-        selectedProfile.id,
-        rows.map((r) => ({
-          origIndex: r._origIndex,
-          key: r.key.trim(),
-          value: r.value,
-          description: r.description,
-        })),
-        activeEnvironmentId,
-      )
-    },
-    validate: (rows) => {
-      const keys = rows.map((r) => r.key.trim())
-      if (keys.some((k) => !k)) return '變數名稱不可為空'
-      const dup = keys.find((k, i) => keys.indexOf(k) !== i)
-      if (dup) return `變數名稱重複：${dup}`
-      return null
-    },
-    guardLabel: '環境配置變數',
-  })
+  const [rows, setRows] = useState<EditRow[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  // The value column is per-profile AND per-environment, so both belong in the reload key.
+  // Reloading overwrites whatever was typed but not saved — deliberately, and silently.
+  const tableKey = selectedProfile
+    ? `${currentFlow?.id ?? ''}:${selectedProfile.id}:${activeEnvironmentId ?? ''}`
+    : ''
+  useEffect(() => {
+    setRows(varSource)
+    setError(null)
+    // varSource is intentionally out of the deps: it changes identity on every store write,
+    // and re-running then would wipe rows the user is still editing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tableKey])
+
+  const setCell = <K extends keyof VarRow>(rid: string, key: K, v: VarRow[K]) => {
+    setRows((prev) => prev.map((r) => (r._rid === rid ? { ...r, [key]: v } : r)))
+  }
+
+  const addRow = () => {
+    setRows((prev) => [
+      ...prev,
+      { key: '', value: '', description: '', fallback: '', _rid: `new:${uuidv4()}`, _origIndex: null },
+    ])
+  }
+
+  const handleSave = async () => {
+    if (!selectedProfile) return
+    const keys = rows.map((r) => r.key.trim())
+    if (keys.some((k) => !k)) return setError('變數名稱不可為空')
+    const dup = keys.find((k, i) => keys.indexOf(k) !== i)
+    if (dup) return setError(`變數名稱重複：${dup}`)
+    setError(null)
+    await commitProfileVars(
+      selectedProfile.id,
+      rows.map((r) => ({
+        origIndex: r._origIndex,
+        key: r.key.trim(),
+        value: r.value,
+        description: r.description,
+      })),
+      activeEnvironmentId,
+    )
+    // Re-load from the store: rows added here still carry `_origIndex: null`, so a second
+    // 儲存 would append them all over again.
+    const saved = useFlowStore.getState().currentFlow?.profiles?.find((p) => p.id === selectedProfile.id)
+    setRows(toEditRows(saved?.vars ?? [], activeEnvironmentId))
+  }
+
+  /** Enter saves the whole table; spread onto the cell inputs. */
+  const cellKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      void handleSave()
+    }
+  }
 
   /** Variable keys are shared across every profile, so deleting one removes it everywhere. */
   const handleDeleteVar = async (rid: string) => {
-    const key = table.rows.find((r) => r._rid === rid)?.key ?? ''
+    const key = rows.find((r) => r._rid === rid)?.key ?? ''
     const ok = await confirm({
       title: key ? `刪除變數 {{${key}}}？` : '刪除此變數？',
       detail: '此變數將從「所有配置」中移除，引用它的節點將無法解析。儲存後生效。',
@@ -179,7 +219,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
       danger: true,
     })
     if (!ok) return
-    table.removeRow(rid)
+    setRows((prev) => prev.filter((r) => r._rid !== rid))
   }
 
   // ── Project env var picker ────────────────────────────────
@@ -208,11 +248,11 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
   const handlePickEnvVar = (key: string) => {
     const token = `{{${key}}}`
     const caret = lastValueCaret.current
-    const row = caret ? table.rows.find((r) => r._rid === caret.rid) : undefined
+    const row = caret ? rows.find((r) => r._rid === caret.rid) : undefined
 
     if (caret && row) {
       const current = row.value
-      table.setCell(row._rid, 'value', current.slice(0, caret.start) + token + current.slice(caret.end))
+      setCell(row._rid, 'value', current.slice(0, caret.start) + token + current.slice(caret.end))
       const pos = caret.start + token.length
       lastValueCaret.current = { rid: caret.rid, start: pos, end: pos }
       requestAnimationFrame(() => {
@@ -295,7 +335,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
         >
           <span style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0' }}>環境配置管理</span>
           <button
-            onClick={() => void table.guardedRun(onClose)}
+            onClick={onClose}
             style={{ background: 'transparent', border: 'none', color: '#64748b', fontSize: 18, cursor: 'pointer' }}
           >
             ✕
@@ -590,7 +630,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         style={cellInputStyle}
                       />
                       <div style={{ fontSize: 10, color: '#64748b', marginTop: 5 }}>
-                        {table.rows.some((r) => r._rid === lastValueCaret.current?.rid)
+                        {rows.some((r) => r._rid === lastValueCaret.current?.rid)
                           ? '點擊插入至編輯中的「值」欄位'
                           : `點擊複製 ${'{{key}}'}（先點一個「值」欄位可直接插入）`}
                       </div>
@@ -679,12 +719,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>環境值:</span>
                     <select
                       value={activeEnvironmentId ?? ''}
-                      // The value column is per-environment — switching re-baselines the table.
-                      onChange={async (e) => {
-                        const next = e.target.value || null
-                        if (!(await ensureNoUnsavedDrafts())) return
-                        setActiveEnvironment(next)
-                      }}
+                      // The value column is per-environment — switching reloads the table.
+                      onChange={(e) => setActiveEnvironment(e.target.value || null)}
                       style={{
                         background: '#0f172a',
                         border: '1px solid #334155',
@@ -723,7 +759,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     <span />
                   </div>
 
-                  {table.rows.map((row) => {
+                  {rows.map((row) => {
                     return (
                     <div
                       key={row._rid}
@@ -737,8 +773,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     >
                       <input
                         value={row.key}
-                        onChange={(e) => table.setCell(row._rid, 'key', e.target.value)}
-                        onKeyDown={table.fieldKeyDown}
+                        onChange={(e) => setCell(row._rid, 'key', e.target.value)}
+                        onKeyDown={cellKeyDown}
                         placeholder="key"
                         style={cellInputStyle}
                         title="修改參數名稱將同步至所有配置（儲存後生效）"
@@ -746,10 +782,10 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       <input
                         ref={(el) => { valueInputRefs.current[row._rid] = el }}
                         value={row.value}
-                        onChange={(e) => { rememberCaret(row._rid, e.currentTarget); table.setCell(row._rid, 'value', e.target.value) }}
+                        onChange={(e) => { rememberCaret(row._rid, e.currentTarget); setCell(row._rid, 'value', e.target.value) }}
                         onFocus={(e) => rememberCaret(row._rid, e.currentTarget)}
                         onSelect={(e) => rememberCaret(row._rid, e.currentTarget)}
-                        onKeyDown={table.fieldKeyDown}
+                        onKeyDown={cellKeyDown}
                         placeholder={activeEnvironmentId ? `預設: ${row.fallback || '(空)'}` : 'value'}
                         style={{
                           ...cellInputStyle,
@@ -758,8 +794,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       />
                       <input
                         value={row.description}
-                        onChange={(e) => table.setCell(row._rid, 'description', e.target.value)}
-                        onKeyDown={table.fieldKeyDown}
+                        onChange={(e) => setCell(row._rid, 'description', e.target.value)}
+                        onKeyDown={cellKeyDown}
                         placeholder="說明此參數用途…"
                         style={{ ...cellInputStyle, color: '#94a3b8' }}
                       />
@@ -786,7 +822,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   )
                   })}
 
-                  {table.rows.length === 0 && (
+                  {rows.length === 0 && (
                     <div style={{ padding: '16px', color: '#64748b', fontSize: 12 }}>
                       尚無變數。點擊下方「新增變數」。
                     </div>
@@ -804,7 +840,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   }}
                 >
                   <button
-                    onClick={() => table.addRow({ key: '', value: '', description: '', fallback: '' })}
+                    onClick={addRow}
                     style={{
                       padding: '6px 14px',
                       borderRadius: 4,
@@ -818,27 +854,20 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     ＋ 新增變數（所有配置同步）
                   </button>
                   <div style={{ flex: 1 }} />
-                  {table.error && (
-                    <span style={{ fontSize: 11, color: '#f87171', whiteSpace: 'nowrap' }}>{table.error}</span>
-                  )}
-                  <DirtyBadge isDirty={table.isDirty} isStale={table.isStale} />
-                  {table.isDirty && (
-                    <button onClick={table.reset} style={ghostBtnStyle} title="捨棄未儲存的變更">
-                      還原
-                    </button>
+                  {error && (
+                    <span style={{ fontSize: 11, color: '#f87171', whiteSpace: 'nowrap' }}>{error}</span>
                   )}
                   <button
-                    onClick={() => void table.commit()}
-                    disabled={!table.isDirty}
+                    onClick={() => void handleSave()}
                     style={{
                       padding: '6px 16px',
                       borderRadius: 4,
                       border: 'none',
                       fontSize: 12,
                       fontWeight: 600,
-                      ...(table.isDirty
-                        ? { background: '#3b82f6', color: '#fff', cursor: 'pointer' }
-                        : { background: '#334155', color: '#64748b', cursor: 'default' }),
+                      background: '#3b82f6',
+                      color: '#fff',
+                      cursor: 'pointer',
                     }}
                   >
                     儲存
@@ -863,7 +892,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
             flexShrink: 0,
           }}
         >
-          <button onClick={() => void table.guardedRun(onClose)} style={closeBtnStyle}>
+          <button onClick={onClose} style={closeBtnStyle}>
             關閉
           </button>
         </div>
@@ -909,16 +938,6 @@ const renameActionBtnStyle = (color: string): React.CSSProperties => ({
   borderRadius: 3,
   lineHeight: 1,
 })
-
-const ghostBtnStyle: React.CSSProperties = {
-  padding: '6px 12px',
-  borderRadius: 4,
-  border: '1px solid #475569',
-  background: 'transparent',
-  color: '#94a3b8',
-  cursor: 'pointer',
-  fontSize: 12,
-}
 
 const cellInputStyle: React.CSSProperties = {
   padding: '4px 8px',

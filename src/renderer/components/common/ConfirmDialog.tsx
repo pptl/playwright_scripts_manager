@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react'
 import { useConfirmStore, type ConfirmAction } from '../../stores/confirmStore'
 
 /**
- * Renders confirm requests raised via `confirm()` / `confirmDiscard()`.
+ * Renders confirm requests raised via `confirm()`.
  * Mounted exactly once, at the end of App.tsx.
  *
  * zIndex 4000 sits above the 2000-level modals (ProfileEditorModal, ProjectEnvVarModal)

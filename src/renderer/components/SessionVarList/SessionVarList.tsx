@@ -5,7 +5,7 @@ import type { Flow } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
 
 export function SessionVarList() {
-  const { currentFlow, updateNode } = useFlowStore()
+  const { currentFlow, updateNode, runWithoutHistory } = useFlowStore()
   const [copiedName, setCopiedName] = useState<string | null>(null)
   const [subFlowVars, setSubFlowVars] = useState<{ flowName: string; varName: string; placeholder: string }[]>([])
 
@@ -62,7 +62,11 @@ export function SessionVarList() {
       danger: true,
     })
     if (!ok) return
-    updateNode(nodeId, { action: { ...node.action, captureAs: undefined } })
+    // Session variables are config, not a canvas edit — keep this out of undo history even
+    // though it goes through updateNode (the confirm dialog above is the safeguard).
+    runWithoutHistory(() => {
+      updateNode(nodeId, { action: { ...node.action, captureAs: undefined } })
+    })
     const updated = useFlowStore.getState().currentFlow
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
   }

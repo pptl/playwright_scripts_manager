@@ -7408,10 +7408,10 @@ function computeGroupAwareLayout(nodes, groups) {
 const NODE_VERTICAL_GAP = 80;
 const NODE_START_Y = 50;
 const NODE_START_X = 300;
-const entryId = (e) => e.kind === "flow" ? e.flow.id : e.project.id;
 let isTimeTraveling = false;
 let suppressDepth = 0;
 const historySuppressed = () => suppressDepth > 0;
+const graphChanged = (a, b) => a.nodes !== b.nodes || a.rootNodeId !== b.rootNodeId || a.groups !== b.groups;
 function migrateCallFlowProfiles(flow) {
   const profiles = flow.profiles ?? [];
   const needsMigration = flow.nodes.some(
@@ -7442,30 +7442,6 @@ function migrateDomainsToProfiles(flow) {
     }));
   }
   return [];
-}
-function snapshotOf(kind, state) {
-  if (kind === "flow") return state.currentFlow ? { kind: "flow", flow: state.currentFlow } : null;
-  return state.currentProject ? { kind: "project", project: state.currentProject } : null;
-}
-function applyEntry(entry, state) {
-  if (entry.kind === "flow") {
-    return { currentFlow: entry.flow, selectedNodeId: null };
-  }
-  const envs = entry.project.environments;
-  const envStillValid = !!state.activeEnvironmentId && envs.some((e) => e.id === state.activeEnvironmentId);
-  return {
-    currentProject: entry.project,
-    activeEnvironmentId: envStillValid ? state.activeEnvironmentId : envs[0]?.id ?? null
-  };
-}
-async function persistEntry(entry) {
-  if (entry.kind === "flow") {
-    await window.electronAPI.saveFlow(entry.flow).catch(console.error);
-    return;
-  }
-  await window.electronAPI.saveProject(entry.project).catch(console.error);
-  const list = await window.electronAPI.listProjects().catch(() => null);
-  if (list) useFlowStore.setState({ projects: list });
 }
 function setSilently(partial) {
   suppressDepth++;
@@ -7542,36 +7518,34 @@ const useFlowStore = create$1((set2, get2) => ({
   },
   setRecordingHead: (id2) => set2({ recordingHeadId: id2 }),
   undo: () => {
-    const state = get2();
-    const { past, future } = state;
+    const { past, future, currentFlow } = get2();
     if (past.length === 0) return;
-    const entry = past[past.length - 1];
-    const current = snapshotOf(entry.kind, state);
-    if (!current || entryId(current) !== entryId(entry)) return;
+    const previous = past[past.length - 1];
+    if (!currentFlow || currentFlow.id !== previous.id) return;
     isTimeTraveling = true;
     set2({
       past: past.slice(0, -1),
-      future: [current, ...future],
-      ...applyEntry(entry, state)
+      future: [currentFlow, ...future],
+      currentFlow: previous,
+      selectedNodeId: null
     });
     isTimeTraveling = false;
-    void persistEntry(entry);
+    window.electronAPI.saveFlow(previous).catch(console.error);
   },
   redo: () => {
-    const state = get2();
-    const { past, future } = state;
+    const { past, future, currentFlow } = get2();
     if (future.length === 0) return;
-    const entry = future[0];
-    const current = snapshotOf(entry.kind, state);
-    if (!current || entryId(current) !== entryId(entry)) return;
+    const next = future[0];
+    if (!currentFlow || currentFlow.id !== next.id) return;
     isTimeTraveling = true;
     set2({
-      past: [...past, current].slice(-50),
+      past: [...past, currentFlow].slice(-50),
       future: future.slice(1),
-      ...applyEntry(entry, state)
+      currentFlow: next,
+      selectedNodeId: null
     });
     isTimeTraveling = false;
-    void persistEntry(entry);
+    window.electronAPI.saveFlow(next).catch(console.error);
   },
   runWithoutHistory: (fn) => {
     suppressDepth++;
@@ -7581,11 +7555,29 @@ const useFlowStore = create$1((set2, get2) => ({
       suppressDepth--;
     }
   },
+  runAsOneHistoryStep: (fn) => {
+    const before = get2().currentFlow;
+    suppressDepth++;
+    try {
+      fn();
+    } finally {
+      suppressDepth--;
+    }
+    const after = get2().currentFlow;
+    if (isTimeTraveling) return;
+    const { isRecording, isReplaying } = get2();
+    if (isRecording || isReplaying) return;
+    if (!before || !after || before === after) return;
+    if (before.id !== after.id) return;
+    if (!graphChanged(before, after)) return;
+    set2((s) => ({ past: [...s.past, before].slice(-50), future: [] }));
+  },
+  // Flow metadata, not the node graph — not undoable (see header comment).
   renameCurrentFlow: async (name) => {
     const flow = get2().currentFlow;
     if (!flow) return;
     const updatedFlow = { ...flow, name, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-    set2({ currentFlow: updatedFlow });
+    setSilently({ currentFlow: updatedFlow });
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
   },
   addActionNode: (action, parentId = null, branchLabel) => {
@@ -7893,6 +7885,10 @@ const useFlowStore = create$1((set2, get2) => ({
   setIsPickingAssertion: (v2) => set2({ isPickingAssertion: v2 }),
   setPendingLocatorPick: (payload) => set2({ pendingLocatorPick: payload }),
   setActiveProfile: (id2) => set2({ activeProfileId: id2 }),
+  // ── Environment profiles ──────────────────────────────────
+  // All profile mutations use setSilently: profiles are off-canvas config and must never be
+  // reachable by Ctrl+Z. Note they also rewrite flow.nodes (callFlow subFlowProfileMapping),
+  // so the subscription's graphChanged net would NOT catch them — the suppression is required.
   addProfile: async (name) => {
     const flow = get2().currentFlow;
     if (!flow) return;
@@ -7923,7 +7919,7 @@ const useFlowStore = create$1((set2, get2) => ({
       nodes: updatedNodes,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    set2({ currentFlow: updatedFlow });
+    setSilently({ currentFlow: updatedFlow });
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
   },
   updateProfile: async (id2, updates) => {
@@ -7936,7 +7932,7 @@ const useFlowStore = create$1((set2, get2) => ({
       ),
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    set2({ currentFlow: updatedFlow });
+    setSilently({ currentFlow: updatedFlow });
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
   },
   deleteProfile: async (id2) => {
@@ -7957,7 +7953,7 @@ const useFlowStore = create$1((set2, get2) => ({
       nodes: updatedNodes,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    set2({
+    setSilently({
       currentFlow: updatedFlow,
       activeProfileId: activeProfileId === id2 ? updatedProfiles[0]?.id ?? null : activeProfileId
     });
@@ -8000,7 +7996,7 @@ const useFlowStore = create$1((set2, get2) => ({
       nodes: updatedNodes,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    set2({ currentFlow: updatedFlow });
+    setSilently({ currentFlow: updatedFlow });
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
   },
   commitProfileVars: async (profileId, rows, envId) => {
@@ -8030,7 +8026,7 @@ const useFlowStore = create$1((set2, get2) => ({
       profiles: updatedProfiles,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    set2({ currentFlow: updatedFlow });
+    setSilently({ currentFlow: updatedFlow });
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error);
   },
   setProjects: (projects) => set2({ projects }),
@@ -8176,6 +8172,7 @@ const useFlowStore = create$1((set2, get2) => ({
     }
     set2({ projects: await window.electronAPI.listProjects() });
   },
+  // Project membership is flow metadata, not the node graph — not undoable.
   assignFlowToProject: async (flowId, projectId) => {
     const flowData = await window.electronAPI.getFlow(flowId);
     if (!flowData) return;
@@ -8183,7 +8180,7 @@ const useFlowStore = create$1((set2, get2) => ({
     await window.electronAPI.saveFlow(updatedFlow);
     const { currentFlow } = get2();
     if (currentFlow?.id === flowId) {
-      set2({ currentFlow: updatedFlow });
+      setSilently({ currentFlow: updatedFlow });
     }
   },
   commitProjectEnvVars: async (rows, envId) => {
@@ -8208,16 +8205,13 @@ const useFlowStore = create$1((set2, get2) => ({
 useFlowStore.subscribe((state, prev) => {
   if (isTimeTraveling || historySuppressed()) return;
   if (state.isRecording || state.isReplaying) return;
-  const entries = [];
   const cf2 = state.currentFlow;
   const pf2 = prev.currentFlow;
-  if (cf2 && pf2 && cf2 !== pf2 && cf2.id === pf2.id) entries.push({ kind: "flow", flow: pf2 });
-  const cp = state.currentProject;
-  const pp = prev.currentProject;
-  if (cp && pp && cp !== pp && cp.id === pp.id) entries.push({ kind: "project", project: pp });
-  if (entries.length === 0) return;
+  if (!cf2 || !pf2 || cf2 === pf2) return;
+  if (cf2.id !== pf2.id) return;
+  if (!graphChanged(cf2, pf2)) return;
   useFlowStore.setState((s) => ({
-    past: [...s.past, ...entries].slice(-50),
+    past: [...s.past, pf2].slice(-50),
     future: []
   }));
 });
@@ -8403,230 +8397,6 @@ function usePlaywright() {
   );
   return { startRecording, startBranchRecording, stopRecording, replayToNode };
 }
-let nextId = 1;
-const useConfirmStore = create$1((set2, get2) => ({
-  queue: [],
-  ask: (req) => new Promise((resolve) => {
-    set2((s) => ({ queue: [...s.queue, { ...req, id: nextId++, resolve }] }));
-  }),
-  answer: (actionId) => {
-    const [front, ...rest] = get2().queue;
-    if (!front) return;
-    set2({ queue: rest });
-    front.resolve(actionId);
-  }
-}));
-const CONFIRM_CANCEL = "cancel";
-const CONFIRM_OK = "ok";
-async function confirm(opts) {
-  const answer = await useConfirmStore.getState().ask({
-    title: opts.title,
-    message: opts.message,
-    detail: opts.detail,
-    actions: [
-      { id: CONFIRM_CANCEL, label: opts.cancelLabel ?? "取消", tone: "ghost" },
-      { id: CONFIRM_OK, label: opts.confirmLabel ?? "確認", tone: opts.danger ? "danger" : "primary" }
-    ],
-    defaultActionId: opts.danger ? CONFIRM_CANCEL : CONFIRM_OK
-  });
-  return answer === CONFIRM_OK;
-}
-async function confirmDiscard(label) {
-  const answer = await useConfirmStore.getState().ask({
-    title: "尚有未儲存的變更",
-    message: `${label} 有尚未儲存的編輯內容。`,
-    detail: "要先儲存再繼續嗎？",
-    actions: [
-      { id: "cancel", label: "取消", tone: "ghost" },
-      { id: "discard", label: "捨棄變更", tone: "danger" },
-      { id: "save", label: "儲存", tone: "primary" }
-    ],
-    defaultActionId: "save"
-  });
-  return answer ?? "cancel";
-}
-function shallowEq(a, b) {
-  if (a === b) return true;
-  const keys = /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k2 of keys) {
-    if (!Object.is(a[k2], b[k2])) return false;
-  }
-  return true;
-}
-const guards = /* @__PURE__ */ new Map();
-function registerDraftGuard(id2, entry) {
-  guards.set(id2, entry);
-  return () => {
-    guards.delete(id2);
-  };
-}
-async function ensureNoUnsavedDrafts() {
-  const dirty = [...guards.values()].filter((g) => g.isDirty());
-  if (dirty.length === 0) return true;
-  const label = dirty.length === 1 ? dirty[0].label : `${dirty.length} 個編輯區塊`;
-  const choice = await confirmDiscard(label);
-  if (choice === "cancel") return false;
-  if (choice === "discard") {
-    dirty.forEach((g) => g.reset());
-    return true;
-  }
-  for (const g of dirty) {
-    if (!await g.commit()) return false;
-  }
-  return true;
-}
-function useDraftForm(opts) {
-  const { source, resetKey, onCommit, validate, equals, guardLabel } = opts;
-  const eq = equals ?? shallowEq;
-  const [values, setValues] = reactExports.useState(source);
-  const [error, setError] = reactExports.useState(null);
-  const baseline = reactExports.useRef(source);
-  const prevKey = reactExports.useRef(resetKey);
-  const isDirty = !eq(values, baseline.current);
-  if (prevKey.current !== resetKey || !isDirty && !eq(source, baseline.current)) {
-    prevKey.current = resetKey;
-    baseline.current = source;
-    setValues(source);
-    if (error) setError(null);
-  }
-  const isStale = isDirty && !eq(source, baseline.current);
-  const setField = reactExports.useCallback((key, v2) => {
-    setValues((prev) => ({ ...prev, [key]: v2 }));
-  }, []);
-  const patch = reactExports.useCallback((p2) => {
-    setValues((prev) => ({ ...prev, ...p2 }));
-  }, []);
-  const reset = reactExports.useCallback(() => {
-    setValues(baseline.current);
-    setError(null);
-  }, []);
-  const latest = reactExports.useRef({ values, isDirty, onCommit, validate });
-  latest.current = { values, isDirty, onCommit, validate };
-  const commit = reactExports.useCallback(async () => {
-    const { values: v2, isDirty: dirty, onCommit: doCommit, validate: doValidate } = latest.current;
-    if (!dirty) return true;
-    const err = doValidate?.(v2) ?? null;
-    if (err) {
-      setError(err);
-      return false;
-    }
-    try {
-      await doCommit(v2);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return false;
-    }
-    baseline.current = v2;
-    setValues(v2);
-    setError(null);
-    return true;
-  }, []);
-  const guardedRun = reactExports.useCallback(
-    async (proceed) => {
-      if (!latest.current.isDirty) {
-        await proceed();
-        return;
-      }
-      const choice = await confirmDiscard(guardLabel ?? "目前的編輯");
-      if (choice === "cancel") return;
-      if (choice === "save" && !await commit()) return;
-      if (choice === "discard") reset();
-      await proceed();
-    },
-    [commit, reset, guardLabel]
-  );
-  const fieldKeyDown = reactExports.useCallback(
-    (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        void commit();
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        reset();
-      }
-    },
-    [commit, reset]
-  );
-  const guardId = reactExports.useRef();
-  if (!guardId.current) guardId.current = v4();
-  const guardState = reactExports.useRef({ isDirty, commit, reset });
-  guardState.current = { isDirty, commit, reset };
-  reactExports.useEffect(() => {
-    if (!guardLabel) return;
-    return registerDraftGuard(guardId.current, {
-      label: guardLabel,
-      isDirty: () => guardState.current.isDirty,
-      commit: () => guardState.current.commit(),
-      reset: () => guardState.current.reset()
-    });
-  }, [guardLabel]);
-  return { values, setField, patch, isDirty, isStale, error, commit, reset, fieldKeyDown, guardedRun };
-}
-function useDraftRows(opts) {
-  const { source, resetKey, onCommit, validate, rowEquals, guardLabel } = opts;
-  const rowEq = rowEquals ?? shallowEq;
-  const sourceRows = source.map((r2, i) => ({ ...r2, _rid: `src:${i}`, _origIndex: i }));
-  const form = useDraftForm({
-    source: { rows: sourceRows },
-    resetKey,
-    onCommit: (v2) => onCommit(v2.rows),
-    validate: validate ? (v2) => validate(v2.rows) : void 0,
-    equals: (a, b) => {
-      if (a.rows.length !== b.rows.length) return false;
-      return a.rows.every((r2, i) => {
-        const o = b.rows[i];
-        return r2._rid === o._rid && r2._origIndex === o._origIndex && rowEq(r2, o);
-      });
-    },
-    guardLabel
-  });
-  const { values, patch } = form;
-  const rows = values.rows;
-  const setCell = reactExports.useCallback(
-    (rid, key, v2) => {
-      patch({ rows: rows.map((r2) => r2._rid === rid ? { ...r2, [key]: v2 } : r2) });
-    },
-    [rows, patch]
-  );
-  const addRow = reactExports.useCallback(
-    (init2) => {
-      const rid = `new:${v4()}`;
-      patch({ rows: [...rows, { ...init2, _rid: rid, _origIndex: null }] });
-      return rid;
-    },
-    [rows, patch]
-  );
-  const removeRow = reactExports.useCallback(
-    (rid) => {
-      patch({ rows: rows.filter((r2) => r2._rid !== rid) });
-    },
-    [rows, patch]
-  );
-  const isRowDirty = reactExports.useCallback(
-    (rid) => {
-      const row = rows.find((r2) => r2._rid === rid);
-      if (!row) return false;
-      if (row._origIndex === null) return true;
-      const orig = source[row._origIndex];
-      return !orig || !rowEq(row, orig);
-    },
-    [rows, source, rowEq]
-  );
-  return {
-    rows,
-    setCell,
-    addRow,
-    removeRow,
-    isRowDirty,
-    isDirty: form.isDirty,
-    isStale: form.isStale,
-    error: form.error,
-    commit: form.commit,
-    reset: form.reset,
-    fieldKeyDown: form.fieldKeyDown,
-    guardedRun: form.guardedRun
-  };
-}
 function useFlowManager() {
   const { setFlows, createFlow, setCurrentFlow } = useFlowStore();
   const refreshFlowList = reactExports.useCallback(async () => {
@@ -8639,7 +8409,6 @@ function useFlowManager() {
   }, []);
   const openFlow = reactExports.useCallback(
     async (flowId) => {
-      if (!await ensureNoUnsavedDrafts()) return;
       const flow = await window.electronAPI.loadFlow(flowId);
       if (!flow) return;
       setCurrentFlow(flow);
@@ -8804,33 +8573,43 @@ function TestOutputModal({ lines, finished, onClose }) {
     }
   );
 }
-function DirtyBadge({ isDirty, isStale }) {
-  if (!isDirty) return null;
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: 6 }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx(
-      "span",
-      {
-        style: {
-          fontSize: 11,
-          color: "#fbbf24",
-          background: "rgba(251,191,36,0.12)",
-          border: "1px solid rgba(251,191,36,0.35)",
-          borderRadius: 10,
-          padding: "2px 8px",
-          whiteSpace: "nowrap"
-        },
-        children: "● 未儲存"
-      }
-    ),
-    isStale && /* @__PURE__ */ jsxRuntimeExports.jsx(
-      "span",
-      {
-        style: { fontSize: 11, color: "#f87171", whiteSpace: "nowrap" },
-        title: "此資料已在別處被更新，儲存將以你的編輯為準",
-        children: "⚠ 外部已更新"
-      }
-    )
-  ] });
+let nextId = 1;
+const useConfirmStore = create$1((set2, get2) => ({
+  queue: [],
+  ask: (req) => new Promise((resolve) => {
+    set2((s) => ({ queue: [...s.queue, { ...req, id: nextId++, resolve }] }));
+  }),
+  answer: (actionId) => {
+    const [front, ...rest] = get2().queue;
+    if (!front) return;
+    set2({ queue: rest });
+    front.resolve(actionId);
+  }
+}));
+const CONFIRM_CANCEL = "cancel";
+const CONFIRM_OK = "ok";
+async function confirm(opts) {
+  const answer = await useConfirmStore.getState().ask({
+    title: opts.title,
+    message: opts.message,
+    detail: opts.detail,
+    actions: [
+      { id: CONFIRM_CANCEL, label: opts.cancelLabel ?? "取消", tone: "ghost" },
+      { id: CONFIRM_OK, label: opts.confirmLabel ?? "確認", tone: opts.danger ? "danger" : "primary" }
+    ],
+    defaultActionId: opts.danger ? CONFIRM_CANCEL : CONFIRM_OK
+  });
+  return answer === CONFIRM_OK;
+}
+function toEditRows$1(vars, envId) {
+  return vars.map((v2, i) => ({
+    key: v2.key,
+    value: envId ? v2.envValues?.[envId] ?? "" : v2.value,
+    description: v2.description ?? "",
+    fallback: v2.value,
+    _rid: `src:${i}`,
+    _origIndex: i
+  }));
 }
 function ProfileEditorModal({ onClose }) {
   const {
@@ -8866,9 +8645,8 @@ function ProfileEditorModal({ onClose }) {
   const lastValueCaret = reactExports.useRef(null);
   const selectedProfile = profiles.find((p2) => p2.id === selectedProfileId) ?? profiles[0] ?? null;
   const activeEnvName = environments.find((e) => e.id === activeEnvironmentId)?.name;
-  const selectProfile = async (id2) => {
+  const selectProfile = (id2) => {
     if (id2 === selectedProfileId) return;
-    if (!await ensureNoUnsavedDrafts()) return;
     if (document.activeElement instanceof HTMLInputElement) document.activeElement.blur();
     lastValueCaret.current = null;
     setSelectedProfileId(id2);
@@ -8920,42 +8698,53 @@ function ProfileEditorModal({ onClose }) {
     }
   };
   const varSource = reactExports.useMemo(
-    () => (selectedProfile?.vars ?? []).map((v2) => ({
-      key: v2.key,
-      value: activeEnvironmentId ? v2.envValues?.[activeEnvironmentId] ?? "" : v2.value,
-      description: v2.description ?? "",
-      fallback: v2.value
-    })),
+    () => toEditRows$1(selectedProfile?.vars ?? [], activeEnvironmentId),
     [selectedProfile, activeEnvironmentId]
   );
-  const table = useDraftRows({
-    source: varSource,
-    // Value column is per-environment and per-profile, so both belong in the reset key.
-    resetKey: selectedProfile ? `${currentFlow?.id ?? ""}:${selectedProfile.id}:${activeEnvironmentId ?? ""}` : null,
-    onCommit: async (rows) => {
-      if (!selectedProfile) return;
-      await commitProfileVars(
-        selectedProfile.id,
-        rows.map((r2) => ({
-          origIndex: r2._origIndex,
-          key: r2.key.trim(),
-          value: r2.value,
-          description: r2.description
-        })),
-        activeEnvironmentId
-      );
-    },
-    validate: (rows) => {
-      const keys = rows.map((r2) => r2.key.trim());
-      if (keys.some((k2) => !k2)) return "變數名稱不可為空";
-      const dup = keys.find((k2, i) => keys.indexOf(k2) !== i);
-      if (dup) return `變數名稱重複：${dup}`;
-      return null;
-    },
-    guardLabel: "環境配置變數"
-  });
+  const [rows, setRows] = reactExports.useState([]);
+  const [error, setError] = reactExports.useState(null);
+  const tableKey = selectedProfile ? `${currentFlow?.id ?? ""}:${selectedProfile.id}:${activeEnvironmentId ?? ""}` : "";
+  reactExports.useEffect(() => {
+    setRows(varSource);
+    setError(null);
+  }, [tableKey]);
+  const setCell = (rid, key, v2) => {
+    setRows((prev) => prev.map((r2) => r2._rid === rid ? { ...r2, [key]: v2 } : r2));
+  };
+  const addRow = () => {
+    setRows((prev) => [
+      ...prev,
+      { key: "", value: "", description: "", fallback: "", _rid: `new:${v4()}`, _origIndex: null }
+    ]);
+  };
+  const handleSave = async () => {
+    if (!selectedProfile) return;
+    const keys = rows.map((r2) => r2.key.trim());
+    if (keys.some((k2) => !k2)) return setError("變數名稱不可為空");
+    const dup = keys.find((k2, i) => keys.indexOf(k2) !== i);
+    if (dup) return setError(`變數名稱重複：${dup}`);
+    setError(null);
+    await commitProfileVars(
+      selectedProfile.id,
+      rows.map((r2) => ({
+        origIndex: r2._origIndex,
+        key: r2.key.trim(),
+        value: r2.value,
+        description: r2.description
+      })),
+      activeEnvironmentId
+    );
+    const saved = useFlowStore.getState().currentFlow?.profiles?.find((p2) => p2.id === selectedProfile.id);
+    setRows(toEditRows$1(saved?.vars ?? [], activeEnvironmentId));
+  };
+  const cellKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void handleSave();
+    }
+  };
   const handleDeleteVar = async (rid) => {
-    const key = table.rows.find((r2) => r2._rid === rid)?.key ?? "";
+    const key = rows.find((r2) => r2._rid === rid)?.key ?? "";
     const ok2 = await confirm({
       title: key ? `刪除變數 {{${key}}}？` : "刪除此變數？",
       detail: "此變數將從「所有配置」中移除，引用它的節點將無法解析。儲存後生效。",
@@ -8963,7 +8752,7 @@ function ProfileEditorModal({ onClose }) {
       danger: true
     });
     if (!ok2) return;
-    table.removeRow(rid);
+    setRows((prev) => prev.filter((r2) => r2._rid !== rid));
   };
   const rememberCaret = (rid, el2) => {
     lastValueCaret.current = {
@@ -8983,10 +8772,10 @@ function ProfileEditorModal({ onClose }) {
   const handlePickEnvVar = (key) => {
     const token = `{{${key}}}`;
     const caret = lastValueCaret.current;
-    const row = caret ? table.rows.find((r2) => r2._rid === caret.rid) : void 0;
+    const row = caret ? rows.find((r2) => r2._rid === caret.rid) : void 0;
     if (caret && row) {
       const current = row.value;
-      table.setCell(row._rid, "value", current.slice(0, caret.start) + token + current.slice(caret.end));
+      setCell(row._rid, "value", current.slice(0, caret.start) + token + current.slice(caret.end));
       const pos = caret.start + token.length;
       lastValueCaret.current = { rid: caret.rid, start: pos, end: pos };
       requestAnimationFrame(() => {
@@ -9068,7 +8857,7 @@ function ProfileEditorModal({ onClose }) {
                   /* @__PURE__ */ jsxRuntimeExports.jsx(
                     "button",
                     {
-                      onClick: () => void table.guardedRun(onClose),
+                      onClick: onClose,
                       style: { background: "transparent", border: "none", color: "#64748b", fontSize: 18, cursor: "pointer" },
                       children: "✕"
                     }
@@ -9416,7 +9205,7 @@ function ProfileEditorModal({ onClose }) {
                                 style: cellInputStyle$1
                               }
                             ),
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 5 }, children: table.rows.some((r2) => r2._rid === lastValueCaret.current?.rid) ? "點擊插入至編輯中的「值」欄位" : `點擊複製 ${"{{key}}"}（先點一個「值」欄位可直接插入）` })
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 5 }, children: rows.some((r2) => r2._rid === lastValueCaret.current?.rid) ? "點擊插入至編輯中的「值」欄位" : `點擊複製 ${"{{key}}"}（先點一個「值」欄位可直接插入）` })
                           ]
                         }
                       ),
@@ -9504,11 +9293,7 @@ function ProfileEditorModal({ onClose }) {
                         "select",
                         {
                           value: activeEnvironmentId ?? "",
-                          onChange: async (e) => {
-                            const next = e.target.value || null;
-                            if (!await ensureNoUnsavedDrafts()) return;
-                            setActiveEnvironment(next);
-                          },
+                          onChange: (e) => setActiveEnvironment(e.target.value || null),
                           style: {
                             background: "#0f172a",
                             border: "1px solid #334155",
@@ -9550,7 +9335,7 @@ function ProfileEditorModal({ onClose }) {
                       ]
                     }
                   ),
-                  table.rows.map((row) => {
+                  rows.map((row) => {
                     return /* @__PURE__ */ jsxRuntimeExports.jsxs(
                       "div",
                       {
@@ -9566,8 +9351,8 @@ function ProfileEditorModal({ onClose }) {
                             "input",
                             {
                               value: row.key,
-                              onChange: (e) => table.setCell(row._rid, "key", e.target.value),
-                              onKeyDown: table.fieldKeyDown,
+                              onChange: (e) => setCell(row._rid, "key", e.target.value),
+                              onKeyDown: cellKeyDown,
                               placeholder: "key",
                               style: cellInputStyle$1,
                               title: "修改參數名稱將同步至所有配置（儲存後生效）"
@@ -9582,11 +9367,11 @@ function ProfileEditorModal({ onClose }) {
                               value: row.value,
                               onChange: (e) => {
                                 rememberCaret(row._rid, e.currentTarget);
-                                table.setCell(row._rid, "value", e.target.value);
+                                setCell(row._rid, "value", e.target.value);
                               },
                               onFocus: (e) => rememberCaret(row._rid, e.currentTarget),
                               onSelect: (e) => rememberCaret(row._rid, e.currentTarget),
-                              onKeyDown: table.fieldKeyDown,
+                              onKeyDown: cellKeyDown,
                               placeholder: activeEnvironmentId ? `預設: ${row.fallback || "(空)"}` : "value",
                               style: {
                                 ...cellInputStyle$1,
@@ -9598,8 +9383,8 @@ function ProfileEditorModal({ onClose }) {
                             "input",
                             {
                               value: row.description,
-                              onChange: (e) => table.setCell(row._rid, "description", e.target.value),
-                              onKeyDown: table.fieldKeyDown,
+                              onChange: (e) => setCell(row._rid, "description", e.target.value),
+                              onKeyDown: cellKeyDown,
                               placeholder: "說明此參數用途…",
                               style: { ...cellInputStyle$1, color: "#94a3b8" }
                             }
@@ -9634,7 +9419,7 @@ function ProfileEditorModal({ onClose }) {
                       row._rid
                     );
                   }),
-                  table.rows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無變數。點擊下方「新增變數」。" })
+                  rows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無變數。點擊下方「新增變數」。" })
                 ] }),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs(
                   "div",
@@ -9651,7 +9436,7 @@ function ProfileEditorModal({ onClose }) {
                       /* @__PURE__ */ jsxRuntimeExports.jsx(
                         "button",
                         {
-                          onClick: () => table.addRow({ key: "", value: "", description: "", fallback: "" }),
+                          onClick: addRow,
                           style: {
                             padding: "6px 14px",
                             borderRadius: 4,
@@ -9665,21 +9450,20 @@ function ProfileEditorModal({ onClose }) {
                         }
                       ),
                       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1 } }),
-                      table.error && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#f87171", whiteSpace: "nowrap" }, children: table.error }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(DirtyBadge, { isDirty: table.isDirty, isStale: table.isStale }),
-                      table.isDirty && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: table.reset, style: ghostBtnStyle$1, title: "捨棄未儲存的變更", children: "還原" }),
+                      error && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#f87171", whiteSpace: "nowrap" }, children: error }),
                       /* @__PURE__ */ jsxRuntimeExports.jsx(
                         "button",
                         {
-                          onClick: () => void table.commit(),
-                          disabled: !table.isDirty,
+                          onClick: () => void handleSave(),
                           style: {
                             padding: "6px 16px",
                             borderRadius: 4,
                             border: "none",
                             fontSize: 12,
                             fontWeight: 600,
-                            ...table.isDirty ? { background: "#3b82f6", color: "#fff", cursor: "pointer" } : { background: "#334155", color: "#64748b", cursor: "default" }
+                            background: "#3b82f6",
+                            color: "#fff",
+                            cursor: "pointer"
                           },
                           children: "儲存"
                         }
@@ -9699,7 +9483,7 @@ function ProfileEditorModal({ onClose }) {
                   justifyContent: "flex-end",
                   flexShrink: 0
                 },
-                children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => void table.guardedRun(onClose), style: closeBtnStyle$1, children: "關閉" })
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, style: closeBtnStyle$1, children: "關閉" })
               }
             )
           ]
@@ -9740,15 +9524,6 @@ const renameActionBtnStyle = (color2) => ({
   borderRadius: 3,
   lineHeight: 1
 });
-const ghostBtnStyle$1 = {
-  padding: "6px 12px",
-  borderRadius: 4,
-  border: "1px solid #475569",
-  background: "transparent",
-  color: "#94a3b8",
-  cursor: "pointer",
-  fontSize: 12
-};
 const cellInputStyle$1 = {
   padding: "4px 8px",
   background: "#0f172a",
@@ -9769,6 +9544,14 @@ const closeBtnStyle$1 = {
   cursor: "pointer",
   fontSize: 13
 };
+function toEditRows(vars, envId) {
+  return vars.map((v2, i) => ({
+    key: v2.key,
+    value: (envId && v2.values[envId]) ?? "",
+    _rid: `src:${i}`,
+    _origKey: v2.key
+  }));
+}
 function ProjectEnvVarModal({ onClose }) {
   const {
     currentProject,
@@ -9788,34 +9571,42 @@ function ProjectEnvVarModal({ onClose }) {
   const [addingEnv, setAddingEnv] = reactExports.useState(false);
   const [newEnvName, setNewEnvName] = reactExports.useState("");
   const varSource = reactExports.useMemo(
-    () => envVars.map((v2) => ({ key: v2.key, value: (selectedEnv && v2.values[selectedEnv.id]) ?? "" })),
+    () => toEditRows(envVars, selectedEnv?.id ?? null),
     [envVars, selectedEnv]
   );
-  const table = useDraftRows({
-    source: varSource,
-    // The value column is per-environment, so the environment belongs in the reset key.
-    resetKey: currentProject && selectedEnv ? `${currentProject.id}:${selectedEnv.id}` : null,
-    onCommit: async (rows) => {
-      if (!selectedEnv) return;
-      await commitProjectEnvVars(
-        rows.map((r2) => ({
-          origKey: r2._origIndex !== null ? varSource[r2._origIndex]?.key ?? null : null,
-          key: r2.key.trim(),
-          value: r2.value
-        })),
-        selectedEnv.id
-      );
-    },
-    validate: (rows) => {
-      const keys = rows.map((r2) => r2.key.trim());
-      if (keys.some((k2) => !k2)) return "變數名稱不可為空";
-      const dup = keys.find((k2, i) => keys.indexOf(k2) !== i);
-      if (dup) return `變數名稱重複：${dup}`;
-      if (!keys.includes(DOMAIN_ENV_KEY)) return `${DOMAIN_ENV_KEY} 為保留變數，不可刪除或改名`;
-      return null;
-    },
-    guardLabel: "專案環境變數"
-  });
+  const [rows, setRows] = reactExports.useState([]);
+  const [error, setError] = reactExports.useState(null);
+  const tableKey = currentProject && selectedEnv ? `${currentProject.id}:${selectedEnv.id}` : "";
+  reactExports.useEffect(() => {
+    setRows(varSource);
+    setError(null);
+  }, [tableKey]);
+  const setCell = (rid, key, v2) => {
+    setRows((prev) => prev.map((r2) => r2._rid === rid ? { ...r2, [key]: v2 } : r2));
+  };
+  const addRow = () => {
+    setRows((prev) => [...prev, { key: "", value: "", _rid: `new:${v4()}`, _origKey: null }]);
+  };
+  const handleSave = async () => {
+    if (!selectedEnv) return;
+    const keys = rows.map((r2) => r2.key.trim());
+    if (keys.some((k2) => !k2)) return setError("變數名稱不可為空");
+    const dup = keys.find((k2, i) => keys.indexOf(k2) !== i);
+    if (dup) return setError(`變數名稱重複：${dup}`);
+    if (!keys.includes(DOMAIN_ENV_KEY)) return setError(`${DOMAIN_ENV_KEY} 為保留變數，不可刪除或改名`);
+    setError(null);
+    await commitProjectEnvVars(
+      rows.map((r2) => ({ origKey: r2._origKey, key: r2.key.trim(), value: r2.value })),
+      selectedEnv.id
+    );
+    setRows(toEditRows(useFlowStore.getState().currentProject?.envVars ?? [], selectedEnv.id));
+  };
+  const cellKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void handleSave();
+    }
+  };
   const startRenameEnv = () => {
     if (!selectedEnv) return;
     setEnvRenameValue(selectedEnv.name);
@@ -9849,7 +9640,7 @@ function ProjectEnvVarModal({ onClose }) {
     await deleteEnvironment(selectedEnv.id);
   };
   const handleDeleteVar = async (rid) => {
-    const key = table.rows.find((r2) => r2._rid === rid)?.key ?? "";
+    const key = rows.find((r2) => r2._rid === rid)?.key ?? "";
     const ok2 = await confirm({
       title: key ? `刪除環境變數 {{${key}}}？` : "刪除此變數？",
       detail: "此變數在所有環境上的值將一併移除，引用它的配置變數將無法解析。儲存後生效。",
@@ -9857,7 +9648,7 @@ function ProjectEnvVarModal({ onClose }) {
       danger: true
     });
     if (!ok2) return;
-    table.removeRow(rid);
+    setRows((prev) => prev.filter((r2) => r2._rid !== rid));
   };
   const gridCols2 = "1fr 1fr 32px";
   const envBtnStyle = {
@@ -9920,7 +9711,7 @@ function ProjectEnvVarModal({ onClose }) {
                   /* @__PURE__ */ jsxRuntimeExports.jsx(
                     "button",
                     {
-                      onClick: () => void table.guardedRun(onClose),
+                      onClick: onClose,
                       style: { background: "transparent", border: "none", color: "#64748b", fontSize: 18, cursor: "pointer" },
                       children: "✕"
                     }
@@ -9985,11 +9776,7 @@ function ProjectEnvVarModal({ onClose }) {
                       "select",
                       {
                         value: selectedEnv?.id ?? "",
-                        onChange: async (e) => {
-                          const next = e.target.value || null;
-                          if (!await ensureNoUnsavedDrafts()) return;
-                          setActiveEnvironment(next);
-                        },
+                        onChange: (e) => setActiveEnvironment(e.target.value || null),
                         style: {
                           background: "#0f172a",
                           border: "1px solid #334155",
@@ -10058,7 +9845,7 @@ function ProjectEnvVarModal({ onClose }) {
                   ]
                 }
               ),
-              table.rows.map((row) => {
+              rows.map((row) => {
                 const isDomain = row.key === DOMAIN_ENV_KEY;
                 return /* @__PURE__ */ jsxRuntimeExports.jsxs(
                   "div",
@@ -10076,8 +9863,8 @@ function ProjectEnvVarModal({ onClose }) {
                         {
                           value: row.key,
                           readOnly: isDomain,
-                          onChange: (e) => table.setCell(row._rid, "key", e.target.value),
-                          onKeyDown: table.fieldKeyDown,
+                          onChange: (e) => setCell(row._rid, "key", e.target.value),
+                          onKeyDown: cellKeyDown,
                           placeholder: "key",
                           style: isDomain ? { ...cellInputStyle, color: "#94a3b8", cursor: "not-allowed" } : cellInputStyle,
                           title: isDomain ? "domain 為保留變數，無法改名或刪除" : "變數名稱（配置以 {{key}} 引用）"
@@ -10087,8 +9874,8 @@ function ProjectEnvVarModal({ onClose }) {
                         "input",
                         {
                           value: row.value,
-                          onChange: (e) => table.setCell(row._rid, "value", e.target.value),
-                          onKeyDown: table.fieldKeyDown,
+                          onChange: (e) => setCell(row._rid, "value", e.target.value),
+                          onKeyDown: cellKeyDown,
                           placeholder: "(空)",
                           style: { ...cellInputStyle, borderColor: "#166534" }
                         }
@@ -10123,13 +9910,13 @@ function ProjectEnvVarModal({ onClose }) {
                   row._rid
                 );
               }),
-              table.rows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無環境變數。點擊下方「新增變數」。" })
+              rows.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "16px", color: "#64748b", fontSize: 12 }, children: "尚無環境變數。點擊下方「新增變數」。" })
             ] }) }),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: 12, borderTop: "1px solid #334155", flexShrink: 0, display: "flex", gap: 8, alignItems: "center" }, children: [
               environments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "button",
                 {
-                  onClick: () => table.addRow({ key: "", value: "" }),
+                  onClick: addRow,
                   style: {
                     padding: "6px 14px",
                     borderRadius: 4,
@@ -10143,26 +9930,25 @@ function ProjectEnvVarModal({ onClose }) {
                 }
               ),
               /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1 } }),
-              table.error && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#f87171", whiteSpace: "nowrap" }, children: table.error }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx(DirtyBadge, { isDirty: table.isDirty, isStale: table.isStale }),
-              table.isDirty && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: table.reset, style: ghostBtnStyle, title: "捨棄未儲存的變更", children: "還原" }),
+              error && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#f87171", whiteSpace: "nowrap" }, children: error }),
               /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "button",
                 {
-                  onClick: () => void table.commit(),
-                  disabled: !table.isDirty,
+                  onClick: () => void handleSave(),
                   style: {
                     padding: "6px 16px",
                     borderRadius: 4,
                     border: "none",
                     fontSize: 12,
                     fontWeight: 600,
-                    ...table.isDirty ? { background: "#3b82f6", color: "#fff", cursor: "pointer" } : { background: "#334155", color: "#64748b", cursor: "default" }
+                    background: "#3b82f6",
+                    color: "#fff",
+                    cursor: "pointer"
                   },
                   children: "儲存"
                 }
               ),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => void table.guardedRun(onClose), style: closeBtnStyle, children: "關閉" })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, style: closeBtnStyle, children: "關閉" })
             ] })
           ]
         }
@@ -10170,15 +9956,6 @@ function ProjectEnvVarModal({ onClose }) {
     }
   );
 }
-const ghostBtnStyle = {
-  padding: "6px 12px",
-  borderRadius: 4,
-  border: "1px solid #475569",
-  background: "transparent",
-  color: "#94a3b8",
-  cursor: "pointer",
-  fontSize: 12
-};
 const cellInputStyle = {
   padding: "4px 8px",
   background: "#0f172a",
@@ -19272,9 +19049,9 @@ function validateExtraction(allNodes, selectedIds) {
       error: exitNodes.length === 0 ? "選取的節點必須有唯一的出口節點" : "選取的節點有多個出口（請確保選取範圍底部只有一個節點連接到外部）"
     };
   }
-  const entryId2 = entryNodes[0].id;
+  const entryId = entryNodes[0].id;
   const visited = /* @__PURE__ */ new Set();
-  const queue = [entryId2];
+  const queue = [entryId];
   while (queue.length > 0) {
     const cur = queue.shift();
     if (visited.has(cur)) continue;
@@ -19290,7 +19067,7 @@ function validateExtraction(allNodes, selectedIds) {
       return { valid: false, error: "選取的節點必須是相互連接的（不能有孤立的節點）" };
     }
   }
-  return { valid: true, entryNodeId: entryId2, exitNodeId: exitNodes[0].id };
+  return { valid: true, entryNodeId: entryId, exitNodeId: exitNodes[0].id };
 }
 function extractSubflow(parentFlow, selectedIds, entryNodeId, exitNodeId, subFlowName, subFlowId, callFlowNodeId) {
   const allNodes = parentFlow.nodes;
@@ -19379,6 +19156,7 @@ function FlowCanvasInner() {
     deleteNodesOnly,
     updateNode,
     runWithoutHistory,
+    runAsOneHistoryStep,
     insertCallFlowBefore,
     appendCallFlowAfter,
     materializeLayout,
@@ -19521,10 +19299,9 @@ function FlowCanvasInner() {
     setEdges(rfEdges);
   }, [rfEdges, setEdges]);
   const onNodeClick = reactExports.useCallback(
-    async (_, node) => {
+    (_, node) => {
       if (node.id.startsWith("group:") || node.id.startsWith("groupbox:")) return;
       if (selectedNodeIds.size <= 1) {
-        if (!await ensureNoUnsavedDrafts()) return;
         selectNode(node.id);
       }
     },
@@ -19550,12 +19327,12 @@ function FlowCanvasInner() {
               if (c.id.startsWith("group:")) {
                 const gid = c.id.slice("group:".length);
                 const cf2 = useFlowStore.getState().currentFlow;
-                const entryId2 = cf2 ? getGroupBoundary(cf2.nodes, gid)?.entryId : void 0;
-                if (!entryId2) {
+                const entryId = cf2 ? getGroupBoundary(cf2.nodes, gid)?.entryId : void 0;
+                if (!entryId) {
                   dragPosRef.current.delete(c.id);
                   return;
                 }
-                targetId = entryId2;
+                targetId = entryId;
               }
               updateNode(targetId, { position: pos });
               dragPosRef.current.delete(c.id);
@@ -19577,10 +19354,9 @@ function FlowCanvasInner() {
   const onSelectionChange = reactExports.useCallback(({ nodes: selNodes }) => {
     setSelectedNodeIds(new Set(selNodes.map((n2) => n2.id).filter((id2) => !id2.startsWith("group"))));
   }, []);
-  const onPaneClick = reactExports.useCallback(async () => {
+  const onPaneClick = reactExports.useCallback(() => {
     setContextMenu(null);
     setPaneMenu(null);
-    if (!await ensureNoUnsavedDrafts()) return;
     selectNode(null);
     setSelectedNodeIds(/* @__PURE__ */ new Set());
   }, [selectNode]);
@@ -19594,10 +19370,9 @@ function FlowCanvasInner() {
     [screenToFlowPosition]
   );
   const onNodeContextMenu = reactExports.useCallback(
-    async (event, node) => {
+    (event, node) => {
       event.preventDefault();
       if (node.id.startsWith("group:") || node.id.startsWith("groupbox:")) return;
-      if (!await ensureNoUnsavedDrafts()) return;
       selectNode(node.id);
       setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
     },
@@ -19719,8 +19494,10 @@ function FlowCanvasInner() {
           currentCaptureAs: contextNode?.action.captureAs,
           onCaptureAsVar: async (varName) => {
             if (!contextNode) return;
-            updateNode(contextNode.id, {
-              action: { ...contextNode.action, captureAs: varName }
+            runWithoutHistory(() => {
+              updateNode(contextNode.id, {
+                action: { ...contextNode.action, captureAs: varName }
+              });
             });
             const updated = useFlowStore.getState().currentFlow;
             if (updated) await window.electronAPI.saveFlow(updated);
@@ -19733,7 +19510,7 @@ function FlowCanvasInner() {
           onGroup: handleGroupClick,
           onDisconnect: async () => {
             const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId];
-            ids.forEach((id2) => disconnectNode(id2));
+            runAsOneHistoryStep(() => ids.forEach((id2) => disconnectNode(id2)));
             const updated = useFlowStore.getState().currentFlow;
             if (updated) await window.electronAPI.saveFlow(updated);
           },
@@ -19748,12 +19525,14 @@ function FlowCanvasInner() {
         targetNodeId: callFlowModal.targetNodeId,
         onClose: () => setCallFlowModal(null),
         onConfirm: async (callFlowAction) => {
-          if (callFlowModal.mode === "insertBefore") {
-            insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction);
-            relayoutAll();
-          } else {
-            appendCallFlowAfter(callFlowModal.targetNodeId, callFlowAction);
-          }
+          runAsOneHistoryStep(() => {
+            if (callFlowModal.mode === "insertBefore") {
+              insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction);
+              relayoutAll();
+            } else {
+              appendCallFlowAfter(callFlowModal.targetNodeId, callFlowAction);
+            }
+          });
           setCallFlowModal(null);
           const updated = useFlowStore.getState().currentFlow;
           if (updated) await window.electronAPI.saveFlow(updated).catch(console.error);
@@ -19896,7 +19675,9 @@ function FlowCanvasInner() {
         onNodesDelete: () => {
         },
         onEdgesDelete: (edgesToDelete) => {
-          edgesToDelete.forEach((e) => disconnectNodes(e.source, e.target));
+          runAsOneHistoryStep(() => {
+            edgesToDelete.forEach((e) => disconnectNodes(e.source, e.target));
+          });
           const updated = useFlowStore.getState().currentFlow;
           if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
         },
@@ -19936,7 +19717,7 @@ function FlowCanvas() {
   return /* @__PURE__ */ jsxRuntimeExports.jsx(ReactFlowProvider, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(FlowCanvasInner, {}) });
 }
 function FlowList() {
-  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, duplicateProject, renameCurrentFlow } = useFlowStore();
+  const { flows, currentFlow, projects, addActionNode, updateNode, runAsOneHistoryStep, assignFlowToProject, createProject, deleteProject, renameProject, duplicateProject, renameCurrentFlow } = useFlowStore();
   const { refreshFlowList, refreshProjectList, openFlow, deleteCurrentFlow } = useFlowManager();
   const [contextMenu, setContextMenu] = reactExports.useState(null);
   const [projectMenu, setProjectMenu] = reactExports.useState(null);
@@ -20540,8 +20321,10 @@ function FlowList() {
             onConfirm: async (callFlowAction) => {
               const xMax = currentFlow.nodes.reduce((mx, n2) => Math.max(mx, n2.position.x), 0);
               const yMax = currentFlow.nodes.reduce((my, n2) => Math.max(my, n2.position.y), 0);
-              addActionNode(callFlowAction, null);
-              updateNode(callFlowAction.id, { position: { x: xMax + 300, y: yMax } });
+              runAsOneHistoryStep(() => {
+                addActionNode(callFlowAction, null);
+                updateNode(callFlowAction.id, { position: { x: xMax + 300, y: yMax } });
+              });
               setAddSubFlowFlowId(null);
               const updated = useFlowStore.getState().currentFlow;
               if (updated) await window.electronAPI.saveFlow(updated).catch(console.error);
@@ -20947,86 +20730,71 @@ function VariableList() {
     }
   );
 }
-function draftEquals(a, b) {
-  if (a.desc !== b.desc || a.selector !== b.selector || a.locatorExpr !== b.locatorExpr || a.value !== b.value || a.code !== b.code) {
-    return false;
-  }
-  const ak2 = Object.keys(a.profileMapping);
-  const bk2 = Object.keys(b.profileMapping);
-  if (ak2.length !== bk2.length) return false;
-  return ak2.every((k2) => a.profileMapping[k2] === b.profileMapping[k2]);
-}
 function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode } = useFlowStore();
   const selectedNode = currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
   const [subFlowProfiles, setSubFlowProfiles] = reactExports.useState([]);
   const [subFlowLoading, setSubFlowLoading] = reactExports.useState(false);
-  const source = reactExports.useMemo(
-    () => ({
-      desc: selectedNode?.action.description ?? "",
-      selector: selectedNode?.action.selector ?? "",
-      locatorExpr: selectedNode?.action.locatorExpr ?? "",
-      value: selectedNode?.action.value ?? "",
-      code: selectedNode?.action.code ?? "",
-      profileMapping: selectedNode?.action.subFlowProfileMapping ?? {}
-    }),
-    [selectedNode]
-  );
-  const commitNode = reactExports.useCallback(
-    async (v2) => {
-      if (!selectedNodeId) return;
-      const node = useFlowStore.getState().currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
-      if (!node) return;
-      const isCallFlow2 = node.action.type === "callFlow";
-      let callFlowUpdates = {};
-      if (isCallFlow2) {
-        const keys = Object.keys(v2.profileMapping);
-        if (keys.length === 1) {
-          const subProfileId = v2.profileMapping[keys[0]] ?? subFlowProfiles[0]?.id ?? null;
-          const subProfileName = subFlowProfiles.find((p2) => p2.id === subProfileId)?.name;
-          callFlowUpdates = {
-            subFlowProfileMapping: v2.profileMapping,
-            ...subProfileId ? { subFlowProfileId: subProfileId, subFlowProfileName: subProfileName } : {}
-          };
-        } else {
-          callFlowUpdates = { subFlowProfileMapping: v2.profileMapping };
-        }
+  const [desc, setDesc] = reactExports.useState("");
+  const [selector2, setSelector] = reactExports.useState("");
+  const [locatorExpr, setLocatorExpr] = reactExports.useState("");
+  const [value, setValue] = reactExports.useState("");
+  const [code, setCode] = reactExports.useState("");
+  const [profileMapping, setProfileMapping] = reactExports.useState({});
+  reactExports.useEffect(() => {
+    const node = useFlowStore.getState().currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
+    setDesc(node?.action.description ?? "");
+    setSelector(node?.action.selector ?? "");
+    setLocatorExpr(node?.action.locatorExpr ?? "");
+    setValue(node?.action.value ?? "");
+    setCode(node?.action.code ?? "");
+    setProfileMapping(node?.action.subFlowProfileMapping ?? {});
+  }, [selectedNodeId]);
+  const saveNode = reactExports.useCallback(async () => {
+    if (!selectedNodeId) return;
+    const node = useFlowStore.getState().currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
+    if (!node) return;
+    const isCallFlow2 = node.action.type === "callFlow";
+    let callFlowUpdates = {};
+    if (isCallFlow2) {
+      const keys = Object.keys(profileMapping);
+      if (keys.length === 1) {
+        const subProfileId = profileMapping[keys[0]] ?? subFlowProfiles[0]?.id ?? null;
+        const subProfileName = subFlowProfiles.find((p2) => p2.id === subProfileId)?.name;
+        callFlowUpdates = {
+          subFlowProfileMapping: profileMapping,
+          ...subProfileId ? { subFlowProfileId: subProfileId, subFlowProfileName: subProfileName } : {}
+        };
+      } else {
+        callFlowUpdates = { subFlowProfileMapping: profileMapping };
       }
-      updateNode(node.id, {
-        action: {
-          ...node.action,
-          description: v2.desc,
-          selector: v2.selector,
-          // Written verbatim so a cleared field actually clears. Only include locatorExpr for
-          // nodes that already have one, so nodes without a locator don't gain an empty string.
-          ...node.action.locatorExpr !== void 0 ? { locatorExpr: v2.locatorExpr } : {},
-          value: v2.value,
-          // Multi-select nodes keep values[] in sync with the comma-joined value field
-          ...node.action.values ? { values: v2.value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
-          // Upload nodes do the same for filePaths[], which replay/export read first
-          ...node.action.type === "upload" ? { filePaths: v2.value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
-          ...node.action.type === "code" ? { code: v2.code } : {},
-          ...callFlowUpdates
-        }
-      });
-      const updated = useFlowStore.getState().currentFlow;
-      if (updated) await window.electronAPI.saveFlow(updated);
-    },
-    [selectedNodeId, subFlowProfiles, updateNode]
-  );
-  const draft = useDraftForm({
-    source,
-    // Keyed on the node ID only — a new node OBJECT for the same node (drag, ACTION_UPDATED)
-    // must not wipe in-progress typing.
-    resetKey: selectedNodeId,
-    onCommit: commitNode,
-    equals: draftEquals,
-    guardLabel: "節點屬性"
-  });
-  const { values, setField, patch, isDirty, isStale, commit, reset, fieldKeyDown } = draft;
-  const { desc, selector: selector2, locatorExpr, value, code, profileMapping } = values;
-  const draftRef = React$2.useRef({ isDirty, patch });
-  draftRef.current = { isDirty, patch };
+    }
+    updateNode(node.id, {
+      action: {
+        ...node.action,
+        description: desc,
+        selector: selector2,
+        // Written verbatim so a cleared field actually clears. Only include locatorExpr for
+        // nodes that already have one, so nodes without a locator don't gain an empty string.
+        ...node.action.locatorExpr !== void 0 ? { locatorExpr } : {},
+        value,
+        // Multi-select nodes keep values[] in sync with the comma-joined value field
+        ...node.action.values ? { values: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+        // Upload nodes do the same for filePaths[], which replay/export read first
+        ...node.action.type === "upload" ? { filePaths: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+        ...node.action.type === "code" ? { code } : {},
+        ...callFlowUpdates
+      }
+    });
+    const updated = useFlowStore.getState().currentFlow;
+    if (updated) await window.electronAPI.saveFlow(updated);
+  }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector2, locatorExpr, value, code, profileMapping]);
+  const fieldKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void saveNode();
+    }
+  };
   reactExports.useEffect(() => {
     if (selectedNode?.action.type !== "callFlow") {
       setSubFlowProfiles([]);
@@ -21050,15 +20818,14 @@ function PropertyPanel() {
           initialMapping[pp.id] = legacySubProfileId ?? defaultSubProfileId;
         }
       });
-      if (!draftRef.current.isDirty) draftRef.current.patch({ profileMapping: initialMapping });
+      setProfileMapping(initialMapping);
       setSubFlowLoading(false);
     });
   }, [selectedNodeId, selectedNode?.action.type, selectedNode?.action.subFlowId]);
   if (!currentFlow) return null;
-  const saveNode = () => void commit();
   const pickFiles = async () => {
     const picked = await window.electronAPI.pickFiles(true);
-    if (picked.length) setField("value", picked.join(", "));
+    if (picked.length) setValue(picked.join(", "));
   };
   const parentProfiles = currentFlow.profiles ?? [];
   const isCallFlow = selectedNode?.action.type === "callFlow";
@@ -21079,7 +20846,7 @@ function PropertyPanel() {
           "input",
           {
             value: desc,
-            onChange: (e) => setField("desc", e.target.value),
+            onChange: (e) => setDesc(e.target.value),
             onKeyDown: fieldKeyDown,
             style: inputStyle
           }
@@ -21088,7 +20855,7 @@ function PropertyPanel() {
           "input",
           {
             value: selector2,
-            onChange: (e) => setField("selector", e.target.value),
+            onChange: (e) => setSelector(e.target.value),
             onKeyDown: fieldKeyDown,
             style: inputStyle
           }
@@ -21098,7 +20865,7 @@ function PropertyPanel() {
             "input",
             {
               value: locatorExpr,
-              onChange: (e) => setField("locatorExpr", e.target.value),
+              onChange: (e) => setLocatorExpr(e.target.value),
               onKeyDown: fieldKeyDown,
               style: { ...inputStyle, width: 260 }
             }
@@ -21114,7 +20881,7 @@ function PropertyPanel() {
               "input",
               {
                 value,
-                onChange: (e) => setField("value", e.target.value),
+                onChange: (e) => setValue(e.target.value),
                 onKeyDown: fieldKeyDown,
                 style: inputStyle
               }
@@ -21132,7 +20899,7 @@ function PropertyPanel() {
             "textarea",
             {
               value: code,
-              onChange: (e) => setField("code", e.target.value),
+              onChange: (e) => setCode(e.target.value),
               spellCheck: false,
               style: {
                 display: "block",
@@ -21207,10 +20974,10 @@ function PropertyPanel() {
                     "select",
                     {
                       value: profileMapping[pp.id] ?? (subFlowProfiles[0]?.id ?? ""),
-                      onChange: (e) => setField("profileMapping", {
-                        ...profileMapping,
+                      onChange: (e) => setProfileMapping((prev) => ({
+                        ...prev,
                         [pp.id]: e.target.value || null
-                      }),
+                      })),
                       style: {
                         background: "#0f172a",
                         color: "#e2e8f0",
@@ -21230,22 +20997,7 @@ function PropertyPanel() {
             ))
           ] })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10 }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(DirtyBadge, { isDirty, isStale }),
-          isDirty && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: reset, style: revertBtnStyle, title: "捨棄未儲存的變更", children: "還原" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              onClick: saveNode,
-              disabled: !isDirty,
-              style: {
-                ...saveBtnStyle,
-                ...isDirty ? {} : { background: "#334155", color: "#64748b", cursor: "default" }
-              },
-              children: "儲存"
-            }
-          )
-        ] })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "center", gap: 10 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => void saveNode(), style: saveBtnStyle, children: "儲存" }) })
       ] }) : null })
     }
   );
@@ -21276,15 +21028,6 @@ const pickBtnStyle = {
   fontSize: 12,
   whiteSpace: "nowrap"
 };
-const revertBtnStyle = {
-  padding: "5px 12px",
-  borderRadius: 5,
-  border: "1px solid #475569",
-  background: "transparent",
-  color: "#94a3b8",
-  cursor: "pointer",
-  fontSize: 12
-};
 const saveBtnStyle = {
   padding: "5px 16px",
   borderRadius: 5,
@@ -21296,7 +21039,7 @@ const saveBtnStyle = {
   fontWeight: 600
 };
 function SessionVarList() {
-  const { currentFlow, updateNode } = useFlowStore();
+  const { currentFlow, updateNode, runWithoutHistory } = useFlowStore();
   const [copiedName, setCopiedName] = reactExports.useState(null);
   const [subFlowVars, setSubFlowVars] = reactExports.useState([]);
   const sessionVars = (currentFlow?.nodes ?? []).filter((n2) => !!n2.action.captureAs).map((n2) => ({
@@ -21345,7 +21088,9 @@ function SessionVarList() {
       danger: true
     });
     if (!ok2) return;
-    updateNode(nodeId, { action: { ...node.action, captureAs: void 0 } });
+    runWithoutHistory(() => {
+      updateNode(nodeId, { action: { ...node.action, captureAs: void 0 } });
+    });
     const updated = useFlowStore.getState().currentFlow;
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
   };

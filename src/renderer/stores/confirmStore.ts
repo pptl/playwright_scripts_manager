@@ -82,21 +82,3 @@ export async function confirm(opts: {
   })
   return answer === CONFIRM_OK
 }
-
-export type DiscardChoice = 'save' | 'discard' | 'cancel'
-
-/** Three-way prompt used by the unsaved-changes guard. */
-export async function confirmDiscard(label: string): Promise<DiscardChoice> {
-  const answer = await useConfirmStore.getState().ask({
-    title: '尚有未儲存的變更',
-    message: `${label} 有尚未儲存的編輯內容。`,
-    detail: '要先儲存再繼續嗎？',
-    actions: [
-      { id: 'cancel', label: '取消', tone: 'ghost' },
-      { id: 'discard', label: '捨棄變更', tone: 'danger' },
-      { id: 'save', label: '儲存', tone: 'primary' },
-    ],
-    defaultActionId: 'save',
-  })
-  return (answer as DiscardChoice) ?? 'cancel'
-}

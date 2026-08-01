@@ -8,7 +8,7 @@ import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN } from '@shared/ty
 import { confirm } from '../../stores/confirmStore'
 
 export function FlowList() {
-  const { flows, currentFlow, projects, addActionNode, updateNode, assignFlowToProject, createProject, deleteProject, renameProject, duplicateProject, renameCurrentFlow } = useFlowStore()
+  const { flows, currentFlow, projects, addActionNode, updateNode, runAsOneHistoryStep, assignFlowToProject, createProject, deleteProject, renameProject, duplicateProject, renameCurrentFlow } = useFlowStore()
   const { refreshFlowList, refreshProjectList, openFlow, deleteCurrentFlow } = useFlowManager()
 
   const [contextMenu, setContextMenu] = useState<{ flowId: string; x: number; y: number } | null>(null)
@@ -571,8 +571,11 @@ export function FlowList() {
           onConfirm={async (callFlowAction: Action) => {
             const xMax = currentFlow.nodes.reduce((mx, n) => Math.max(mx, n.position.x), 0)
             const yMax = currentFlow.nodes.reduce((my, n) => Math.max(my, n.position.y), 0)
-            addActionNode(callFlowAction, null)
-            updateNode(callFlowAction.id, { position: { x: xMax + 300, y: yMax } })
+            // Add + position is one gesture — batch so a single Ctrl+Z reverses both.
+            runAsOneHistoryStep(() => {
+              addActionNode(callFlowAction, null)
+              updateNode(callFlowAction.id, { position: { x: xMax + 300, y: yMax } })
+            })
             setAddSubFlowFlowId(null)
             const updated = useFlowStore.getState().currentFlow
             if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)

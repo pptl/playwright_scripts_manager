@@ -33,7 +33,6 @@ import type { Action, Flow } from '@shared/types'
 import { computeTreeLayout } from '../../utils/treeLayout'
 import { validateExtraction, extractSubflow } from '../../utils/subflowExtraction'
 import { getGroupBoundary, groupBoxRect } from '../../utils/groups'
-import { ensureNoUnsavedDrafts } from '../../hooks/useDraftForm'
 
 const nodeTypes = { actionNode: ActionNode, groupNode: GroupNode, groupBox: GroupBox }
 const edgeTypes = { branchEdge: BranchEdge }
@@ -50,6 +49,7 @@ function FlowCanvasInner() {
     deleteNodesOnly,
     updateNode,
     runWithoutHistory,
+    runAsOneHistoryStep,
     insertCallFlowBefore,
     appendCallFlowAfter,
     materializeLayout,
@@ -225,13 +225,11 @@ function FlowCanvasInner() {
   }, [rfEdges, setEdges])
 
   const onNodeClick: NodeMouseHandler = useCallback(
-    async (_, node) => {
+    (_, node) => {
       // Group nodes/boxes handle their own clicks (expand/collapse); ignore here
       if (node.id.startsWith('group:') || node.id.startsWith('groupbox:')) return
       // Only update property panel target on single-select clicks
       if (selectedNodeIds.size <= 1) {
-        // Switching nodes swaps out the PropertyPanel draft — prompt if it has unsaved edits.
-        if (!(await ensureNoUnsavedDrafts())) return
         selectNode(node.id)
       }
     },
@@ -303,11 +301,9 @@ function FlowCanvasInner() {
     setSelectedNodeIds(new Set(selNodes.map((n) => n.id).filter((id) => !id.startsWith('group'))))
   }, [])
 
-  const onPaneClick = useCallback(async () => {
+  const onPaneClick = useCallback(() => {
     setContextMenu(null)
     setPaneMenu(null)
-    // Deselecting unmounts the PropertyPanel fields — prompt before dropping a draft.
-    if (!(await ensureNoUnsavedDrafts())) return
     selectNode(null)
     setSelectedNodeIds(new Set())
   }, [selectNode])
@@ -323,11 +319,10 @@ function FlowCanvasInner() {
   )
 
   const onNodeContextMenu = useCallback(
-    async (event: React.MouseEvent, node: Node) => {
+    (event: React.MouseEvent, node: Node) => {
       event.preventDefault()
       // No context menu on group nodes/boxes — use their inline controls
       if (node.id.startsWith('group:') || node.id.startsWith('groupbox:')) return
-      if (!(await ensureNoUnsavedDrafts())) return
       selectNode(node.id)
       setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY })
     },
@@ -466,8 +461,12 @@ function FlowCanvasInner() {
             currentCaptureAs={contextNode?.action.captureAs}
             onCaptureAsVar={async (varName) => {
               if (!contextNode) return
-              updateNode(contextNode.id, {
-                action: { ...contextNode.action, captureAs: varName },
+              // Session variables are config — kept out of undo history so the canvas and the
+              // SessionVarList 🗑 behave the same way (see flowStore's history header comment).
+              runWithoutHistory(() => {
+                updateNode(contextNode.id, {
+                  action: { ...contextNode.action, captureAs: varName },
+                })
               })
               const updated = useFlowStore.getState().currentFlow
               if (updated) await window.electronAPI.saveFlow(updated)
@@ -480,7 +479,8 @@ function FlowCanvasInner() {
             onGroup={handleGroupClick}
             onDisconnect={async () => {
               const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId]
-              ids.forEach((id) => disconnectNode(id))
+              // One gesture = one Ctrl+Z, however many nodes were selected.
+              runAsOneHistoryStep(() => ids.forEach((id) => disconnectNode(id)))
               const updated = useFlowStore.getState().currentFlow
               if (updated) await window.electronAPI.saveFlow(updated)
             }}
@@ -494,14 +494,17 @@ function FlowCanvasInner() {
           targetNodeId={callFlowModal.targetNodeId}
           onClose={() => setCallFlowModal(null)}
           onConfirm={async (callFlowAction: Action) => {
-            if (callFlowModal.mode === 'insertBefore') {
-              insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction)
-              // Inserting (esp. before the root) shifts the tree; re-layout so the
-              // new node and its subtree don't overlap other flows on the canvas.
-              relayoutAll()
-            } else {
-              appendCallFlowAfter(callFlowModal.targetNodeId, callFlowAction)
-            }
+            // Insert + relayout is one gesture — batch so a single Ctrl+Z reverses both.
+            runAsOneHistoryStep(() => {
+              if (callFlowModal.mode === 'insertBefore') {
+                insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction)
+                // Inserting (esp. before the root) shifts the tree; re-layout so the
+                // new node and its subtree don't overlap other flows on the canvas.
+                relayoutAll()
+              } else {
+                appendCallFlowAfter(callFlowModal.targetNodeId, callFlowAction)
+              }
+            })
             setCallFlowModal(null)
             const updated = useFlowStore.getState().currentFlow
             if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
@@ -637,7 +640,10 @@ function FlowCanvasInner() {
         onConnect={onConnect}
         onNodesDelete={() => { /* no-op: node deletion only via context menu */ }}
         onEdgesDelete={(edgesToDelete) => {
-          edgesToDelete.forEach((e) => disconnectNodes(e.source, e.target))
+          // One gesture = one Ctrl+Z, however many edges were selected.
+          runAsOneHistoryStep(() => {
+            edgesToDelete.forEach((e) => disconnectNodes(e.source, e.target))
+          })
           const updated = useFlowStore.getState().currentFlow
           if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
         }}

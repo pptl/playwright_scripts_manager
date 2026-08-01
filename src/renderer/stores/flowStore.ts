@@ -12,27 +12,32 @@ const NODE_START_X = 300
 const HISTORY_LIMIT = 50
 
 /**
- * One undo step. Flow edits and project edits share a single chronological stack so Ctrl+Z
- * reverses the user's actions in true order regardless of which entity they touched.
- * Each entry holds the PREVIOUS state of the entity that changed.
+ * Undo/redo covers the CANVAS NODE GRAPH ONLY — adding/deleting nodes, connecting and
+ * disconnecting, grouping, relayout, and PropertyPanel edits. Each entry is the previous
+ * `currentFlow`.
  *
- * Not covered (they create or delete whole files, so there is no in-memory state to restore):
- * createProject / deleteProject / duplicateProject, and renameProject / assignFlowToProject
- * when they target a project or flow that is not the one currently open. Those are guarded by
- * a confirm dialog instead.
+ * Configuration is deliberately NOT undoable: session variables (`captureAs`), environment
+ * profiles, project environments and project env vars, flow rename, and project assignment.
+ * Those live off-canvas, so a Ctrl+Z would silently revert data the user cannot see —
+ * including a whole variable table at once, since the commit actions are atomic. They are
+ * protected by the draft 還原 button and delete confirmations instead.
+ *
+ * **Rule: any store action that writes flow CONFIG must go through `setSilently`.** The
+ * `graphChanged` check in the subscription is only a safety net for config-only writes; the
+ * profile actions also rewrite `nodes` (callFlow `subFlowProfileMapping`) and so cannot be
+ * distinguished structurally.
  */
-type HistoryEntry =
-  | { kind: 'flow'; flow: Flow }
-  | { kind: 'project'; project: Project }
-
-const entryId = (e: HistoryEntry) => (e.kind === 'flow' ? e.flow.id : e.project.id)
 /** Guards the history subscription so undo/redo restores don't get re-recorded. */
 let isTimeTraveling = false
 /** Depth counter (not a boolean) so nested suppression can't be lifted early by an inner scope. */
 let suppressDepth = 0
 /** When >0, mutations are not pushed onto the undo stack (node drags, layout materialization,
- *  group collapse — all of which would otherwise flood or pollute history). */
+ *  group collapse, and every config write — all of which would otherwise flood or pollute it). */
 const historySuppressed = () => suppressDepth > 0
+
+/** True when the node graph itself actually changed between two flow snapshots. */
+const graphChanged = (a: Flow, b: Flow) =>
+  a.nodes !== b.nodes || a.rootNodeId !== b.rootNodeId || a.groups !== b.groups
 
 interface FlowStore {
   // State
@@ -47,15 +52,20 @@ interface FlowStore {
   recordingHeadId: string | null
   replaySpeed: number
 
-  // Undo/redo history (interleaved flow + project snapshots; cleared on flow switch)
-  past: HistoryEntry[]
-  future: HistoryEntry[]
-  /** Restore the previous snapshot (flow or project). No-op if nothing to undo. */
+  // Undo/redo history — canvas node-graph snapshots only; cleared on flow switch
+  past: Flow[]
+  future: Flow[]
+  /** Restore the previous node-graph snapshot. No-op if nothing to undo. */
   undo: () => void
   /** Re-apply the most recently undone snapshot. No-op if nothing to redo. */
   redo: () => void
-  /** Run flow mutations without recording an undo snapshot (e.g. node drag). */
+  /** Run flow mutations without recording an undo snapshot (e.g. node drag, config writes).
+   *  **Synchronous only** — an async fn would drop suppression at the first await. */
   runWithoutHistory: (fn: () => void) => void
+  /** Run several node-graph mutations as ONE undo step, so a single user gesture costs a
+   *  single Ctrl+Z (multi-select disconnect, multi-edge delete, insert-callFlow+relayout).
+   *  **Synchronous only** — keep any `await saveFlow(...)` outside the callback. */
+  runAsOneHistoryStep: (fn: () => void) => void
 
   // Flow management
   setFlows: (flows: FlowStore['flows']) => void
@@ -210,40 +220,9 @@ function migrateDomainsToProfiles(flow: Flow): FlowProfile[] {
   return []
 }
 
-/** Current state of the entity a history entry refers to, as an entry itself. */
-function snapshotOf(kind: HistoryEntry['kind'], state: FlowStore): HistoryEntry | null {
-  if (kind === 'flow') return state.currentFlow ? { kind: 'flow', flow: state.currentFlow } : null
-  return state.currentProject ? { kind: 'project', project: state.currentProject } : null
-}
-
-/** The state patch that restores a history entry. */
-function applyEntry(entry: HistoryEntry, state: FlowStore): Partial<FlowStore> {
-  if (entry.kind === 'flow') {
-    return { currentFlow: entry.flow, selectedNodeId: null }
-  }
-  // Undoing an "add environment" can leave activeEnvironmentId pointing at an environment
-  // that no longer exists, which blanks every env dropdown — revalidate it.
-  const envs = entry.project.environments
-  const envStillValid = !!state.activeEnvironmentId && envs.some((e) => e.id === state.activeEnvironmentId)
-  return {
-    currentProject: entry.project,
-    activeEnvironmentId: envStillValid ? state.activeEnvironmentId : (envs[0]?.id ?? null),
-  }
-}
-
-/** Write a restored entry back to disk (and refresh the project list so names follow). */
-async function persistEntry(entry: HistoryEntry): Promise<void> {
-  if (entry.kind === 'flow') {
-    await window.electronAPI.saveFlow(entry.flow).catch(console.error)
-    return
-  }
-  await window.electronAPI.saveProject(entry.project).catch(console.error)
-  const list = await window.electronAPI.listProjects().catch(() => null)
-  if (list) useFlowStore.setState({ projects: list })
-}
-
 /** Apply a state change without recording an undo entry. Used by actions that are pure
- *  view state (group collapse) or automatic bookkeeping (one-time layout materialization). */
+ *  view state (group collapse), automatic bookkeeping (one-time layout materialization),
+ *  or any write to flow CONFIG (profiles, name, project assignment). */
 function setSilently(partial: Partial<FlowStore>) {
   suppressDepth++
   try {
@@ -323,39 +302,36 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setRecordingHead: (id) => set({ recordingHeadId: id }),
 
   undo: () => {
-    const state = get()
-    const { past, future } = state
+    const { past, future, currentFlow } = get()
     if (past.length === 0) return
-    const entry = past[past.length - 1]
-    const current = snapshotOf(entry.kind, state)
-    // The entity the entry belongs to is no longer the open one — refuse rather than
-    // restoring a snapshot over a different flow/project.
-    if (!current || entryId(current) !== entryId(entry)) return
+    const previous = past[past.length - 1]
+    // The snapshot belongs to a different flow — refuse rather than restoring it over this one.
+    if (!currentFlow || currentFlow.id !== previous.id) return
     isTimeTraveling = true
     set({
       past: past.slice(0, -1),
-      future: [current, ...future],
-      ...applyEntry(entry, state),
+      future: [currentFlow, ...future],
+      currentFlow: previous,
+      selectedNodeId: null,
     })
     isTimeTraveling = false
-    void persistEntry(entry)
+    window.electronAPI.saveFlow(previous).catch(console.error)
   },
 
   redo: () => {
-    const state = get()
-    const { past, future } = state
+    const { past, future, currentFlow } = get()
     if (future.length === 0) return
-    const entry = future[0]
-    const current = snapshotOf(entry.kind, state)
-    if (!current || entryId(current) !== entryId(entry)) return
+    const next = future[0]
+    if (!currentFlow || currentFlow.id !== next.id) return
     isTimeTraveling = true
     set({
-      past: [...past, current].slice(-HISTORY_LIMIT),
+      past: [...past, currentFlow].slice(-HISTORY_LIMIT),
       future: future.slice(1),
-      ...applyEntry(entry, state),
+      currentFlow: next,
+      selectedNodeId: null,
     })
     isTimeTraveling = false
-    void persistEntry(entry)
+    window.electronAPI.saveFlow(next).catch(console.error)
   },
 
   runWithoutHistory: (fn) => {
@@ -367,11 +343,30 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
   },
 
+  runAsOneHistoryStep: (fn) => {
+    const before = get().currentFlow
+    suppressDepth++
+    try {
+      fn()
+    } finally {
+      suppressDepth--
+    }
+    const after = get().currentFlow
+    if (isTimeTraveling) return
+    const { isRecording, isReplaying } = get()
+    if (isRecording || isReplaying) return
+    if (!before || !after || before === after) return
+    if (before.id !== after.id) return
+    if (!graphChanged(before, after)) return
+    set((s) => ({ past: [...s.past, before].slice(-HISTORY_LIMIT), future: [] }))
+  },
+
+  // Flow metadata, not the node graph — not undoable (see header comment).
   renameCurrentFlow: async (name) => {
     const flow = get().currentFlow
     if (!flow) return
     const updatedFlow: Flow = { ...flow, name, updatedAt: new Date().toISOString() }
-    set({ currentFlow: updatedFlow })
+    setSilently({ currentFlow: updatedFlow })
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
   },
 
@@ -737,6 +732,11 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
 
   setActiveProfile: (id) => set({ activeProfileId: id }),
 
+  // ── Environment profiles ──────────────────────────────────
+  // All profile mutations use setSilently: profiles are off-canvas config and must never be
+  // reachable by Ctrl+Z. Note they also rewrite flow.nodes (callFlow subFlowProfileMapping),
+  // so the subscription's graphChanged net would NOT catch them — the suppression is required.
+
   addProfile: async (name) => {
     const flow = get().currentFlow
     if (!flow) return
@@ -769,7 +769,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       nodes: updatedNodes,
       updatedAt: new Date().toISOString(),
     }
-    set({ currentFlow: updatedFlow })
+    setSilently({ currentFlow: updatedFlow })
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
   },
 
@@ -783,7 +783,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       ),
       updatedAt: new Date().toISOString(),
     }
-    set({ currentFlow: updatedFlow })
+    setSilently({ currentFlow: updatedFlow })
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
   },
 
@@ -807,7 +807,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       nodes: updatedNodes,
       updatedAt: new Date().toISOString(),
     }
-    set({
+    setSilently({
       currentFlow: updatedFlow,
       activeProfileId: activeProfileId === id ? (updatedProfiles[0]?.id ?? null) : activeProfileId,
     })
@@ -852,7 +852,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       nodes: updatedNodes,
       updatedAt: new Date().toISOString(),
     }
-    set({ currentFlow: updatedFlow })
+    setSilently({ currentFlow: updatedFlow })
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
   },
 
@@ -893,7 +893,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       profiles: updatedProfiles,
       updatedAt: new Date().toISOString(),
     }
-    set({ currentFlow: updatedFlow })
+    // Atomic whole-table write — exactly the kind of invisible bulk change Ctrl+Z must not touch.
+    setSilently({ currentFlow: updatedFlow })
     await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
   },
 
@@ -1068,6 +1069,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     set({ projects: await window.electronAPI.listProjects() })
   },
 
+  // Project membership is flow metadata, not the node graph — not undoable.
   assignFlowToProject: async (flowId, projectId) => {
     const flowData = await window.electronAPI.getFlow(flowId)
     if (!flowData) return
@@ -1075,7 +1077,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     await window.electronAPI.saveFlow(updatedFlow)
     const { currentFlow } = get()
     if (currentFlow?.id === flowId) {
-      set({ currentFlow: updatedFlow })
+      setSilently({ currentFlow: updatedFlow })
     }
   },
 
@@ -1104,28 +1106,25 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   },
 }))
 
-// Record undo history whenever an edit replaces currentFlow or currentProject with a new
-// object. One subscription covers every mutator, since all edits update them immutably.
+// Record undo history whenever an edit replaces currentFlow with a new object. One
+// subscription covers every mutator, since all edits update currentFlow immutably.
+// currentProject is deliberately NOT watched — project environments and env vars are
+// off-canvas config and must never be reachable by Ctrl+Z (see the header comment).
 useFlowStore.subscribe((state, prev) => {
   if (isTimeTraveling || historySuppressed()) return
   if (state.isRecording || state.isReplaying) return // skip live capture
 
-  const entries: HistoryEntry[] = []
-
   const cf = state.currentFlow
   const pf = prev.currentFlow
-  // Same id required: a different id means the flow was switched, not edited.
-  if (cf && pf && cf !== pf && cf.id === pf.id) entries.push({ kind: 'flow', flow: pf })
+  if (!cf || !pf || cf === pf) return
+  if (cf.id !== pf.id) return // switched flows, not an edit
+  // Safety net: a config-only write (profiles / name / projectId / baseURL) can never enter
+  // history even if it forgot to use setSilently. Does NOT catch writes that touch both
+  // config and nodes — those still need explicit suppression.
+  if (!graphChanged(cf, pf)) return
 
-  const cp = state.currentProject
-  const pp = prev.currentProject
-  if (cp && pp && cp !== pp && cp.id === pp.id) entries.push({ kind: 'project', project: pp })
-
-  if (entries.length === 0) return
-  // No action currently mutates both in one set(); if one ever does, the two entries become
-  // two undo steps (a transaction id would be the fix).
   useFlowStore.setState((s) => ({
-    past: [...s.past, ...entries].slice(-HISTORY_LIMIT),
+    past: [...s.past, pf].slice(-HISTORY_LIMIT),
     future: [],
   }))
 })

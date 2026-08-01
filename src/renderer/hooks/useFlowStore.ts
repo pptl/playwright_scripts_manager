@@ -2,7 +2,6 @@ import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
 import { DEFAULT_PROJECT_ID, DEFAULT_DOMAIN, DOMAIN_ENV_KEY } from '@shared/types'
 import { flattenProjectEnvVars } from '@shared/variableResolver'
-import { ensureNoUnsavedDrafts } from './useDraftForm'
 
 export function useFlowManager() {
   const { setFlows, createFlow, setCurrentFlow } = useFlowStore()
@@ -19,8 +18,6 @@ export function useFlowManager() {
 
   const openFlow = useCallback(
     async (flowId: string) => {
-      // Switching flows discards every open draft — prompt before losing unsaved edits.
-      if (!(await ensureNoUnsavedDrafts())) return
       const flow = await window.electronAPI.loadFlow(flowId)
       if (!flow) return
       setCurrentFlow(flow)

@@ -3,6 +3,7 @@ import { join } from 'path'
 import { registerIpcHandlers } from './ipc/ipcHandlers'
 import { IPC_CHANNELS } from '../shared/types'
 import { loadSettings, hasWorkspace } from './storage/workspace'
+import { load as loadVault } from './security/vault'
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -59,6 +60,9 @@ app.whenReady().then(async () => {
   // Must precede the window: the renderer asks for the workspace on mount, and
   // storage throws until one is set.
   await loadSettings()
+  // Read the vault metadata (and try the remembered passphrase) before any IPC can run,
+  // so the locked-state guards are never answering from an unloaded state.
+  await loadVault()
 
   const win = createWindow()
   registerIpcHandlers(win)

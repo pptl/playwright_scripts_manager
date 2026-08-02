@@ -8,7 +8,9 @@ import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
 import { ProjectEnvVarModal } from '../ProjectEnvVar/ProjectEnvVarModal'
 import type { ExportConfig, TestFinishedPayload } from '../../../shared/types'
 import { DEFAULT_PROJECT_ID } from '../../../shared/types'
-import { flattenProjectEnvVars, resolveValue } from '../../../shared/variableResolver'
+import { useVault } from '../../hooks/useVault'
+import { useConfirmStore } from '../../stores/confirmStore'
+import { buildProfileVars, getEnvVars as envVarsFor, getSecretEnvKeys } from '../../utils/varMaps'
 
 const btn = (label: string, onClick: () => void, disabled = false, danger = false) => (
   <button
@@ -127,28 +129,31 @@ export function Toolbar() {
   }, [showEnvMenu])
 
   // Derive current profile info
+  const { hasVault, usable: vaultUsable, promptUnlock, lock: lockVault, openVaultDialog } = useVault()
+  const confirm = useConfirmStore((s) => s.ask)
+
   const profiles = currentFlow?.profiles ?? []
   const activeProfile = profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? null
   const activeProfileName = activeProfile?.name ?? '— 無配置 —'
   const isOverriding = activeProfile !== null && activeProfile !== profiles[0]
 
-  /** Active project's environment variables flattened for the active environment. */
-  function getEnvVars(): Record<string, string> {
-    return flattenProjectEnvVars(currentProject?.envVars, activeEnvironmentId)
-  }
+  const getEnvVars = (): Record<string, string> => envVarsFor(currentProject, activeEnvironmentId)
 
-  /** Build profileVars with env-aware resolution: envValues[activeEnvId] ?? value,
-   *  then resolve any {{envKey}} references against the active project's env vars. */
-  function getProfileVars(): Record<string, string> | undefined {
-    if (!activeProfile) return undefined
-    const envVars = getEnvVars()
-    return Object.fromEntries(
-      activeProfile.vars.map((v) => {
-        const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
-        return [v.key, resolveValue(raw, undefined, envVars)]
-      }),
-    )
-  }
+  const getProfileVars = (): Record<string, string> | undefined =>
+    buildProfileVars(activeProfile, activeEnvironmentId, getEnvVars(), getSecretEnvKeys(currentProject))
+
+  /** Everything replay / export / run needs, assembled the same way each time. */
+  const exportConfig = (): ExportConfig => ({
+    outputDir: '',
+    helperFunctions: false,
+    useTestStep: true,
+    profileVars: getProfileVars(),
+    activeProfileId: activeProfileId ?? undefined,
+    activeEnvironmentId: activeEnvironmentId ?? undefined,
+    envVars: getEnvVars(),
+    activeProjectId: currentProject?.id,
+    secretEnvKeys: getSecretEnvKeys(currentProject),
+  })
 
   useEffect(() => {
     const offOutput = window.electronAPI.onTestOutput((line) => {
@@ -183,38 +188,64 @@ export function Toolbar() {
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
   }
 
+  /** Blocked-by-lock errors are worth a dialog rather than an alert — the user can act on them. */
+  const isLockedError = (err: unknown): boolean => String(err).includes('保險庫已鎖定')
+
   const handleExport = async () => {
     if (!currentFlow) return
-    const config: ExportConfig = {
-      outputDir: '',
-      helperFunctions: false,
-      useTestStep: true,
-      profileVars: getProfileVars(),
-      activeProfileId: activeProfileId ?? undefined,
-      activeEnvironmentId: activeEnvironmentId ?? undefined,
-      envVars: getEnvVars(),
-      activeProjectId: currentProject?.id,
-    }
     try {
-      const path = await window.electronAPI.exportScripts(currentFlow, config)
-      alert(`腳本已匯出到:\n${path}`)
+      const path = await window.electronAPI.exportScripts(currentFlow, exportConfig())
+      const hasSecrets = getSecretEnvKeys(currentProject).length > 0 ||
+        (currentFlow.profiles ?? []).some((p) => p.vars.some((v) => v.secret)) ||
+        currentFlow.nodes.some((n) => n.action.secret)
+      if (hasSecrets) {
+        const choice = await confirm({
+          title: '腳本已匯出',
+          message:
+            `${path}\n\n` +
+            '私密資料以 process.env 參照匯出，不會出現在腳本中。\n' +
+            '若要在 FlowTest 之外用 npx playwright test 執行，需要一併匯出密鑰檔。',
+          actions: [
+            { id: 'secrets', label: '一併匯出密鑰檔', tone: 'primary' },
+            { id: 'ok', label: '知道了' },
+          ],
+          defaultActionId: 'secrets',
+        })
+        if (choice === 'secrets') await handleWriteSecretsFile()
+      } else {
+        alert(`腳本已匯出到:\n${path}`)
+      }
     } catch (err) {
-      alert(`匯出失敗: ${String(err)}`)
+      if (isLockedError(err)) promptUnlock('匯出腳本需要讀取私密資料，請先解鎖。')
+      else alert(`匯出失敗: ${String(err)}`)
+    }
+  }
+
+  /** Write the gitignored .flowtest/secrets.env that an external Playwright run reads. */
+  const handleWriteSecretsFile = async () => {
+    if (!currentFlow) return
+    try {
+      const { path, count } = await window.electronAPI.writeSecretsFile(currentFlow, exportConfig())
+      await confirm({
+        title: '密鑰檔已寫出',
+        message:
+          `${path}\n\n已寫入 ${count} 個私密變數。\n\n` +
+          '⚠ 這是明文檔案。它位於 .flowtest/ 之下，已被 gitignore 忽略，請勿手動加入版控或外傳。',
+        actions: [{ id: 'ok', label: '知道了', tone: 'primary' }],
+        defaultActionId: 'ok',
+      })
+    } catch (err) {
+      if (isLockedError(err)) promptUnlock('匯出密鑰檔需要讀取私密資料，請先解鎖。')
+      else alert(`匯出密鑰檔失敗: ${String(err)}`)
     }
   }
 
   const handleRunTests = async () => {
     if (!currentFlow || isRunningTests) return
-    const config: ExportConfig = {
-      outputDir: '',
-      helperFunctions: false,
-      useTestStep: true,
-      profileVars: getProfileVars(),
-      activeProfileId: activeProfileId ?? undefined,
-      activeEnvironmentId: activeEnvironmentId ?? undefined,
-      envVars: getEnvVars(),
-      activeProjectId: currentProject?.id,
+    if (hasVault && !vaultUsable) {
+      return promptUnlock('執行測試需要讀取私密資料，請先解鎖。')
     }
+    const config = exportConfig()
     testLinesRef.current = []
     setTestLines([])
     setTestFinished(null)
@@ -263,6 +294,41 @@ export function Toolbar() {
             ⇄
           </button>
         </div>
+      )}
+
+      {/* Private-data state. Hidden entirely until the workspace has a vault, so it
+          costs nothing for users who never mark anything private. */}
+      {hasVault && (
+        <button
+          onClick={() =>
+            vaultUsable
+              ? void confirm({
+                  title: '🔐 私密資料',
+                  message: '保險庫目前為解鎖狀態。',
+                  actions: [
+                    { id: 'lock', label: '鎖定' },
+                    { id: 'change', label: '變更通行碼' },
+                    { id: 'close', label: '關閉', tone: 'primary' },
+                  ],
+                  defaultActionId: 'close',
+                }).then((choice) => {
+                  if (choice === 'lock') void lockVault()
+                  if (choice === 'change') openVaultDialog('change')
+                })
+              : openVaultDialog('unlock')
+          }
+          title={vaultUsable ? '私密資料已解鎖' : '私密資料已鎖定 — 點擊輸入通行碼'}
+          style={{
+            ...workspaceSwitchStyle,
+            marginRight: 4,
+            padding: '3px 8px',
+            cursor: 'pointer',
+            color: vaultUsable ? '#4ade80' : '#f87171',
+            borderColor: vaultUsable ? '#166534' : '#7f1d1d',
+          }}
+        >
+          {vaultUsable ? '🔓 已解鎖' : '🔒 已鎖定'}
+        </button>
       )}
 
       {btn('新增流程', () => setShowNewFlowDialog(true))}

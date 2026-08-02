@@ -9,6 +9,7 @@ const vm = require("vm");
 const module$1 = require("module");
 const os = require("os");
 const crypto = require("crypto");
+const util = require("util");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -36,6 +37,9 @@ const DEFAULT_PROJECT_NAME = "未分類";
 const DOMAIN_ENV_KEY = "domain";
 const DEFAULT_ENV_NAME = "DEV";
 const DEFAULT_DOMAIN = "http://localhost:3000/";
+const SECRET_ENVELOPE_PREFIX = "enc:v1:";
+const SECRET_ENV_PREFIX = "FT_SECRET_";
+const SECRETS_FILE = ".flowtest/secrets.env";
 const IPC_CHANNELS = {
   // Renderer → Main
   BROWSER_LAUNCH: "browser:launch",
@@ -75,6 +79,16 @@ const IPC_CHANNELS = {
   // Renderer → Main (download the Playwright browsers)
   BROWSER_INSTALL: "browser:install",
   BROWSER_CHECK: "browser:check",
+  // Private data — the key never leaves the main process; the renderer only ever
+  // holds ciphertext, plus whatever single value it explicitly asks to reveal.
+  VAULT_STATUS: "vault:status",
+  VAULT_SETUP: "vault:setup",
+  VAULT_UNLOCK: "vault:unlock",
+  VAULT_LOCK: "vault:lock",
+  VAULT_CHANGE_PASSPHRASE: "vault:changePassphrase",
+  SECRET_ENCRYPT: "secret:encrypt",
+  SECRET_REVEAL: "secret:reveal",
+  SECRETS_FILE_WRITE: "secret:writeFile",
   // Main → Renderer
   WORKSPACE_RELOAD: "workspace:reload",
   LOCATOR_PICK_NEEDED: "locator:pickNeeded",
@@ -1372,6 +1386,8 @@ function hasVariables(value) {
 const PROFILE_VAR_PREFIX = "_ftProf_";
 const ENV_VAR_PREFIX = "_ftEnv_";
 function varToCodeRef(name, scope) {
+  const secret = scope.secretVars?.(name);
+  if (secret) return secret;
   if (scope.sessionVars?.has(name)) return name;
   if (scope.profileVars?.has(name)) return `${PROFILE_VAR_PREFIX}${name}`;
   if (scope.envVars?.has(name)) return `${ENV_VAR_PREFIX}${name}`;
@@ -1390,6 +1406,11 @@ function escapeTemplateBody(value) {
 }
 function valueToCodeExpr(value, scope = {}) {
   if (!hasVariables(value)) return toSingleQuoted(value);
+  const onlyVar = value.match(/^\{\{(\w+)\}\}$/);
+  if (onlyVar) {
+    const secret = scope.secretVars?.(onlyVar[1]);
+    if (secret) return secret;
+  }
   const inner = escapeTemplateBody(value).replace(/\{\{(\w+)\}\}/g, (m, name) => {
     const ref = varToCodeRef(name, scope);
     return ref ? `\${${ref}}` : m;
@@ -1400,7 +1421,9 @@ function sessionAwareValueToCodeExpr(value, sessionVars, scope = {}) {
   const fullScope = { ...scope, sessionVars };
   if (!hasVariables(value)) return toSingleQuoted(value);
   const singleVar = value.match(/^\{\{(\w+)\}\}$/);
-  if (singleVar && sessionVars.has(singleVar[1])) return singleVar[1];
+  if (singleVar && !scope.secretVars?.(singleVar[1]) && sessionVars.has(singleVar[1])) {
+    return singleVar[1];
+  }
   return valueToCodeExpr(value, fullScope);
 }
 function locatorExprToCode(expr, scope = {}) {
@@ -1421,15 +1444,36 @@ function locatorExprToCode(expr, scope = {}) {
     return varToCodeRef(name, scope) ?? toSingleQuoted(match);
   });
 }
-function emitVarDecls(vars, prefix) {
-  return Object.entries(vars).filter(([key]) => /^\w+$/.test(key)).map(([key, value]) => `const ${prefix}${key} = ${JSON.stringify(value)};`).join("\n");
+function emitVarDecls(vars, prefix, skip = /* @__PURE__ */ new Set()) {
+  return Object.entries(vars).filter(([key2]) => /^\w+$/.test(key2) && !skip.has(key2)).map(([key2, value]) => `const ${prefix}${key2} = ${JSON.stringify(value)};`).join("\n");
 }
-function emitProfileVarDecls(profileVars) {
-  return emitVarDecls(profileVars, PROFILE_VAR_PREFIX);
+function emitProfileVarDecls(profileVars, secretKeys) {
+  return emitVarDecls(profileVars, PROFILE_VAR_PREFIX, secretKeys);
 }
-function emitEnvVarDecls(envVars) {
-  return emitVarDecls(envVars, ENV_VAR_PREFIX);
+function emitEnvVarDecls(envVars, secretKeys) {
+  return emitVarDecls(envVars, ENV_VAR_PREFIX, secretKeys);
 }
+const SECRET_VAR_PREFIX = "_ftSec_";
+const SECRET_HELPER_CODE = `
+function _ftSecret(name: string): string {
+  const fromEnv = process.env[name];
+  if (fromEnv !== undefined) return fromEnv;
+  try {
+    const text = _ftFs.readFileSync(process.env.FT_SECRETS_FILE ?? '.flowtest/secrets.env', 'utf-8');
+    for (const line of text.split(/\\r?\\n/)) {
+      const eq = line.indexOf('=');
+      if (eq > 0 && line.slice(0, eq).trim() === name) {
+        return line.slice(eq + 1).replace(/\\\\n/g, '\\n');
+      }
+    }
+  } catch {
+    // No secrets file — fall through to the error below.
+  }
+  throw new Error(
+    \`[FlowTest] 缺少私密變數 \${name}。請在 FlowTest 中按「匯出密鑰檔」，或自行設定同名環境變數。\`
+  );
+}
+`;
 const VARIABLE_HELPERS_CODE = `
 function _ftRandomText(len = 8) {
   return Math.random().toString(36).substring(2, 2 + len).padEnd(len, '0');
@@ -1451,11 +1495,12 @@ function _ftTimestamp() {
 }
 `;
 const RECENT_LIMIT = 8;
-const MARKER = ".flowtest.json";
+const MARKER$1 = ".flowtest.json";
 const ARTIFACT_DIR = ".flowtest";
 let workspaceRoot = null;
 let recent = [];
 let settingsLoaded = false;
+let vaultKeys = {};
 function settingsPath() {
   return path.join(electron.app.getPath("userData"), "settings.json");
 }
@@ -1484,6 +1529,7 @@ async function loadSettings() {
     const raw = await fs.promises.readFile(settingsPath(), "utf-8");
     const data = JSON.parse(raw);
     recent = Array.isArray(data.recentWorkspaces) ? data.recentWorkspaces : [];
+    vaultKeys = data.vaultKeys && typeof data.vaultKeys === "object" ? data.vaultKeys : {};
     if (data.workspaceRoot && await isDirectory(data.workspaceRoot)) {
       try {
         await scaffold(data.workspaceRoot);
@@ -1498,9 +1544,17 @@ async function loadSettings() {
   }
 }
 async function persist() {
-  const payload = { workspaceRoot, recentWorkspaces: recent };
+  const payload = { workspaceRoot, recentWorkspaces: recent, vaultKeys };
   await fs.promises.mkdir(electron.app.getPath("userData"), { recursive: true });
   await fs.promises.writeFile(settingsPath(), JSON.stringify(payload, null, 2), "utf-8");
+}
+function readRememberedPassphrase(root) {
+  return vaultKeys[root] ?? null;
+}
+async function rememberPassphrase(root, encrypted) {
+  if (encrypted === null) delete vaultKeys[root];
+  else vaultKeys[root] = encrypted;
+  await persist();
 }
 async function removeRecentWorkspace(dir) {
   recent = recent.filter((p) => p !== dir);
@@ -1547,7 +1601,7 @@ async function scaffold(root) {
   await writeIfMissing(path.join(root, "exports", ".gitignore"), "*\n!.gitignore\n");
   await writeIfMissing(path.join(root, ARTIFACT_DIR, ".gitignore"), "*\n!.gitignore\n");
   await writeIfMissing(configPath(root), PLAYWRIGHT_CONFIG);
-  await writeIfMissing(path.join(root, MARKER), JSON.stringify({ version: 1 }, null, 2) + "\n");
+  await writeIfMissing(path.join(root, MARKER$1), JSON.stringify({ version: 1 }, null, 2) + "\n");
 }
 const PLAYWRIGHT_CONFIG = `import { defineConfig } from '@playwright/test';
 
@@ -1701,6 +1755,195 @@ class FixtureStorage {
     }
   }
 }
+const scryptAsync = util.promisify(crypto.scrypt);
+const SCRYPT_PARAMS = { N: 32768, r: 8, p: 1 };
+const KEY_LEN = 32;
+const SCRYPT_MAXMEM = 128 * SCRYPT_PARAMS.N * SCRYPT_PARAMS.r * 2;
+const IV_LEN = 12;
+const MARKER = ".flowtest.json";
+const VERIFIER_PLAINTEXT = "flowtest-vault-v1";
+let key = null;
+let meta = null;
+let loadedFor = null;
+function markerPath(root) {
+  return path.join(root, MARKER);
+}
+async function readMarker(root) {
+  try {
+    return JSON.parse(await fs.promises.readFile(markerPath(root), "utf-8"));
+  } catch {
+    return { version: 1 };
+  }
+}
+async function writeMarker(root, patch) {
+  const current = await readMarker(root);
+  const next = { ...current, ...patch };
+  await fs.promises.writeFile(markerPath(root), JSON.stringify(next, null, 2) + "\n", "utf-8");
+}
+async function deriveKey(passphrase, m) {
+  return scryptAsync(passphrase.normalize("NFKC"), Buffer.from(m.salt, "base64"), KEY_LEN, {
+    N: m.N,
+    r: m.r,
+    p: m.p,
+    maxmem: 128 * m.N * m.r * 2
+  });
+}
+function encryptWith(k, plain) {
+  const iv = crypto.randomBytes(IV_LEN);
+  const cipher = crypto.createCipheriv("aes-256-gcm", k, iv);
+  const ct = Buffer.concat([cipher.update(plain, "utf-8"), cipher.final()]);
+  const payload = Buffer.concat([ct, cipher.getAuthTag()]);
+  return `${SECRET_ENVELOPE_PREFIX}${iv.toString("base64")}:${payload.toString("base64")}`;
+}
+function decryptWith(k, envelope) {
+  const body = envelope.slice(SECRET_ENVELOPE_PREFIX.length);
+  const sep = body.indexOf(":");
+  if (sep < 0) throw new Error("[FlowTest] 私密資料格式錯誤");
+  const iv = Buffer.from(body.slice(0, sep), "base64");
+  const payload = Buffer.from(body.slice(sep + 1), "base64");
+  if (payload.length < 16) throw new Error("[FlowTest] 私密資料格式錯誤");
+  const tag = payload.subarray(payload.length - 16);
+  const ct = payload.subarray(0, payload.length - 16);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", k, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf-8");
+}
+function isCiphertext(value) {
+  return typeof value === "string" && value.startsWith(SECRET_ENVELOPE_PREFIX);
+}
+function isUnlocked() {
+  return key !== null;
+}
+function hasVault() {
+  return meta !== null;
+}
+function lock() {
+  key = null;
+}
+async function load() {
+  if (!hasWorkspace()) {
+    key = null;
+    meta = null;
+    loadedFor = null;
+    return;
+  }
+  const root = getWorkspaceRoot();
+  if (loadedFor === root && meta !== null) return;
+  key = null;
+  loadedFor = root;
+  meta = (await readMarker(root)).vault ?? null;
+  if (!meta) return;
+  const remembered = readRememberedPassphrase(root);
+  if (remembered) {
+    try {
+      const plain = electron.safeStorage.decryptString(Buffer.from(remembered, "base64"));
+      await unlock(plain);
+    } catch {
+    }
+  }
+}
+function status() {
+  return {
+    state: meta === null ? "none" : key === null ? "locked" : "unlocked",
+    canRemember: canRemember()
+  };
+}
+function canRemember() {
+  try {
+    return electron.safeStorage.isEncryptionAvailable();
+  } catch {
+    return false;
+  }
+}
+async function remember(root, passphrase) {
+  if (!canRemember()) return;
+  try {
+    await rememberPassphrase(root, electron.safeStorage.encryptString(passphrase).toString("base64"));
+  } catch {
+  }
+}
+async function setup(passphrase) {
+  if (!passphrase) throw new Error("通行碼不可為空");
+  const root = getWorkspaceRoot();
+  if (meta) throw new Error("此工作區已經有保險庫了");
+  const next = {
+    v: 1,
+    kdf: "scrypt",
+    ...SCRYPT_PARAMS,
+    salt: crypto.randomBytes(16).toString("base64"),
+    verifier: ""
+  };
+  const k = await scryptAsync(passphrase.normalize("NFKC"), Buffer.from(next.salt, "base64"), KEY_LEN, {
+    ...SCRYPT_PARAMS,
+    maxmem: SCRYPT_MAXMEM
+  });
+  next.verifier = encryptWith(k, VERIFIER_PLAINTEXT);
+  await writeMarker(root, { vault: next });
+  meta = next;
+  loadedFor = root;
+  key = k;
+  await remember(root, passphrase);
+}
+async function unlock(passphrase) {
+  if (!meta) throw new Error("此工作區沒有保險庫");
+  const k = await deriveKey(passphrase, meta);
+  try {
+    const got = Buffer.from(decryptWith(k, meta.verifier), "utf-8");
+    const want = Buffer.from(VERIFIER_PLAINTEXT, "utf-8");
+    if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) return false;
+  } catch {
+    return false;
+  }
+  key = k;
+  await remember(getWorkspaceRoot(), passphrase);
+  return true;
+}
+function encrypt(plain) {
+  if (!key) throw new Error("[FlowTest] 保險庫已鎖定，無法加密");
+  return encryptWith(key, plain);
+}
+function decrypt(envelope) {
+  if (!key) throw new Error("[FlowTest] 保險庫已鎖定，無法讀取私密資料");
+  return decryptWith(key, envelope);
+}
+function decryptIfNeeded(value) {
+  return isCiphertext(value) ? decrypt(value) : value;
+}
+function decryptMap(vars) {
+  if (!vars) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(vars)) out[k] = decryptIfNeeded(v);
+  return out;
+}
+async function changePassphrase(oldPassphrase, newPassphrase, rewrite) {
+  if (!meta) throw new Error("此工作區沒有保險庫");
+  if (!newPassphrase) throw new Error("新通行碼不可為空");
+  const oldKey = await deriveKey(oldPassphrase, meta);
+  try {
+    if (decryptWith(oldKey, meta.verifier) !== VERIFIER_PLAINTEXT) return false;
+  } catch {
+    return false;
+  }
+  const root = getWorkspaceRoot();
+  const next = {
+    v: 1,
+    kdf: "scrypt",
+    ...SCRYPT_PARAMS,
+    salt: crypto.randomBytes(16).toString("base64"),
+    verifier: ""
+  };
+  const newKey = await scryptAsync(newPassphrase.normalize("NFKC"), Buffer.from(next.salt, "base64"), KEY_LEN, {
+    ...SCRYPT_PARAMS,
+    maxmem: SCRYPT_MAXMEM
+  });
+  next.verifier = encryptWith(newKey, VERIFIER_PLAINTEXT);
+  await rewrite((envelope) => encryptWith(newKey, decryptWith(oldKey, envelope)));
+  await writeMarker(root, { vault: next });
+  meta = next;
+  key = newKey;
+  await remember(root, newPassphrase);
+  return true;
+}
 const AsyncFunction = Object.getPrototypeOf(async () => {
 }).constructor;
 let _expectFn = null;
@@ -1814,7 +2057,7 @@ class Replayer {
     const resolveVars = (vars) => Object.fromEntries(
       vars.map((v) => {
         const raw = (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value;
-        return [v.key, resolveValue(raw, void 0, subFlowEnvVars)];
+        return [v.key, resolveValue(decryptIfNeeded(raw), void 0, subFlowEnvVars)];
       })
     );
     let subProfileVars = {};
@@ -1907,7 +2150,8 @@ class Replayer {
     return url;
   }
   async executeAction(action) {
-    const val = action.value != null ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars, this.envVars) : void 0;
+    const rawValue = action.value != null ? action.secret ? decryptIfNeeded(action.value) : action.value : void 0;
+    const val = rawValue != null ? resolveValueWithSession(rawValue, this.sessionVars, this.profileVars, this.envVars) : void 0;
     const popupPromise = action.opensPage ? this.pageFor(action).context().waitForEvent("page", { timeout: 15e3 }) : null;
     switch (action.type) {
       case "goto":
@@ -2129,6 +2373,32 @@ class ProjectStorage {
 function exportsDir() {
   return path.join(getWorkspaceRoot(), "exports");
 }
+class SecretRegistry {
+  bySource = /* @__PURE__ */ new Map();
+  values = /* @__PURE__ */ new Map();
+  /** Returns the identifier to emit in place of the value. */
+  ref(key2, plaintext) {
+    const source = `${key2}\0${plaintext}`;
+    const seen = this.bySource.get(source);
+    if (seen) return SECRET_VAR_PREFIX + seen;
+    const base = /^\w+$/.test(key2) ? key2 : "value";
+    let name = base;
+    for (let n = 2; this.values.has(name); n++) name = `${base}_${n}`;
+    this.bySource.set(source, name);
+    this.values.set(name, plaintext);
+    return SECRET_VAR_PREFIX + name;
+  }
+  get size() {
+    return this.values.size;
+  }
+  decls() {
+    return [...this.values.keys()].map((n) => `const ${SECRET_VAR_PREFIX}${n} = _ftSecret('${SECRET_ENV_PREFIX}${n}');`).join("\n");
+  }
+  /** FT_SECRET_* → plaintext, for the child process env / the secrets file. */
+  env() {
+    return Object.fromEntries([...this.values].map(([n, v]) => [SECRET_ENV_PREFIX + n, v]));
+  }
+}
 function gateEnvVars(flow, envVars, activeProjectId) {
   return activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? envVars ?? {} : {};
 }
@@ -2139,6 +2409,26 @@ class ScriptExporter {
   static async export(flow, config) {
     const outputDir = config.outputDir || exportsDir();
     await fs.promises.mkdir(outputDir, { recursive: true });
+    const { specContent, helperCode } = await ScriptExporter.build(flow, config);
+    if (helperCode) {
+      const helpersDir = path.join(outputDir, "helpers");
+      await fs.promises.mkdir(helpersDir, { recursive: true });
+      await fs.promises.writeFile(path.join(helpersDir, `${flow.id}-helpers.ts`), helperCode, "utf-8");
+    }
+    const specPath = path.join(outputDir, `${flow.id}.spec.ts`);
+    await fs.promises.writeFile(specPath, specContent, "utf-8");
+    return specPath;
+  }
+  /**
+   * The private values the spec for this flow will look up, as FT_SECRET_* → plaintext.
+   *
+   * Produced by running the same code generation and reading the registry, so the names
+   * are guaranteed to line up with whatever the spec actually references.
+   */
+  static async collectSecretEnv(flow, config) {
+    return (await ScriptExporter.build(flow, config)).secretEnv;
+  }
+  static async build(flow, config) {
     const subFlowMap = await ScriptExporter.resolveSubFlows(flow);
     const paths = ScriptExporter.computePaths(flow);
     const nodeMap = new Map(flow.nodes.map((n) => [n.id, n]));
@@ -2148,16 +2438,10 @@ class ScriptExporter {
       const result = ScriptExporter.extractHelpers(paths, nodeMap, flow);
       helperCode = result.helperCode;
       helperImport = result.helperImport;
-      if (helperCode) {
-        const helpersDir = path.join(outputDir, "helpers");
-        await fs.promises.mkdir(helpersDir, { recursive: true });
-        await fs.promises.writeFile(path.join(helpersDir, `${flow.id}-helpers.ts`), helperCode, "utf-8");
-      }
     }
-    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap, config.activeProfileId);
-    const specPath = path.join(outputDir, `${flow.id}.spec.ts`);
-    await fs.promises.writeFile(specPath, specContent, "utf-8");
-    return specPath;
+    const secrets = new SecretRegistry();
+    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap, config.activeProfileId, secrets);
+    return { specContent, helperCode, secretEnv: secrets.env() };
   }
   static async resolveSubFlows(flow, visited = /* @__PURE__ */ new Set()) {
     const result = /* @__PURE__ */ new Map();
@@ -2175,15 +2459,27 @@ class ScriptExporter {
     return result;
   }
   static resolveProfileVars(flow, profileId, activeEnvironmentId, envVars, activeProjectId) {
+    return ScriptExporter.resolveProfile(flow, profileId, activeEnvironmentId, envVars, activeProjectId).vars;
+  }
+  /** Which keys of a flow's profile hold private values. Secrecy is a per-key attribute
+   *  shared by every profile of the flow, so the first profile is representative. */
+  static secretProfileKeys(flow) {
+    return new Set(
+      (flow.profiles ?? []).flatMap((p) => p.vars.filter((v) => v.secret).map((v) => v.key))
+    );
+  }
+  static resolveProfile(flow, profileId, activeEnvironmentId, envVars, activeProjectId) {
+    const secretKeys = ScriptExporter.secretProfileKeys(flow);
     const profile = profileId ? (flow.profiles ?? []).find((p) => p.id === profileId) : (flow.profiles ?? [])[0];
-    if (!profile) return {};
+    if (!profile) return { vars: {}, secretKeys };
     const flowEnvVars = gateEnvVars(flow, envVars, activeProjectId);
-    return Object.fromEntries(
+    const vars = Object.fromEntries(
       profile.vars.map((v) => {
         const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value;
-        return [v.key, resolveValue(raw, void 0, flowEnvVars)];
+        return [v.key, resolveValue(decryptIfNeeded(raw), void 0, flowEnvVars)];
       })
     );
+    return { vars, secretKeys };
   }
   /** Resolve which sub-flow profile ID to use given the parent's active profile.
    *  subFlowProfileMapping takes precedence; falls back to legacy subFlowProfileId. */
@@ -2193,7 +2489,7 @@ class ScriptExporter {
     }
     return action.subFlowProfileId ?? null;
   }
-  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subEnvVars, subBaseOrigin, subDomain, activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
+  static getSubFlowPath(subFlow, exitNodeId, subFlowMap, subProfileVars, subEnvVars, subBaseOrigin, subDomain, activeProfileId, activeEnvironmentId, envVars, activeProjectId, subSecretKeys = /* @__PURE__ */ new Set()) {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]));
     const path2 = [];
     const visited = /* @__PURE__ */ new Set();
@@ -2204,7 +2500,7 @@ class ScriptExporter {
         const nested = subFlowMap.get(cur.action.subFlowId);
         if (nested) {
           const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, activeProfileId);
-          const nestedProfileVars = ScriptExporter.resolveProfileVars(nested, nestedProfileId, activeEnvironmentId, envVars, activeProjectId);
+          const nestedProfile = ScriptExporter.resolveProfile(nested, nestedProfileId, activeEnvironmentId, envVars, activeProjectId);
           const nestedEnvVars = gateEnvVars(nested, envVars, activeProjectId);
           const nestedBaseOrigin = (() => {
             try {
@@ -2214,16 +2510,16 @@ class ScriptExporter {
             }
           })();
           const nestedDomain = resolveFlowDomain(nested, envVars, activeProjectId);
-          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfileVars, nestedEnvVars, nestedBaseOrigin, nestedDomain, nestedProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
+          path2.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfile.vars, nestedEnvVars, nestedBaseOrigin, nestedDomain, nestedProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId, nestedProfile.secretKeys));
         }
       } else {
-        path2.unshift({ node: cur, profileVars: subProfileVars, envVars: subEnvVars, baseOrigin: subBaseOrigin, inlineVars: true, domain: subDomain });
+        path2.unshift({ node: cur, profileVars: subProfileVars, envVars: subEnvVars, baseOrigin: subBaseOrigin, inlineVars: true, domain: subDomain, secretProfileKeys: subSecretKeys });
       }
       cur = cur.parentId ? nodeMap.get(cur.parentId) : void 0;
     }
     return path2;
   }
-  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultEnvVars = {}, defaultBaseOrigin = "", defaultDomain = "", activeProfileId, activeEnvironmentId, envVars, activeProjectId) {
+  static buildStepSequence(nodeIds, nodeMap, subFlowMap, defaultProfileVars = {}, defaultEnvVars = {}, defaultBaseOrigin = "", defaultDomain = "", activeProfileId, activeEnvironmentId, envVars, activeProjectId, defaultSecretKeys = /* @__PURE__ */ new Set()) {
     const result = [];
     for (const id of nodeIds) {
       const node = nodeMap.get(id);
@@ -2232,7 +2528,7 @@ class ScriptExporter {
         const subFlow = subFlowMap.get(node.action.subFlowId);
         if (subFlow) {
           const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, activeProfileId);
-          const subProfileVars = ScriptExporter.resolveProfileVars(subFlow, subProfileId, activeEnvironmentId, envVars, activeProjectId);
+          const subProfile = ScriptExporter.resolveProfile(subFlow, subProfileId, activeEnvironmentId, envVars, activeProjectId);
           const subEnvVars = gateEnvVars(subFlow, envVars, activeProjectId);
           const subBaseOrigin = (() => {
             try {
@@ -2242,10 +2538,10 @@ class ScriptExporter {
             }
           })();
           const subDomain = resolveFlowDomain(subFlow, envVars, activeProjectId);
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfileVars, subEnvVars, subBaseOrigin, subDomain, subProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId));
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfile.vars, subEnvVars, subBaseOrigin, subDomain, subProfileId ?? void 0, activeEnvironmentId, envVars, activeProjectId, subProfile.secretKeys));
         }
       } else {
-        result.push({ node, profileVars: defaultProfileVars, envVars: defaultEnvVars, baseOrigin: defaultBaseOrigin, inlineVars: false, domain: defaultDomain });
+        result.push({ node, profileVars: defaultProfileVars, envVars: defaultEnvVars, baseOrigin: defaultBaseOrigin, inlineVars: false, domain: defaultDomain, secretProfileKeys: defaultSecretKeys });
       }
     }
     return result;
@@ -2274,12 +2570,27 @@ class ScriptExporter {
     if (root) walk(root, [], []);
     return paths;
   }
-  static generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap = /* @__PURE__ */ new Map(), activeProfileId) {
+  static generateSpec(flow, paths, nodeMap, config, helperImport, subFlowMap = /* @__PURE__ */ new Map(), activeProfileId, secrets = new SecretRegistry()) {
     const profileVars = config.profileVars ?? {};
     const profileVarKeys = new Set(Object.keys(profileVars));
-    const hasProfileVars = profileVarKeys.size > 0;
+    const secretProfileKeys = ScriptExporter.secretProfileKeys(flow);
+    const secretEnvKeys = new Set(config.secretEnvKeys ?? []);
+    const hasProfileVars = [...profileVarKeys].some((k) => !secretProfileKeys.has(k));
     const allEnvVars = config.envVars ?? {};
-    const hasEnvVars = Object.keys(allEnvVars).length > 0;
+    const hasEnvVars = Object.keys(allEnvVars).some((k) => !secretEnvKeys.has(k));
+    const secretScopeFor = (stepProfileVars, stepSecretKeys, stepEnvVars) => {
+      const isSecret = (key2) => stepSecretKeys.has(key2) && key2 in stepProfileVars || secretEnvKeys.has(key2) && key2 in stepEnvVars;
+      const resolve = (key2) => {
+        if (stepSecretKeys.has(key2) && key2 in stepProfileVars) {
+          return secrets.ref(key2, stepProfileVars[key2]);
+        }
+        if (secretEnvKeys.has(key2) && key2 in stepEnvVars) {
+          return secrets.ref(key2, stepEnvVars[key2]);
+        }
+        return void 0;
+      };
+      return { isSecret, resolve };
+    };
     const baseOrigin = (() => {
       try {
         return new URL(flow.baseURL).origin;
@@ -2296,15 +2607,16 @@ class ScriptExporter {
     let usesPopupHoist = false;
     const tests = paths.map((path2, idx) => {
       const testName = path2.name || `測試路徑 ${idx + 1}`;
-      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, flowEnvVars, baseOrigin, flowDomain, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId);
+      const steps = ScriptExporter.buildStepSequence(path2.nodeIds, nodeMap, subFlowMap, profileVars, flowEnvVars, baseOrigin, flowDomain, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId, secretProfileKeys);
       const sessionVarsDefined = /* @__PURE__ */ new Set();
       const hoistedVars = config.useTestStep ? new Set(steps.map(({ node }) => node.action.captureAs).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       const hoistedPages = config.useTestStep ? new Set(steps.map(({ node }) => node.action.opensPage).filter((v) => !!v)) : /* @__PURE__ */ new Set();
       if (hoistedPages.size > 0) usesPopupHoist = true;
       const suppressChooser = steps.some(({ node }) => node.action.type === "upload") ? "    page.on('filechooser', () => {});\n" : "";
       const hoistDecls = suppressChooser + (hoistedVars.size > 0 ? [...hoistedVars].map((v) => `    let ${v} = ''`).join("\n") + "\n" : "") + (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join("\n") + "\n" : "");
-      const stepCode = steps.map(({ node, profileVars: stepProfileVars, envVars: stepEnvVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain }) => {
-        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, stepEnvVars);
+      const stepCode = steps.map(({ node, profileVars: stepProfileVars, envVars: stepEnvVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain, secretProfileKeys: stepSecretKeys }) => {
+        const secretScope = secretScopeFor(stepProfileVars, stepSecretKeys, stepEnvVars);
+        let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, stepEnvVars, secretScope, secrets);
         if (node.action.opensPage) {
           const alias = node.action.opensPage;
           const pageRef = node.action.pageAlias || "page";
@@ -2330,12 +2642,16 @@ ${hoistDecls}${stepCode}
     }).join("\n\n");
     return [
       `import { test, expect${usesPopupHoist ? ", Page" : ""} } from '@playwright/test';`,
+      secrets.size > 0 ? `import * as _ftFs from 'fs';` : "",
       helperImport,
       usesVariables ? VARIABLE_HELPERS_CODE : "",
+      secrets.size > 0 ? SECRET_HELPER_CODE : "",
       hasEnvVars ? `
-${emitEnvVarDecls(allEnvVars)}` : "",
+${emitEnvVarDecls(allEnvVars, secretEnvKeys)}` : "",
       hasProfileVars ? `
-${emitProfileVarDecls(profileVars)}` : "",
+${emitProfileVarDecls(profileVars, secretProfileKeys)}` : "",
+      secrets.size > 0 ? `
+${secrets.decls()}` : "",
       "",
       `test.describe('${flow.name}', () => {`,
       "",
@@ -2344,7 +2660,7 @@ ${emitProfileVarDecls(profileVars)}` : "",
       "});"
     ].filter((line) => line !== void 0).join("\n");
   }
-  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false, hoistedVars = /* @__PURE__ */ new Set(), domainOverride = "", envVars = {}) {
+  static actionToCode(node, sessionVarsDefined, baseOrigin = "", profileVars = {}, inlineVars = false, hoistedVars = /* @__PURE__ */ new Set(), domainOverride = "", envVars = {}, secretVars = { isSecret: () => false, resolve: () => void 0 }, secrets = new SecretRegistry()) {
     const { action } = node;
     const pageRef = action.pageAlias || "page";
     const frameChain = (action.framePath ?? []).map((f) => `.${f}.contentFrame()`).join("");
@@ -2352,11 +2668,13 @@ ${emitProfileVarDecls(profileVars)}` : "",
     const profileVarKeys = inlineVars ? /* @__PURE__ */ new Set() : new Set(Object.keys(profileVars));
     const scope = {
       profileVars: profileVarKeys,
-      envVars: new Set(Object.keys(envVars))
+      envVars: new Set(Object.keys(envVars)),
+      secretVars: secretVars.resolve
     };
+    const isSecretKey = (k) => secretVars.isSecret(k);
     let loc;
     const { selector } = action;
-    const locatorExpr = action.locatorExpr && inlineVars ? action.locatorExpr.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : action.locatorExpr;
+    const locatorExpr = action.locatorExpr && inlineVars ? action.locatorExpr.replace(/\{\{(\w+)\}\}/g, (m, k) => !isSecretKey(k) && k in profileVars ? profileVars[k] : m) : action.locatorExpr;
     if (selector && /^\[name=/.test(selector)) {
       loc = `${scopeRef}.locator('${selector}')`;
     } else if (selector && /^\[data-id=/.test(selector)) {
@@ -2382,17 +2700,18 @@ ${emitProfileVarDecls(profileVars)}` : "",
     if (hasVariables(loc)) {
       loc = locatorExprToCode(loc, { ...scope, sessionVars: sessionVarsDefined });
     }
-    const resolveProfilePlaceholders = (v) => inlineVars ? v.replace(/\{\{(\w+)\}\}/g, (m, k) => k in profileVars ? profileVars[k] : m) : v;
+    const resolveProfilePlaceholders = (v) => inlineVars ? v.replace(/\{\{(\w+)\}\}/g, (m, k) => !isSecretKey(k) && k in profileVars ? profileVars[k] : m) : v;
+    const nodeSecretRef = action.secret && action.value ? secrets.ref(`node_${action.id.replace(/\W/g, "").slice(0, 8) || "value"}`, decryptIfNeeded(action.value)) : null;
     const captureAs = action.captureAs;
     let captureDecl = "";
     if (captureAs) {
-      const expr = valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ""), scope);
+      const expr = nodeSecretRef ?? valueToCodeExpr(resolveProfilePlaceholders(action.value ?? ""), scope);
       captureDecl = hoistedVars.has(captureAs) ? `${captureAs} = ${expr};
 ` : `const ${captureAs} = ${expr};
 `;
       sessionVarsDefined.add(captureAs);
     }
-    const va = (v) => captureAs ? captureAs : sessionAwareValueToCodeExpr(resolveProfilePlaceholders(v), sessionVarsDefined, scope);
+    const va = (v) => captureAs ? captureAs : nodeSecretRef ?? sessionAwareValueToCodeExpr(resolveProfilePlaceholders(v), sessionVarsDefined, scope);
     switch (action.type) {
       case "goto": {
         let gotoVal = action.value ?? "";
@@ -2407,7 +2726,8 @@ ${emitProfileVarDecls(profileVars)}` : "",
           }
         }
         if (inlineVars) {
-          gotoVal = resolveValue(gotoVal, profileVars, envVars);
+          const visible = (vars) => Object.fromEntries(Object.entries(vars).filter(([k]) => !isSecretKey(k)));
+          gotoVal = resolveValue(gotoVal, visible(profileVars), visible(envVars));
         }
         return `${captureDecl}await ${pageRef}.goto(${va(gotoVal)});`;
       }
@@ -2441,15 +2761,16 @@ ${emitProfileVarDecls(profileVars)}` : "",
       case "code": {
         const used = /* @__PURE__ */ new Set();
         const entries = [];
-        for (const key of Object.keys(profileVars)) {
-          if (used.has(key)) continue;
-          used.add(key);
-          entries.push(`${JSON.stringify(key)}: ${inlineVars ? JSON.stringify(profileVars[key]) : `_ftProf_${key}`}`);
+        for (const key2 of Object.keys(profileVars)) {
+          if (used.has(key2)) continue;
+          used.add(key2);
+          const ref = secretVars.resolve(key2) ?? (inlineVars ? JSON.stringify(profileVars[key2]) : `_ftProf_${key2}`);
+          entries.push(`${JSON.stringify(key2)}: ${ref}`);
         }
-        for (const key of Object.keys(envVars)) {
-          if (used.has(key)) continue;
-          used.add(key);
-          entries.push(`${JSON.stringify(key)}: _ftEnv_${key}`);
+        for (const key2 of Object.keys(envVars)) {
+          if (used.has(key2)) continue;
+          used.add(key2);
+          entries.push(`${JSON.stringify(key2)}: ${secretVars.resolve(key2) ?? `_ftEnv_${key2}`}`);
         }
         for (const name of sessionVarsDefined) {
           if (used.has(name)) continue;
@@ -2584,12 +2905,13 @@ function resolvePlaywrightCli() {
   return cached;
 }
 const HTML_REPORT_DIR = ".flowtest/playwright-report";
-function runPlaywright(cli, args, cwd, onOutput) {
+function runPlaywright(cli, args, cwd, onOutput, extraEnv = {}) {
   return new Promise((resolve2) => {
     const child = child_process.spawn(process.execPath, [cli.path, ...args], {
       cwd,
       env: {
         ...process.env,
+        ...extraEnv,
         ELECTRON_RUN_AS_NODE: "1",
         NODE_PATH: process.env.NODE_PATH ? `${cli.nodePath}${path.delimiter}${process.env.NODE_PATH}` : cli.nodePath,
         PLAYWRIGHT_HTML_OUTPUT_DIR: HTML_REPORT_DIR,
@@ -2646,6 +2968,7 @@ function registerIpcHandlers(win) {
     replayer = null;
   });
   electron.ipcMain.handle(IPC_CHANNELS.RECORDING_START, async (_e, payload) => {
+    if (payload.branchFromNodeId) assertUnlocked();
     if (browserController) {
       await browserController.close().catch(() => {
       });
@@ -2654,7 +2977,8 @@ function registerIpcHandlers(win) {
     await browserController.launch({ maximized: true });
     const page = browserController.getPage();
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId, payload.envVars, payload.activeProjectId);
+      const { profileVars, envVars } = decryptConfig(payload);
+      const silentReplayer = new Replayer(page, payload.baseURL, profileVars, payload.activeProfileId, payload.activeEnvironmentId, envVars, payload.activeProjectId);
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -2703,12 +3027,14 @@ function registerIpcHandlers(win) {
   });
   electron.ipcMain.handle(IPC_CHANNELS.REPLAY_TO_NODE, async (_e, payload) => {
     try {
+      assertUnlocked();
       if (!browserController || !browserController.isRunning()) {
         browserController = new BrowserController();
         await browserController.launch({ maximized: true });
       }
       const page = browserController.getPage();
-      replayer = new Replayer(page, payload.baseURL, payload.profileVars, payload.activeProfileId, payload.activeEnvironmentId, payload.envVars, payload.activeProjectId);
+      const { profileVars, envVars } = decryptConfig(payload);
+      replayer = new Replayer(page, payload.baseURL, profileVars, payload.activeProfileId, payload.activeEnvironmentId, envVars, payload.activeProjectId);
       await replayer.replayToNode(
         payload.nodes,
         payload.targetNodeId,
@@ -2758,7 +3084,8 @@ function registerIpcHandlers(win) {
     }
   );
   electron.ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload) => {
-    return await ScriptExporter.export(payload.flow, payload.config);
+    assertUnlocked();
+    return await ScriptExporter.export(payload.flow, decryptConfig(payload.config));
   });
   const out = (text) => win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, text);
   electron.ipcMain.handle(IPC_CHANNELS.RUN_TESTS, async (_e, payload) => {
@@ -2771,10 +3098,18 @@ function registerIpcHandlers(win) {
       return finish(1);
     }
     let specPath;
+    let secretEnv = {};
+    const config = decryptConfig(payload.config);
     try {
-      specPath = await ScriptExporter.export(payload.flow, payload.config);
+      assertUnlocked();
+      specPath = await ScriptExporter.export(payload.flow, config);
+      secretEnv = await ScriptExporter.collectSecretEnv(payload.flow, config);
       out(`✓ 腳本已匯出: ${specPath}
 `);
+      if (Object.keys(secretEnv).length) {
+        out(`✓ 已注入 ${Object.keys(secretEnv).length} 個私密變數 (僅存在於記憶體)
+`);
+      }
     } catch (err) {
       out(`✗ 匯出失敗: ${String(err)}
 `);
@@ -2788,7 +3123,7 @@ function registerIpcHandlers(win) {
     out(`▶ playwright ${args.join(" ")}
 
 `);
-    const { exitCode, output } = await runPlaywright(cli, args, cwd, out);
+    const { exitCode, output } = await runPlaywright(cli, args, cwd, out, secretEnv);
     if (exitCode !== 0 && isMissingBrowserError(output)) {
       out("\n⚠ 缺少 Chromium 瀏覽器 — 請點擊「安裝瀏覽器」後重試。\n");
     }
@@ -2851,11 +3186,11 @@ function registerIpcHandlers(win) {
       });
       if (response === 0) return null;
     }
-    await setWorkspaceRoot(dir);
+    await openWorkspace(dir);
     return await workspaceInfo();
   });
   electron.ipcMain.handle(IPC_CHANNELS.WORKSPACE_SET, async (_e, dir) => {
-    await setWorkspaceRoot(dir);
+    await openWorkspace(dir);
     return await workspaceInfo();
   });
   electron.ipcMain.handle(IPC_CHANNELS.WORKSPACE_FORGET, async (_e, dir) => {
@@ -2865,6 +3200,88 @@ function registerIpcHandlers(win) {
   electron.ipcMain.handle(IPC_CHANNELS.WORKSPACE_REVEAL, async () => {
     if (hasWorkspace()) await electron.shell.openPath(getWorkspaceRoot());
   });
+  electron.ipcMain.handle(IPC_CHANNELS.VAULT_STATUS, async () => {
+    await load();
+    return status();
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.VAULT_SETUP, async (_e, passphrase) => {
+    await setup(passphrase);
+    return status();
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.VAULT_UNLOCK, async (_e, passphrase) => {
+    const ok = await unlock(passphrase);
+    return { ok, status: status() };
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.VAULT_LOCK, async () => {
+    lock();
+    return status();
+  });
+  electron.ipcMain.handle(
+    IPC_CHANNELS.VAULT_CHANGE_PASSPHRASE,
+    async (_e, { oldPassphrase, newPassphrase }) => {
+      const ok = await changePassphrase(oldPassphrase, newPassphrase, async (recrypt) => {
+        await recryptWorkspace(recrypt);
+      });
+      return { ok, status: status() };
+    }
+  );
+  electron.ipcMain.handle(IPC_CHANNELS.SECRET_ENCRYPT, async (_e, plain) => encrypt(plain));
+  electron.ipcMain.handle(
+    IPC_CHANNELS.SECRET_REVEAL,
+    async (_e, envelope) => decryptIfNeeded(envelope)
+  );
+  electron.ipcMain.handle(IPC_CHANNELS.SECRETS_FILE_WRITE, async (_e, payload) => {
+    const env = await ScriptExporter.collectSecretEnv(payload.flow, decryptConfig(payload.config));
+    const path$1 = path.join(getWorkspaceRoot(), SECRETS_FILE);
+    const body = Object.entries(env).map(([k, v]) => `${k}=${v.replace(/\r?\n/g, "\\n")}`).join("\n");
+    await fs.promises.mkdir(path.dirname(path$1), { recursive: true });
+    await fs.promises.writeFile(path$1, body + (body ? "\n" : ""), "utf-8");
+    return { path: path$1, count: Object.keys(env).length };
+  });
+}
+function assertUnlocked() {
+  if (hasVault() && !isUnlocked()) {
+    throw new Error("[FlowTest] 保險庫已鎖定 — 請先輸入通行碼解鎖後再執行。");
+  }
+}
+function decryptConfig(config) {
+  return {
+    ...config,
+    profileVars: decryptMap(config.profileVars),
+    envVars: decryptMap(config.envVars)
+  };
+}
+async function recryptWorkspace(recrypt) {
+  const pass = (v) => isCiphertext(v) ? recrypt(v) : v;
+  for (const item of await FlowStorage.list()) {
+    const flow = await FlowStorage.load(item.id);
+    if (!flow) continue;
+    for (const profile of flow.profiles ?? []) {
+      for (const v of profile.vars) {
+        v.value = pass(v.value);
+        if (v.envValues) {
+          for (const envId of Object.keys(v.envValues)) v.envValues[envId] = pass(v.envValues[envId]);
+        }
+      }
+    }
+    for (const node of flow.nodes) {
+      if (node.action.value) node.action.value = pass(node.action.value);
+    }
+    await FlowStorage.save(flow, { touch: false });
+  }
+  for (const summary of await ProjectStorage.list()) {
+    const project = await ProjectStorage.load(summary.id);
+    if (!project) continue;
+    for (const v of project.envVars ?? []) {
+      for (const envId of Object.keys(v.values)) v.values[envId] = pass(v.values[envId]);
+    }
+    await ProjectStorage.save(project);
+  }
+}
+async function openWorkspace(dir) {
+  lock();
+  await setWorkspaceRoot(dir);
+  await load();
 }
 async function pathExists(p) {
   try {
@@ -2976,6 +3393,7 @@ function createWindow() {
 }
 electron.app.whenReady().then(async () => {
   await loadSettings();
+  await load();
   const win = createWindow();
   registerIpcHandlers(win);
   electron.app.on("activate", () => {

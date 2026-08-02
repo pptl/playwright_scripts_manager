@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
-import { DOMAIN_ENV_KEY } from '@shared/types'
+import { DOMAIN_ENV_KEY, SECRET_ENVELOPE_PREFIX, SECRET_MASK } from '@shared/types'
 import type { FlowProfile, ProfileVariable } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
+import { useVault } from '../../hooks/useVault'
+
+const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
 
 interface ProfileEditorModalProps {
   onClose: () => void
@@ -15,23 +18,40 @@ interface VarRow {
   value: string
   description: string
   fallback: string
+  /** Private: the stored value is ciphertext and the UI masks it. Shared across profiles. */
+  secret: boolean
 }
 
 /** A row as edited in the table. `_rid` is a stable client id (used for React keys and for the
  *  value-input caret map); `_origIndex` is the row's index in the store at load time —
- *  `commitProfileVars` reads it to tell added rows from edited ones. */
-type EditRow = VarRow & { _rid: string; _origIndex: number | null }
+ *  `commitProfileVars` reads it to tell added rows from edited ones.
+ *  `_storedValue` is what is on disk (ciphertext for private rows); `value` only carries
+ *  plaintext once the user types it. */
+type EditRow = VarRow & {
+  _rid: string
+  _origIndex: number | null
+  _storedValue: string
+  _dirty: boolean
+}
 
 /** Store variables → table rows, resolved for the active environment. */
 function toEditRows(vars: ProfileVariable[], envId: string | null): EditRow[] {
-  return vars.map((v, i) => ({
-    key: v.key,
-    value: envId ? (v.envValues?.[envId] ?? '') : v.value,
-    description: v.description ?? '',
-    fallback: v.value,
-    _rid: `src:${i}`,
-    _origIndex: i,
-  }))
+  return vars.map((v, i) => {
+    const stored = envId ? (v.envValues?.[envId] ?? '') : v.value
+    return {
+      key: v.key,
+      // A private row starts masked: its plaintext is never loaded into the renderer.
+      value: v.secret ? '' : stored,
+      description: v.description ?? '',
+      // The fallback is shown in the placeholder, so it must be masked too.
+      fallback: v.secret ? SECRET_MASK : v.value,
+      secret: !!v.secret,
+      _rid: `src:${i}`,
+      _origIndex: i,
+      _storedValue: stored,
+      _dirty: false,
+    }
+  })
 }
 
 export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
@@ -48,6 +68,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     activeEnvironmentId,
     setActiveEnvironment,
   } = useFlowStore()
+
+  const { ensureUsable } = useVault()
 
   const profiles = currentFlow?.profiles ?? []
   const environments = currentProject?.environments ?? []
@@ -168,14 +190,56 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
   }, [tableKey])
 
   const setCell = <K extends keyof VarRow>(rid: string, key: K, v: VarRow[K]) => {
-    setRows((prev) => prev.map((r) => (r._rid === rid ? { ...r, [key]: v } : r)))
+    setRows((prev) =>
+      prev.map((r) => (r._rid === rid ? { ...r, [key]: v, _dirty: key === 'value' ? true : r._dirty } : r)),
+    )
   }
 
   const addRow = () => {
     setRows((prev) => [
       ...prev,
-      { key: '', value: '', description: '', fallback: '', _rid: `new:${uuidv4()}`, _origIndex: null },
+      {
+        key: '', value: '', description: '', fallback: '', secret: false,
+        _rid: `new:${uuidv4()}`, _origIndex: null, _storedValue: '', _dirty: true,
+      },
     ])
+  }
+
+  /** Flip a row's private flag. Turning it ON needs a usable vault to encrypt with;
+   *  turning it OFF needs one to recover the plaintext being un-encrypted. */
+  const toggleSecret = async (rid: string) => {
+    const row = rows.find((r) => r._rid === rid)
+    if (!row || !ensureUsable()) return
+
+    if (!row.secret) {
+      setRows((prev) => prev.map((r) => (r._rid === rid ? { ...r, secret: true, _dirty: true } : r)))
+      return
+    }
+    let plain = row.value
+    if (!row._dirty && isCiphertext(row._storedValue)) {
+      try {
+        plain = await window.electronAPI.revealSecret(row._storedValue)
+      } catch {
+        return setError('無法解密此變數，請先解鎖保險庫')
+      }
+    }
+    setRows((prev) =>
+      prev.map((r) => (r._rid === rid ? { ...r, secret: false, value: plain, _dirty: true } : r)),
+    )
+  }
+
+  /** What actually gets written for a row: ciphertext for private values, and the
+   *  untouched stored ciphertext when the user never revealed or edited it. */
+  const storedValueFor = async (r: EditRow): Promise<string> => {
+    if (r.secret) {
+      return !r._dirty && isCiphertext(r._storedValue)
+        ? r._storedValue
+        : await window.electronAPI.encryptSecret(r.value)
+    }
+    if (!r._dirty && isCiphertext(r._storedValue)) {
+      return await window.electronAPI.revealSecret(r._storedValue)
+    }
+    return r.value
   }
 
   const handleSave = async () => {
@@ -184,14 +248,24 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     if (keys.some((k) => !k)) return setError('變數名稱不可為空')
     const dup = keys.find((k, i) => keys.indexOf(k) !== i)
     if (dup) return setError(`變數名稱重複：${dup}`)
+    if (rows.some((r) => r.secret) && !ensureUsable()) return
     setError(null)
+
+    let values: string[]
+    try {
+      values = await Promise.all(rows.map(storedValueFor))
+    } catch (err) {
+      return setError(`加密失敗：${String(err instanceof Error ? err.message : err)}`)
+    }
+
     await commitProfileVars(
       selectedProfile.id,
-      rows.map((r) => ({
+      rows.map((r, i) => ({
         origIndex: r._origIndex,
         key: r.key.trim(),
-        value: r.value,
+        value: values[i],
         description: r.description,
+        secret: r.secret,
       })),
       activeEnvironmentId,
     )
@@ -232,15 +306,18 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     }
   }
 
-  const envVarValueFor = (ev: { values: Record<string, string> }) =>
-    activeEnvironmentId ? (ev.values[activeEnvironmentId] ?? '') : ''
+  const envVarValueFor = (ev: { values: Record<string, string>; secret?: boolean }) =>
+    ev.secret ? SECRET_MASK : activeEnvironmentId ? (ev.values[activeEnvironmentId] ?? '') : ''
 
   const visibleEnvVars = (() => {
     const q = envSearch.trim().toLowerCase()
     if (!q) return projectEnvVars
     return projectEnvVars.filter(
       (ev) =>
-        ev.key.toLowerCase().includes(q) || envVarValueFor(ev).toLowerCase().includes(q),
+        ev.key.toLowerCase().includes(q) ||
+        // Private values are excluded from the search corpus — matching on them would
+        // turn the filter box into an oracle for the very value being hidden.
+        (!ev.secret && (ev.values[activeEnvironmentId ?? ''] ?? '').toLowerCase().includes(q)),
     )
   })()
 
@@ -672,6 +749,9 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                               {ev.key === DOMAIN_ENV_KEY && (
                                 <span style={{ fontSize: 10 }} title="保留變數">🔒</span>
                               )}
+                              {ev.secret && (
+                                <span style={{ fontSize: 10 }} title="私密資料（加密儲存）">🔐</span>
+                              )}
                               <div style={{ flex: 1 }} />
                               {copiedKey === ev.key && (
                                 <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>
@@ -756,6 +836,12 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       值{activeEnvName ? ` (${activeEnvName})` : ''}
                     </span>
                     <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>敘述（選填）</span>
+                    <span
+                      style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textAlign: 'center' }}
+                      title="私密資料：加密後才寫入檔案"
+                    >
+                      🔐
+                    </span>
                     <span />
                   </div>
 
@@ -781,15 +867,28 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       />
                       <input
                         ref={(el) => { valueInputRefs.current[row._rid] = el }}
+                        type={row.secret ? 'password' : 'text'}
                         value={row.value}
                         onChange={(e) => { rememberCaret(row._rid, e.currentTarget); setCell(row._rid, 'value', e.target.value) }}
                         onFocus={(e) => rememberCaret(row._rid, e.currentTarget)}
                         onSelect={(e) => rememberCaret(row._rid, e.currentTarget)}
                         onKeyDown={cellKeyDown}
-                        placeholder={activeEnvironmentId ? `預設: ${row.fallback || '(空)'}` : 'value'}
+                        // A private row loads masked with no plaintext in the renderer, and its
+                        // fallback is masked too (toEditRows) so the placeholder can't leak it.
+                        placeholder={
+                          row.secret && !row._dirty
+                            ? '（已加密，輸入以覆寫）'
+                            : activeEnvironmentId
+                              ? `預設: ${row.fallback || '(空)'}`
+                              : 'value'
+                        }
                         style={{
                           ...cellInputStyle,
-                          ...(activeEnvironmentId ? { borderColor: '#166534' } : {}),
+                          ...(row.secret
+                            ? { borderColor: '#a16207' }
+                            : activeEnvironmentId
+                              ? { borderColor: '#166534' }
+                              : {}),
                         }}
                       />
                       <input
@@ -799,6 +898,21 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         placeholder="說明此參數用途…"
                         style={{ ...cellInputStyle, color: '#94a3b8' }}
                       />
+                      <button
+                        onClick={() => void toggleSecret(row._rid)}
+                        title={row.secret ? '目前為私密資料（加密儲存）— 點擊取消' : '設為私密資料（加密後才寫入檔案，所有配置共用）'}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          cursor: 'pointer',
+                          fontSize: 13,
+                          padding: 2,
+                          opacity: row.secret ? 1 : 0.3,
+                          filter: row.secret ? undefined : 'grayscale(1)',
+                        }}
+                      >
+                        🔐
+                      </button>
                       <button
                         onClick={() => handleDeleteVar(row._rid)}
                         title="從所有配置刪除此變數"
@@ -901,8 +1015,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
   )
 }
 
-/** 參數名稱 / 值 / 敘述 / 🗑 — the value column is weighted since it holds long URLs and tokens. */
-const gridCols = '1fr 1.3fr 1fr 32px'
+/** 參數名稱 / 值 / 敘述 / 🔐 / 🗑 — the value column is weighted since it holds long URLs and tokens. */
+const gridCols = '1fr 1.3fr 1fr 28px 32px'
 
 const envRefBtnStyle: React.CSSProperties = {
   padding: '3px 10px',

@@ -145,7 +145,14 @@ interface FlowStore {
    */
   commitProfileVars: (
     profileId: string,
-    rows: { origIndex: number | null; key: string; value: string; description: string }[],
+    rows: {
+      origIndex: number | null
+      key: string
+      value: string
+      description: string
+      /** Applied to this key in EVERY profile — secrecy is a property of the key. */
+      secret?: boolean
+    }[],
     envId: string | null,
   ) => Promise<void>
 
@@ -177,7 +184,7 @@ interface FlowStore {
    * them. The reserved `domain` key is never renamed, whatever the draft says.
    */
   commitProjectEnvVars: (
-    rows: { origKey: string | null; key: string; value: string }[],
+    rows: { origKey: string | null; key: string; value: string; secret?: boolean }[],
     envId: string,
   ) => Promise<void>
 }
@@ -746,7 +753,15 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const newProfile: FlowProfile = {
       id: uuidv4(),
       name,
-      vars: existingVars.map((v) => ({ key: v.key, value: v.value, description: v.description ?? '' })),
+      // Carry envValues and secret across: a new profile that silently dropped the
+      // private flag would store the same key in the clear.
+      vars: existingVars.map((v) => ({
+        key: v.key,
+        value: v.value,
+        description: v.description ?? '',
+        ...(v.envValues ? { envValues: { ...v.envValues } } : {}),
+        ...(v.secret ? { secret: true } : {}),
+      })),
     }
     // Extend all callFlow node mappings to include the new profile.
     // Default to the same sub-flow profile as the last existing profile (best-guess default).
@@ -828,6 +843,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
         value: v.value,
         description: v.description ?? '',
         ...(v.envValues ? { envValues: { ...v.envValues } } : {}),
+        ...(v.secret ? { secret: true } : {}),
       })),
     }
     // Extend all callFlow node mappings, inheriting the source profile's mapping.
@@ -871,19 +887,22 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
             ? p.vars[row.origIndex]
             : undefined
         const kept = base ?? { key: row.key, value: '', description: '' }
-        if (!isEdited) return { ...kept, key: row.key }
+        // `secret` travels with the KEY, not the value, so every profile gets it — otherwise
+        // the same key would be encrypted in one profile and in the clear in another.
+        const shared = { key: row.key, secret: row.secret }
+        if (!isEdited) return { ...kept, ...shared }
 
         // The edited profile additionally takes value/description from the draft. With an
         // active environment the value lands on envValues[envId] rather than the base value.
         if (envId) {
           return {
             ...kept,
-            key: row.key,
+            ...shared,
             description: row.description,
             envValues: { ...kept.envValues, [envId]: row.value },
           }
         }
-        return { ...kept, key: row.key, value: row.value, description: row.description }
+        return { ...kept, ...shared, value: row.value, description: row.description }
       })
       return { ...p, vars }
     })
@@ -1091,11 +1110,14 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       // Existing row: carry every other environment's value across, keyed by the ORIGINAL key
       // (the draft may have renamed it). New row: start from an empty value map.
       const base = row.origKey !== null ? byKey.get(row.origKey) : undefined
-      // `domain` is reserved — its key can never change, whatever the draft says.
-      const key = base?.key === DOMAIN_ENV_KEY ? DOMAIN_ENV_KEY : row.key
+      // `domain` is reserved — its key can never change, and it can never be private:
+      // it is baked into goto URLs as a literal at export time.
+      const isDomain = base?.key === DOMAIN_ENV_KEY
+      const key = isDomain ? DOMAIN_ENV_KEY : row.key
       return {
         ...(base ?? {}),
         key,
+        secret: isDomain ? false : !!row.secret,
         values: { ...(base?.values ?? {}), [envId]: row.value },
       }
     })

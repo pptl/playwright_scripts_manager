@@ -1,10 +1,19 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import type { FlowProfile } from '@shared/types'
+import { SECRET_ENVELOPE_PREFIX, SECRET_MASK } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
+import { useVault } from '../../hooks/useVault'
+
+const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
+
+/** Node types whose value can be private. `goto` is excluded (its URL is rewritten by
+ *  domain substitution) and so is `upload` (fixture paths are not credentials). */
+const SECRETABLE_TYPES = ['fill', 'press', 'selectOption', 'assertText', 'assertValue']
 
 export function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode } = useFlowStore()
   const selectedNode = currentFlow?.nodes.find((n) => n.id === selectedNodeId)
+  const { ensureUsable } = useVault()
 
   // callFlow-specific state (loaded async; not an edited field)
   const [subFlowProfiles, setSubFlowProfiles] = useState<FlowProfile[]>([])
@@ -18,18 +27,60 @@ export function PropertyPanel() {
   const [value, setValue] = useState('')
   const [code, setCode] = useState('')
   const [profileMapping, setProfileMapping] = useState<Record<string, string | null>>({})
+  const [secret, setSecret] = useState(false)
+  /** What is on disk, so an untouched private value can be re-saved without re-encrypting. */
+  const [storedValue, setStoredValue] = useState('')
+  const [valueDirty, setValueDirty] = useState(false)
 
   // Re-sync on the node ID only — a new node OBJECT for the same node (drag, ACTION_UPDATED)
   // must not wipe what the user is typing.
   useEffect(() => {
     const node = useFlowStore.getState().currentFlow?.nodes.find((n) => n.id === selectedNodeId)
+    const isSecret = !!node?.action.secret
+    const stored = node?.action.value ?? ''
     setDesc(node?.action.description ?? '')
     setSelector(node?.action.selector ?? '')
     setLocatorExpr(node?.action.locatorExpr ?? '')
-    setValue(node?.action.value ?? '')
+    // A private node's plaintext is never loaded into the renderer — the field starts blank.
+    setValue(isSecret ? '' : stored)
     setCode(node?.action.code ?? '')
     setProfileMapping(node?.action.subFlowProfileMapping ?? {})
+    setSecret(isSecret)
+    setStoredValue(stored)
+    setValueDirty(false)
   }, [selectedNodeId])
+
+  /**
+   * Flip the node's private flag.
+   *
+   * Turning it ON also scrubs the plaintext out of the description: the recorder writes
+   * descriptions like 填入「hunter2」到「密碼」, and that string is committed to git,
+   * drawn on the canvas, and emitted as the test.step() name. Masking only the value
+   * would leave the secret in plain sight everywhere else.
+   */
+  const toggleSecret = async () => {
+    if (!ensureUsable()) return
+    if (!secret) {
+      const plain = value
+      if (plain) {
+        setDesc((d) => d.split(plain).join(SECRET_MASK))
+      }
+      setSecret(true)
+      setValueDirty(true)
+      return
+    }
+    let plain = value
+    if (!valueDirty && isCiphertext(storedValue)) {
+      try {
+        plain = await window.electronAPI.revealSecret(storedValue)
+      } catch {
+        return
+      }
+    }
+    setSecret(false)
+    setValue(plain)
+    setValueDirty(true)
+  }
 
   /**
    * Save re-reads the node from the store rather than using the captured `selectedNode`,
@@ -67,17 +118,36 @@ export function PropertyPanel() {
       uploadUpdates = { filePaths }
     }
 
+    // Private values are stored as ciphertext. An untouched one is written back verbatim
+    // so re-saving doesn't need the plaintext the panel never held.
+    let storedForDisk = effectiveValue
+    try {
+      if (secret) {
+        storedForDisk = !valueDirty && isCiphertext(storedValue)
+          ? storedValue
+          : await window.electronAPI.encryptSecret(effectiveValue)
+      } else if (!valueDirty && isCiphertext(storedValue)) {
+        storedForDisk = await window.electronAPI.revealSecret(storedValue)
+      }
+    } catch (err) {
+      console.error('[FlowTest] 私密資料處理失敗', err)
+      return
+    }
+
     updateNode(node.id, {
       action: {
         ...node.action,
         description: desc,
         selector,
+        secret,
         // Written verbatim so a cleared field actually clears. Only include locatorExpr for
         // nodes that already have one, so nodes without a locator don't gain an empty string.
         ...(node.action.locatorExpr !== undefined ? { locatorExpr } : {}),
-        value: effectiveValue,
-        // Multi-select nodes keep values[] in sync with the comma-joined value field
-        ...(node.action.values
+        value: storedForDisk,
+        // Multi-select nodes keep values[] in sync with the comma-joined value field.
+        // Skipped for private nodes — values[] would be a plaintext copy of what `value`
+        // just encrypted.
+        ...(node.action.values && !secret
           ? { values: value.split(',').map((s) => s.trim()).filter(Boolean) }
           : {}),
         // Upload nodes do the same for filePaths[], which replay/export read first
@@ -86,10 +156,12 @@ export function PropertyPanel() {
         ...callFlowUpdates,
       },
     })
-    if (effectiveValue !== value) setValue(effectiveValue)
+    if (!secret && effectiveValue !== value) setValue(effectiveValue)
+    setStoredValue(storedForDisk)
+    setValueDirty(false)
     const updated = useFlowStore.getState().currentFlow
     if (updated) await window.electronAPI.saveFlow(updated)
-  }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector, locatorExpr, value, code, profileMapping])
+  }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector, locatorExpr, value, code, profileMapping, secret, storedValue, valueDirty])
 
   /** Enter saves; spread onto the single-line inputs. */
   const fieldKeyDown = (e: React.KeyboardEvent) => {
@@ -206,13 +278,30 @@ export function PropertyPanel() {
                 selectedNode.action.type === 'assertValue' ? '驗證值' :
                 selectedNode.action.type === 'upload' ? '檔案路徑' : '值'
               }>
-                <div style={{ display: 'flex', gap: 6 }}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                   <input
+                    type={secret ? 'password' : 'text'}
                     value={value}
-                    onChange={(e) => setValue(e.target.value)}
+                    onChange={(e) => { setValue(e.target.value); setValueDirty(true) }}
                     onKeyDown={fieldKeyDown}
-                    style={inputStyle}
+                    placeholder={secret && !valueDirty ? '（已加密，輸入以覆寫）' : undefined}
+                    style={{ ...inputStyle, ...(secret ? { borderColor: '#a16207' } : {}) }}
                   />
+                  {SECRETABLE_TYPES.includes(selectedNode.action.type) && (
+                    <button
+                      onClick={() => void toggleSecret()}
+                      title={secret
+                        ? '目前為私密資料（加密儲存）— 點擊取消'
+                        : '設為私密資料：值會加密後才寫入檔案，描述中的明文也會一併遮蔽'}
+                      style={{
+                        ...pickBtnStyle,
+                        opacity: secret ? 1 : 0.45,
+                        filter: secret ? undefined : 'grayscale(1)',
+                      }}
+                    >
+                      🔐
+                    </button>
+                  )}
                   {selectedNode.action.type === 'upload' && (
                     <button onClick={pickFiles} style={pickBtnStyle} title="選擇檔案（會複製到 fixtures/）">
                       📂 選擇檔案…
@@ -220,9 +309,11 @@ export function PropertyPanel() {
                   )}
                 </div>
                 <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
-                  {selectedNode.action.type === 'upload'
-                    ? '路徑相對於工作區（fixtures/…）；絕對路徑會在儲存時自動轉換，多檔用逗號分隔'
-                    : <>可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code></>}
+                  {secret
+                    ? '🔐 加密儲存；匯出的腳本以 process.env 參照，不含明文。'
+                    : selectedNode.action.type === 'upload'
+                      ? '路徑相對於工作區（fixtures/…）；絕對路徑會在儲存時自動轉換，多檔用逗號分隔'
+                      : <>可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code></>}
                 </div>
               </Field>
             )}

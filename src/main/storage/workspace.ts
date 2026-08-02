@@ -23,6 +23,14 @@ const ARTIFACT_DIR = '.flowtest'
 let workspaceRoot: string | null = null
 let recent: string[] = []
 let settingsLoaded = false
+/**
+ * Vault passphrases, keyed by workspace path and encrypted with the OS keychain
+ * (DPAPI on Windows) by the vault module before they get here.
+ *
+ * Kept in userData rather than the workspace for the same reason as workspaceRoot:
+ * the workspace is the thing that gets committed, and this must never be.
+ */
+let vaultKeys: Record<string, string> = {}
 
 /**
  * Deliberately stored OUTSIDE any workspace — it is what tells us which
@@ -65,8 +73,13 @@ export async function loadSettings(): Promise<void> {
 
   try {
     const raw = await fs.readFile(settingsPath(), 'utf-8')
-    const data = JSON.parse(raw) as { workspaceRoot?: string; recentWorkspaces?: string[] }
+    const data = JSON.parse(raw) as {
+      workspaceRoot?: string
+      recentWorkspaces?: string[]
+      vaultKeys?: Record<string, string>
+    }
     recent = Array.isArray(data.recentWorkspaces) ? data.recentWorkspaces : []
+    vaultKeys = data.vaultKeys && typeof data.vaultKeys === 'object' ? data.vaultKeys : {}
 
     // A remembered workspace that no longer exists must not block startup.
     if (data.workspaceRoot && (await isDirectory(data.workspaceRoot))) {
@@ -89,9 +102,21 @@ export async function loadSettings(): Promise<void> {
 }
 
 async function persist(): Promise<void> {
-  const payload = { workspaceRoot, recentWorkspaces: recent }
+  const payload = { workspaceRoot, recentWorkspaces: recent, vaultKeys }
   await fs.mkdir(app.getPath('userData'), { recursive: true })
   await fs.writeFile(settingsPath(), JSON.stringify(payload, null, 2), 'utf-8')
+}
+
+/** The keychain-encrypted vault passphrase remembered for a workspace, if any. */
+export function readRememberedPassphrase(root: string): string | null {
+  return vaultKeys[root] ?? null
+}
+
+/** Remember (or, with null, forget) a workspace's keychain-encrypted vault passphrase. */
+export async function rememberPassphrase(root: string, encrypted: string | null): Promise<void> {
+  if (encrypted === null) delete vaultKeys[root]
+  else vaultKeys[root] = encrypted
+  await persist()
 }
 
 export async function removeRecentWorkspace(dir: string): Promise<void> {

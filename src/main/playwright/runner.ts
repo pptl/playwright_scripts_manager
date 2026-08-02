@@ -82,12 +82,16 @@ export function runPlaywright(
   args: string[],
   cwd: string,
   onOutput: (chunk: string) => void,
+  /** Private values, as FT_SECRET_* names. Generated specs read them via process.env,
+   *  so an in-app run never writes a plaintext credential to disk. */
+  extraEnv: Record<string, string> = {},
 ): Promise<SpawnResult> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [cli.path, ...args], {
       cwd,
       env: {
         ...process.env,
+        ...extraEnv,
         ELECTRON_RUN_AS_NODE: '1',
         NODE_PATH: process.env.NODE_PATH
           ? `${cli.nodePath}${delimiter}${process.env.NODE_PATH}`

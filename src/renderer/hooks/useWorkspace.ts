@@ -20,7 +20,7 @@ function notify(title: string, message: string): Promise<string | null> {
  * flow ids that no longer exist here). Order matters — see switchTo.
  */
 export function useWorkspace() {
-  const { info, loading, installing, setInfo, forget, installBrowser } = useWorkspaceStore()
+  const { info, loading, installing, vault, setInfo, forget, installBrowser } = useWorkspaceStore()
   const { refreshFlowList, refreshProjectList } = useFlowManager()
 
   const resetForNewWorkspace = useCallback(async () => {
@@ -29,6 +29,9 @@ export function useWorkspace() {
     useFlowStore.getState().setCurrentFlow(null)
     useFlowStore.getState().setFlows([])
     useFlowStore.getState().setProjects([])
+    // The main process already dropped the old key; pick up the new workspace's state
+    // (which may auto-unlock from the remembered passphrase).
+    await useWorkspaceStore.getState().refreshVault()
     await refreshFlowList()
     await refreshProjectList()
   }, [refreshFlowList, refreshProjectList])
@@ -69,6 +72,7 @@ export function useWorkspace() {
     info,
     loading,
     installing,
+    vault,
     root: info?.root ?? null,
     pick,
     switchTo,

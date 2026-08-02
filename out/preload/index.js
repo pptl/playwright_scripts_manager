@@ -39,6 +39,16 @@ const IPC_CHANNELS = {
   // Renderer → Main (download the Playwright browsers)
   BROWSER_INSTALL: "browser:install",
   BROWSER_CHECK: "browser:check",
+  // Private data — the key never leaves the main process; the renderer only ever
+  // holds ciphertext, plus whatever single value it explicitly asks to reveal.
+  VAULT_STATUS: "vault:status",
+  VAULT_SETUP: "vault:setup",
+  VAULT_UNLOCK: "vault:unlock",
+  VAULT_LOCK: "vault:lock",
+  VAULT_CHANGE_PASSPHRASE: "vault:changePassphrase",
+  SECRET_ENCRYPT: "secret:encrypt",
+  SECRET_REVEAL: "secret:reveal",
+  SECRETS_FILE_WRITE: "secret:writeFile",
   // Main → Renderer
   WORKSPACE_RELOAD: "workspace:reload",
   LOCATOR_PICK_NEEDED: "locator:pickNeeded",
@@ -92,6 +102,16 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   // Browsers
   checkBrowser: () => electron.ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CHECK),
   installBrowser: () => electron.ipcRenderer.invoke(IPC_CHANNELS.BROWSER_INSTALL),
+  // Private data — the vault key stays in the main process; the renderer holds only
+  // ciphertext, plus whatever single value it explicitly asks to reveal.
+  getVaultStatus: () => electron.ipcRenderer.invoke(IPC_CHANNELS.VAULT_STATUS),
+  setupVault: (passphrase) => electron.ipcRenderer.invoke(IPC_CHANNELS.VAULT_SETUP, passphrase),
+  unlockVault: (passphrase) => electron.ipcRenderer.invoke(IPC_CHANNELS.VAULT_UNLOCK, passphrase),
+  lockVault: () => electron.ipcRenderer.invoke(IPC_CHANNELS.VAULT_LOCK),
+  changeVaultPassphrase: (oldPassphrase, newPassphrase) => electron.ipcRenderer.invoke(IPC_CHANNELS.VAULT_CHANGE_PASSPHRASE, { oldPassphrase, newPassphrase }),
+  encryptSecret: (plain) => electron.ipcRenderer.invoke(IPC_CHANNELS.SECRET_ENCRYPT, plain),
+  revealSecret: (envelope) => electron.ipcRenderer.invoke(IPC_CHANNELS.SECRET_REVEAL, envelope),
+  writeSecretsFile: (flow, config) => electron.ipcRenderer.invoke(IPC_CHANNELS.SECRETS_FILE_WRITE, { flow, config }),
   // Projects
   saveProject: (project) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, { project }),
   loadProject: (projectId) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_LOAD, { projectId }),

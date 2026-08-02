@@ -73,6 +73,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkBrowser: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CHECK),
   installBrowser: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_INSTALL),
 
+  // Private data — the vault key stays in the main process; the renderer holds only
+  // ciphertext, plus whatever single value it explicitly asks to reveal.
+  getVaultStatus: () => ipcRenderer.invoke(IPC_CHANNELS.VAULT_STATUS),
+  setupVault: (passphrase: string) => ipcRenderer.invoke(IPC_CHANNELS.VAULT_SETUP, passphrase),
+  unlockVault: (passphrase: string) => ipcRenderer.invoke(IPC_CHANNELS.VAULT_UNLOCK, passphrase),
+  lockVault: () => ipcRenderer.invoke(IPC_CHANNELS.VAULT_LOCK),
+  changeVaultPassphrase: (oldPassphrase: string, newPassphrase: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.VAULT_CHANGE_PASSPHRASE, { oldPassphrase, newPassphrase }),
+  encryptSecret: (plain: string) => ipcRenderer.invoke(IPC_CHANNELS.SECRET_ENCRYPT, plain),
+  revealSecret: (envelope: string) => ipcRenderer.invoke(IPC_CHANNELS.SECRET_REVEAL, envelope),
+  writeSecretsFile: (flow: Flow, config: ExportConfig) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SECRETS_FILE_WRITE, { flow, config }),
+
   // Projects
   saveProject: (project: Project) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, { project }),
   loadProject: (projectId: string) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_LOAD, { projectId }),

@@ -3,6 +3,7 @@ import { useFlowStore } from '../../stores/flowStore'
 import { isCallFlowAction } from '@shared/types'
 import type { Flow } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
+import { SecretValue } from '../common/SecretValue'
 
 export function SessionVarList() {
   const { currentFlow, updateNode, runWithoutHistory } = useFlowStore()
@@ -17,6 +18,7 @@ export function SessionVarList() {
       placeholder: `{{${n.action.captureAs}}}`,
       description: n.action.description,
       value: n.action.value ?? '',
+      secret: !!n.action.secret,
     }))
 
   // Collect all callFlow nodes in the current flow so their sub-flow vars are always visible
@@ -247,6 +249,7 @@ export function SessionVarList() {
               </div>
               {v.value && (
                 <div
+                  onClick={(e) => e.stopPropagation()}
                   style={{
                     fontSize: 10,
                     color: '#64748b',
@@ -256,7 +259,7 @@ export function SessionVarList() {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  值：{v.value}
+                  值：<SecretValue value={v.value} secret={v.secret} />
                 </div>
               )}
             </div>

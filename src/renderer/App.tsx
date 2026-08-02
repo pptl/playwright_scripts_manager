@@ -8,6 +8,7 @@ import { SessionVarList } from './components/SessionVarList/SessionVarList'
 import { ProfileVarList } from './components/ProfileVarList/ProfileVarList'
 import { ProjectEnvVarList } from './components/ProjectEnvVar/ProjectEnvVarList'
 import { ConfirmHost } from './components/common/ConfirmDialog'
+import { VaultHost } from './components/Vault/VaultHost'
 import { WelcomeScreen } from './components/Welcome/WelcomeScreen'
 import { usePlaywrightEvents } from './hooks/usePlaywrightEvents'
 import { useUndoRedo } from './hooks/useUndoRedo'
@@ -60,6 +61,7 @@ export default function App() {
         )}
       </div>
       <ConfirmHost />
+      <VaultHost />
     </div>
   )
 }

@@ -165,10 +165,25 @@ export interface CodegenVarScope {
   profileVars?: Set<string>
   /** Active project env-var keys — emitted as `_ftEnv_<key>`. */
   envVars?: Set<string>
+  /**
+   * Resolves a private key to the identifier declared for it at file scope (`_ftSec_<n>`),
+   * which reads from process.env rather than holding a literal. Returns undefined for
+   * keys that are not private.
+   *
+   * Consulted ahead of every other tier, so a private value can never be baked into the
+   * spec as a string — including on the sub-flow `inlineVars` path, which otherwise
+   * bypasses the `_ftProf_*` declarations entirely.
+   *
+   * A function rather than a map because the exporter registers on lookup: only the
+   * secrets a spec actually references get declared in it.
+   */
+  secretVars?: (name: string) => string | undefined
 }
 
 /** Map a placeholder name to the JS expression producing its value, or null if unknown. */
 function varToCodeRef(name: string, scope: CodegenVarScope): string | null {
+  const secret = scope.secretVars?.(name)
+  if (secret) return secret
   if (scope.sessionVars?.has(name)) return name
   if (scope.profileVars?.has(name)) return `${PROFILE_VAR_PREFIX}${name}`
   if (scope.envVars?.has(name)) return `${ENV_VAR_PREFIX}${name}`
@@ -200,6 +215,13 @@ function escapeTemplateBody(value: string): string {
  */
 export function valueToCodeExpr(value: string, scope: CodegenVarScope = {}): string {
   if (!hasVariables(value)) return toSingleQuoted(value)
+  // A value that is exactly one private placeholder becomes a bare reference rather than
+  // a one-slot template literal — `fill(_ftSec_pw)` reads better than `fill(`${_ftSec_pw}`)`.
+  const onlyVar = value.match(/^\{\{(\w+)\}\}$/)
+  if (onlyVar) {
+    const secret = scope.secretVars?.(onlyVar[1])
+    if (secret) return secret
+  }
   const inner = escapeTemplateBody(value).replace(/\{\{(\w+)\}\}/g, (m, name) => {
     const ref = varToCodeRef(name, scope)
     return ref ? `\${${ref}}` : m
@@ -220,7 +242,10 @@ export function sessionAwareValueToCodeExpr(
   const fullScope: CodegenVarScope = { ...scope, sessionVars }
   if (!hasVariables(value)) return toSingleQuoted(value)
   const singleVar = value.match(/^\{\{(\w+)\}\}$/)
-  if (singleVar && sessionVars.has(singleVar[1])) return singleVar[1]
+  // A private key outranks a same-named session var — it must never become a literal.
+  if (singleVar && !scope.secretVars?.(singleVar[1]) && sessionVars.has(singleVar[1])) {
+    return singleVar[1]
+  }
   return valueToCodeExpr(value, fullScope)
 }
 
@@ -263,9 +288,13 @@ export function locatorExprToCode(expr: string, scope: CodegenVarScope = {}): st
  *  Keys that aren't plain word characters are skipped — they'd produce an invalid
  *  identifier and break the whole spec, and `{{...}}` placeholders only ever match
  *  \w+ so such a key could never be referenced anyway. */
-function emitVarDecls(vars: Record<string, string>, prefix: string): string {
+function emitVarDecls(
+  vars: Record<string, string>,
+  prefix: string,
+  skip: Set<string> = new Set(),
+): string {
   return Object.entries(vars)
-    .filter(([key]) => /^\w+$/.test(key))
+    .filter(([key]) => /^\w+$/.test(key) && !skip.has(key))
     .map(([key, value]) => `const ${prefix}${key} = ${JSON.stringify(value)};`)
     .join('\n')
 }
@@ -274,18 +303,62 @@ function emitVarDecls(vars: Record<string, string>, prefix: string): string {
  * Emit top-level const declarations for profile variables.
  * e.g. { admin_name: 'admin', region: 'apac' }
  *   → "const _ftProf_admin_name = 'admin';\nconst _ftProf_region = 'apac';"
+ *
+ * `secretKeys` are omitted — they get a `_ftSec_*` declaration instead, so their values
+ * never appear as literals in the generated file.
  */
-export function emitProfileVarDecls(profileVars: Record<string, string>): string {
-  return emitVarDecls(profileVars, PROFILE_VAR_PREFIX)
+export function emitProfileVarDecls(
+  profileVars: Record<string, string>,
+  secretKeys?: Set<string>,
+): string {
+  return emitVarDecls(profileVars, PROFILE_VAR_PREFIX, secretKeys)
 }
 
 /**
  * Emit top-level const declarations for the active project's environment variables.
  * e.g. { domain: 'https://x.test' } → "const _ftEnv_domain = 'https://x.test';"
  */
-export function emitEnvVarDecls(envVars: Record<string, string>): string {
-  return emitVarDecls(envVars, ENV_VAR_PREFIX)
+export function emitEnvVarDecls(
+  envVars: Record<string, string>,
+  secretKeys?: Set<string>,
+): string {
+  return emitVarDecls(envVars, ENV_VAR_PREFIX, secretKeys)
 }
+
+/** Identifier prefix for private values resolved from the environment at run time. */
+export const SECRET_VAR_PREFIX = '_ftSec_'
+
+/**
+ * Runtime lookup for private values, injected into any spec that references one.
+ *
+ * Playwright has no secrets mechanism of its own — the official pattern is `process.env`
+ * fed from a gitignored file (https://playwright.dev/docs/test-parameterize#env-files).
+ * An in-app run gets the values injected straight into the child process env; the file
+ * fallback is what makes an exported spec runnable with plain `npx playwright test`.
+ *
+ * Reading the file here rather than from playwright.config.ts keeps the spec
+ * self-sufficient, so no generated config has to be regenerated for existing workspaces.
+ */
+export const SECRET_HELPER_CODE = `
+function _ftSecret(name: string): string {
+  const fromEnv = process.env[name];
+  if (fromEnv !== undefined) return fromEnv;
+  try {
+    const text = _ftFs.readFileSync(process.env.FT_SECRETS_FILE ?? '.flowtest/secrets.env', 'utf-8');
+    for (const line of text.split(/\\r?\\n/)) {
+      const eq = line.indexOf('=');
+      if (eq > 0 && line.slice(0, eq).trim() === name) {
+        return line.slice(eq + 1).replace(/\\\\n/g, '\\n');
+      }
+    }
+  } catch {
+    // No secrets file — fall through to the error below.
+  }
+  throw new Error(
+    \`[FlowTest] 缺少私密變數 \${name}。請在 FlowTest 中按「匯出密鑰檔」，或自行設定同名環境變數。\`
+  );
+}
+`
 
 /** Helper functions block to inject into generated spec files when built-in variables are used. */
 export const VARIABLE_HELPERS_CODE = `

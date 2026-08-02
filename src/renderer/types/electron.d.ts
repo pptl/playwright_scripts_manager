@@ -1,4 +1,4 @@
-import type { Action, ActionType, ActionUpdatedPayload, Flow, FlowNode, FlowListItem, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload, Project, LocatorPickPayload, WorkspaceInfo } from '../../shared/types'
+import type { Action, ActionType, ActionUpdatedPayload, Flow, FlowNode, FlowListItem, ExportConfig, ReplayNodeCompletePayload, RecordingStartPayload, TestFinishedPayload, Project, LocatorPickPayload, WorkspaceInfo, VaultStatus } from '../../shared/types'
 
 export interface ElectronAPI {
   launchBrowser: () => Promise<void>
@@ -48,6 +48,27 @@ export interface ElectronAPI {
   checkBrowser: () => Promise<boolean>
   installBrowser: () => Promise<boolean>
   onWorkspaceReload: (cb: () => void) => () => void
+  /** Vault state of the open workspace; also triggers the auto-unlock attempt. */
+  getVaultStatus: () => Promise<VaultStatus>
+  /** Create the vault. Throws if one already exists. */
+  setupVault: (passphrase: string) => Promise<VaultStatus>
+  /** `ok: false` means a wrong passphrase, not an error. */
+  unlockVault: (passphrase: string) => Promise<{ ok: boolean; status: VaultStatus }>
+  lockVault: () => Promise<VaultStatus>
+  /** Re-encrypts every stored secret under the new passphrase before committing it. */
+  changeVaultPassphrase: (
+    oldPassphrase: string,
+    newPassphrase: string,
+  ) => Promise<{ ok: boolean; status: VaultStatus }>
+  /** Encrypt one value for storage. Requires an unlocked vault. */
+  encryptSecret: (plain: string) => Promise<string>
+  /** Decrypt one value for the 👁 reveal. Non-ciphertext passes through. */
+  revealSecret: (envelope: string) => Promise<string>
+  /** Write the gitignored .flowtest/secrets.env that external runs read. */
+  writeSecretsFile: (
+    flow: Flow,
+    config: ExportConfig,
+  ) => Promise<{ path: string; count: number }>
 }
 
 declare global {

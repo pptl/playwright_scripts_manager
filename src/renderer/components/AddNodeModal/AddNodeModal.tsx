@@ -31,7 +31,9 @@ export function AddNodeModal({ onConfirm, onClose }: AddNodeModalProps) {
 
   // Collect the variable names available inside `vars`.
   const varRefs = useMemo(() => {
-    const refs: { label: string; snippet: string; group: string }[] = []
+    // `secret` only marks the entry with a 🔐 — the list shows names, never values, and
+    // at run time `vars.<key>` holds the decrypted value like any other.
+    const refs: { label: string; snippet: string; group: string; secret?: boolean }[] = []
 
     // Built-ins are exposed as functions on vars (fresh value each call)
     for (const v of BUILT_IN_VARIABLES) {
@@ -42,12 +44,12 @@ export function AddNodeModal({ onConfirm, onClose }: AddNodeModalProps) {
     const profile =
       currentFlow?.profiles?.find((p) => p.id === activeProfileId) ?? currentFlow?.profiles?.[0]
     for (const pv of profile?.vars ?? []) {
-      if (pv.key) refs.push({ label: `vars.${pv.key}`, snippet: `vars.${pv.key}`, group: '環境配置' })
+      if (pv.key) refs.push({ label: `vars.${pv.key}`, snippet: `vars.${pv.key}`, group: '環境配置', secret: pv.secret })
     }
 
     // Project environment variables
     for (const ev of currentProject?.envVars ?? []) {
-      if (ev.key) refs.push({ label: `vars.${ev.key}`, snippet: `vars.${ev.key}`, group: '專案環境' })
+      if (ev.key) refs.push({ label: `vars.${ev.key}`, snippet: `vars.${ev.key}`, group: '專案環境', secret: ev.secret })
     }
 
     // Session variables (captureAs across the current flow)
@@ -209,7 +211,10 @@ export function AddNodeModal({ onConfirm, onClose }: AddNodeModalProps) {
                       gap: 6,
                     }}
                   >
-                    <code style={{ fontSize: 11, color: '#7dd3fc' }}>{r.label}</code>
+                    <code style={{ fontSize: 11, color: '#7dd3fc' }}>
+                      {r.label}
+                      {r.secret ? <span title="私密資料（執行時解密）"> 🔐</span> : null}
+                    </code>
                     {copied === r.snippet ? (
                       <span style={{ fontSize: 9, color: '#4ade80' }}>已複製</span>
                     ) : (

@@ -212,7 +212,8 @@ function FlowCanvasInner() {
       }
       const pending = pendingSaveRef.current
       pendingSaveRef.current = null
-      if (pending) window.electronAPI.saveFlow(pending).catch(console.error)
+      // Only drag saves are ever pending here, so the same touch:false applies.
+      if (pending) window.electronAPI.saveFlow(pending, false).catch(console.error)
     }
   }, [currentFlow?.id])
 
@@ -245,7 +246,10 @@ function FlowCanvasInner() {
       // position per node from those, then persist it when the drag stops.
       for (const c of changes) {
         if (c.type === 'position' && (c as any).position) {
-          dragPosRef.current.set((c as any).id, (c as any).position)
+          // Rounded: sub-pixel coordinates are invisible on screen but show up as
+          // noise in the flow's JSON every time it is committed.
+          const { x, y } = (c as any).position
+          dragPosRef.current.set((c as any).id, { x: Math.round(x), y: Math.round(y) })
         }
       }
 
@@ -289,7 +293,9 @@ function FlowCanvasInner() {
           saveTimerRef.current = null
           const pending = pendingSaveRef.current
           pendingSaveRef.current = null
-          if (pending) window.electronAPI.saveFlow(pending).catch(console.error)
+          // touch:false — moving a node is not a content change, and bumping
+          // updatedAt on every drag makes the JSON conflict in git for nothing.
+          if (pending) window.electronAPI.saveFlow(pending, false).catch(console.error)
         }, 500)
       }
     },

@@ -7199,6 +7199,8 @@ const DEFAULT_PROJECT_ID = "__default__";
 const DOMAIN_ENV_KEY = "domain";
 const DEFAULT_ENV_NAME = "DEV";
 const DEFAULT_DOMAIN = "http://localhost:3000/";
+const SECRET_ENVELOPE_PREFIX = "enc:v1:";
+const SECRET_MASK = "••••••";
 const NODE_WIDTH = 200;
 const NODE_HEIGHT = 70;
 const H_MARGIN = 25;
@@ -7898,7 +7900,15 @@ const useFlowStore = create$1((set2, get2) => ({
     const newProfile = {
       id: v4(),
       name,
-      vars: existingVars.map((v2) => ({ key: v2.key, value: v2.value, description: v2.description ?? "" }))
+      // Carry envValues and secret across: a new profile that silently dropped the
+      // private flag would store the same key in the clear.
+      vars: existingVars.map((v2) => ({
+        key: v2.key,
+        value: v2.value,
+        description: v2.description ?? "",
+        ...v2.envValues ? { envValues: { ...v2.envValues } } : {},
+        ...v2.secret ? { secret: true } : {}
+      }))
     };
     const updatedNodes = flow.nodes.map((n2) => {
       if (n2.action.type === "callFlow" && n2.action.subFlowProfileMapping) {
@@ -7972,7 +7982,8 @@ const useFlowStore = create$1((set2, get2) => ({
         key: v2.key,
         value: v2.value,
         description: v2.description ?? "",
-        ...v2.envValues ? { envValues: { ...v2.envValues } } : {}
+        ...v2.envValues ? { envValues: { ...v2.envValues } } : {},
+        ...v2.secret ? { secret: true } : {}
       }))
     };
     const updatedNodes = flow.nodes.map((n2) => {
@@ -8008,16 +8019,17 @@ const useFlowStore = create$1((set2, get2) => ({
       const vars = rows.map((row) => {
         const base = row.origIndex !== null ? p2.vars[row.origIndex] : void 0;
         const kept = base ?? { key: row.key, value: "", description: "" };
-        if (!isEdited) return { ...kept, key: row.key };
+        const shared = { key: row.key, secret: row.secret };
+        if (!isEdited) return { ...kept, ...shared };
         if (envId) {
           return {
             ...kept,
-            key: row.key,
+            ...shared,
             description: row.description,
             envValues: { ...kept.envValues, [envId]: row.value }
           };
         }
-        return { ...kept, key: row.key, value: row.value, description: row.description };
+        return { ...kept, ...shared, value: row.value, description: row.description };
       });
       return { ...p2, vars };
     });
@@ -8190,10 +8202,12 @@ const useFlowStore = create$1((set2, get2) => ({
     const byKey = new Map(existing.map((v2) => [v2.key, v2]));
     const envVars = rows.map((row) => {
       const base = row.origKey !== null ? byKey.get(row.origKey) : void 0;
-      const key = base?.key === DOMAIN_ENV_KEY ? DOMAIN_ENV_KEY : row.key;
+      const isDomain = base?.key === DOMAIN_ENV_KEY;
+      const key = isDomain ? DOMAIN_ENV_KEY : row.key;
       return {
         ...base ?? {},
         key,
+        secret: isDomain ? false : !!row.secret,
         values: { ...base?.values ?? {}, [envId]: row.value }
       };
     });
@@ -8295,18 +8309,72 @@ function resolveValue(value, profileVars, envVars) {
 function hasVariables(value) {
   return /\{\{.+?\}\}/.test(value);
 }
-function buildProfileVars(flow, activeProfileId, activeEnvironmentId, envVars) {
-  const profile = flow?.profiles?.find((p2) => p2.id === activeProfileId);
+function getEnvVars(project, activeEnvironmentId) {
+  return flattenProjectEnvVars(project?.envVars, activeEnvironmentId);
+}
+function getSecretEnvKeys(project) {
+  return (project?.envVars ?? []).filter((v2) => v2.secret).map((v2) => v2.key);
+}
+function buildProfileVars$1(profile, activeEnvironmentId, envVars, secretEnvKeys = []) {
   if (!profile) return void 0;
+  const secret = new Set(secretEnvKeys);
+  const resolvable = Object.fromEntries(
+    Object.entries(envVars).filter(([k2]) => !secret.has(k2))
+  );
   return Object.fromEntries(
     profile.vars.map((v2) => {
       const raw = (activeEnvironmentId && v2.envValues?.[activeEnvironmentId]) ?? v2.value;
-      return [v2.key, resolveValue(raw, void 0, envVars)];
+      return [v2.key, resolveValue(raw, void 0, resolvable)];
     })
   );
 }
-function getEnvVars(currentProject, activeEnvironmentId) {
-  return flattenProjectEnvVars(currentProject?.envVars, activeEnvironmentId);
+const useWorkspaceStore = create$1((set2) => ({
+  info: null,
+  loading: true,
+  installing: false,
+  vault: null,
+  vaultDialog: null,
+  load: async () => {
+    const info = await window.electronAPI.getWorkspace();
+    set2({ info, loading: false });
+    if (info.root) set2({ vault: await window.electronAPI.getVaultStatus() });
+  },
+  setInfo: (info) => set2({ info, loading: false }),
+  // Also runs the main process's auto-unlock attempt against the remembered passphrase.
+  refreshVault: async () => {
+    const vault = await window.electronAPI.getVaultStatus();
+    set2({ vault });
+    return vault;
+  },
+  setVault: (vault) => set2({ vault }),
+  openVaultDialog: (mode, reason) => set2({ vaultDialog: { mode, reason } }),
+  closeVaultDialog: () => set2({ vaultDialog: null }),
+  forget: async (dir) => {
+    set2({ info: await window.electronAPI.forgetWorkspace(dir) });
+  },
+  installBrowser: async () => {
+    set2({ installing: true });
+    try {
+      await window.electronAPI.installBrowser();
+      set2({ info: await window.electronAPI.getWorkspace() });
+    } finally {
+      set2({ installing: false });
+    }
+  }
+}));
+function blockedByLock(reason) {
+  const { vault, openVaultDialog } = useWorkspaceStore.getState();
+  if (!vault || vault.state !== "locked") return false;
+  openVaultDialog("unlock", reason);
+  return true;
+}
+function buildProfileVars(flow, activeProfileId, activeEnvironmentId, envVars, secretEnvKeys) {
+  return buildProfileVars$1(
+    flow?.profiles?.find((p2) => p2.id === activeProfileId),
+    activeEnvironmentId,
+    envVars,
+    secretEnvKeys
+  );
 }
 function usePlaywright() {
   const { setIsRecording, setIsReplaying, clearReplayStatus } = useFlowStore();
@@ -8331,10 +8399,11 @@ function usePlaywright() {
     async (fromNodeId) => {
       const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore.getState();
       if (!currentFlow) return;
+      if (blockedByLock("分支錄製會先重播到該節點，需要讀取私密資料。請先解鎖。")) return;
       useFlowStore.getState().setRecordingHead(fromNodeId);
       setIsRecording(true);
       const envVars = getEnvVars(currentProject, activeEnvironmentId);
-      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars);
+      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars, getSecretEnvKeys(currentProject));
       try {
         await window.electronAPI.startRecording({
           baseURL: currentFlow.baseURL,
@@ -8371,10 +8440,11 @@ function usePlaywright() {
     async (targetNodeId, speed) => {
       const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore.getState();
       if (!currentFlow) return;
+      if (blockedByLock("重播需要讀取私密資料，請先解鎖。")) return;
       clearReplayStatus();
       setIsReplaying(true);
       const envVars = getEnvVars(currentProject, activeEnvironmentId);
-      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars);
+      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars, getSecretEnvKeys(currentProject));
       try {
         await window.electronAPI.replayToNode(
           currentFlow.nodes,
@@ -8446,6 +8516,93 @@ function useFlowManager() {
     await refreshFlowList();
   }, [setCurrentFlow, refreshFlowList]);
   return { refreshFlowList, refreshProjectList, openFlow, newFlow, deleteCurrentFlow };
+}
+let nextId = 1;
+const useConfirmStore = create$1((set2, get2) => ({
+  queue: [],
+  ask: (req) => new Promise((resolve) => {
+    set2((s) => ({ queue: [...s.queue, { ...req, id: nextId++, resolve }] }));
+  }),
+  answer: (actionId) => {
+    const [front, ...rest] = get2().queue;
+    if (!front) return;
+    set2({ queue: rest });
+    front.resolve(actionId);
+  }
+}));
+const CONFIRM_CANCEL = "cancel";
+const CONFIRM_OK = "ok";
+async function confirm(opts) {
+  const answer = await useConfirmStore.getState().ask({
+    title: opts.title,
+    message: opts.message,
+    detail: opts.detail,
+    actions: [
+      { id: CONFIRM_CANCEL, label: opts.cancelLabel ?? "取消", tone: "ghost" },
+      { id: CONFIRM_OK, label: opts.confirmLabel ?? "確認", tone: opts.danger ? "danger" : "primary" }
+    ],
+    defaultActionId: opts.danger ? CONFIRM_CANCEL : CONFIRM_OK
+  });
+  return answer === CONFIRM_OK;
+}
+function notify(title, message) {
+  return useConfirmStore.getState().ask({
+    title,
+    message,
+    actions: [{ id: "ok", label: "知道了", tone: "primary" }],
+    defaultActionId: "ok"
+  });
+}
+function useWorkspace() {
+  const { info, loading, installing, vault, setInfo, forget, installBrowser } = useWorkspaceStore();
+  const { refreshFlowList, refreshProjectList } = useFlowManager();
+  const resetForNewWorkspace = reactExports.useCallback(async () => {
+    useFlowStore.getState().setCurrentFlow(null);
+    useFlowStore.getState().setFlows([]);
+    useFlowStore.getState().setProjects([]);
+    await useWorkspaceStore.getState().refreshVault();
+    await refreshFlowList();
+    await refreshProjectList();
+  }, [refreshFlowList, refreshProjectList]);
+  const busy = reactExports.useCallback(async () => {
+    const { isRecording, isReplaying } = useFlowStore.getState();
+    if (!isRecording && !isReplaying) return false;
+    await notify("無法切換工作區", isRecording ? "請先停止錄製。" : "請先停止重播。");
+    return true;
+  }, []);
+  const pick = reactExports.useCallback(async () => {
+    if (await busy()) return;
+    const next = await window.electronAPI.pickWorkspace();
+    if (!next) return;
+    setInfo(next);
+    await resetForNewWorkspace();
+  }, [busy, setInfo, resetForNewWorkspace]);
+  const switchTo = reactExports.useCallback(
+    async (dir) => {
+      if (await busy()) return;
+      try {
+        setInfo(await window.electronAPI.setWorkspace(dir));
+      } catch (err) {
+        await notify("無法開啟工作區", String(err instanceof Error ? err.message : err));
+        await forget(dir);
+        return;
+      }
+      await resetForNewWorkspace();
+    },
+    [busy, setInfo, forget, resetForNewWorkspace]
+  );
+  return {
+    info,
+    loading,
+    installing,
+    vault,
+    root: info?.root ?? null,
+    pick,
+    switchTo,
+    forget,
+    installBrowser,
+    reveal: () => window.electronAPI.revealWorkspace()
+  };
 }
 function TestOutputModal({ lines, finished, onClose }) {
   const bottomRef = reactExports.useRef(null);
@@ -8573,43 +8730,56 @@ function TestOutputModal({ lines, finished, onClose }) {
     }
   );
 }
-let nextId = 1;
-const useConfirmStore = create$1((set2, get2) => ({
-  queue: [],
-  ask: (req) => new Promise((resolve) => {
-    set2((s) => ({ queue: [...s.queue, { ...req, id: nextId++, resolve }] }));
-  }),
-  answer: (actionId) => {
-    const [front, ...rest] = get2().queue;
-    if (!front) return;
-    set2({ queue: rest });
-    front.resolve(actionId);
-  }
-}));
-const CONFIRM_CANCEL = "cancel";
-const CONFIRM_OK = "ok";
-async function confirm(opts) {
-  const answer = await useConfirmStore.getState().ask({
-    title: opts.title,
-    message: opts.message,
-    detail: opts.detail,
-    actions: [
-      { id: CONFIRM_CANCEL, label: opts.cancelLabel ?? "取消", tone: "ghost" },
-      { id: CONFIRM_OK, label: opts.confirmLabel ?? "確認", tone: opts.danger ? "danger" : "primary" }
-    ],
-    defaultActionId: opts.danger ? CONFIRM_CANCEL : CONFIRM_OK
-  });
-  return answer === CONFIRM_OK;
+function useVault() {
+  const vault = useWorkspaceStore((s) => s.vault);
+  const openVaultDialog = useWorkspaceStore((s) => s.openVaultDialog);
+  const state = vault?.state ?? "none";
+  const ensureUsable = reactExports.useCallback(() => {
+    if (state === "unlocked") return true;
+    openVaultDialog(
+      state === "none" ? "setup" : "unlock",
+      state === "none" ? "要使用私密資料，請先為這個工作區建立保險庫。" : "保險庫已鎖定，請先輸入通行碼。"
+    );
+    return false;
+  }, [state, openVaultDialog]);
+  const promptUnlock = reactExports.useCallback(
+    (reason) => openVaultDialog("unlock", reason),
+    [openVaultDialog]
+  );
+  const lock = reactExports.useCallback(async () => {
+    useWorkspaceStore.getState().setVault(await window.electronAPI.lockVault());
+  }, []);
+  return {
+    state,
+    /** True when private values can be read and written right now. */
+    usable: state === "unlocked",
+    /** True when this workspace has any private data at all. */
+    hasVault: state !== "none",
+    canRemember: vault?.canRemember ?? false,
+    ensureUsable,
+    promptUnlock,
+    lock,
+    openVaultDialog
+  };
 }
+const isCiphertext$2 = (v2) => v2.startsWith(SECRET_ENVELOPE_PREFIX);
 function toEditRows$1(vars, envId) {
-  return vars.map((v2, i) => ({
-    key: v2.key,
-    value: envId ? v2.envValues?.[envId] ?? "" : v2.value,
-    description: v2.description ?? "",
-    fallback: v2.value,
-    _rid: `src:${i}`,
-    _origIndex: i
-  }));
+  return vars.map((v2, i) => {
+    const stored = envId ? v2.envValues?.[envId] ?? "" : v2.value;
+    return {
+      key: v2.key,
+      // A private row starts masked: its plaintext is never loaded into the renderer.
+      value: v2.secret ? "" : stored,
+      description: v2.description ?? "",
+      // The fallback is shown in the placeholder, so it must be masked too.
+      fallback: v2.secret ? SECRET_MASK : v2.value,
+      secret: !!v2.secret,
+      _rid: `src:${i}`,
+      _origIndex: i,
+      _storedValue: stored,
+      _dirty: false
+    };
+  });
 }
 function ProfileEditorModal({ onClose }) {
   const {
@@ -8625,6 +8795,7 @@ function ProfileEditorModal({ onClose }) {
     activeEnvironmentId,
     setActiveEnvironment
   } = useFlowStore();
+  const { ensureUsable } = useVault();
   const profiles = currentFlow?.profiles ?? [];
   const environments = currentProject?.environments ?? [];
   const projectEnvVars = currentProject?.envVars ?? [];
@@ -8709,13 +8880,53 @@ function ProfileEditorModal({ onClose }) {
     setError(null);
   }, [tableKey]);
   const setCell = (rid, key, v2) => {
-    setRows((prev) => prev.map((r2) => r2._rid === rid ? { ...r2, [key]: v2 } : r2));
+    setRows(
+      (prev) => prev.map((r2) => r2._rid === rid ? { ...r2, [key]: v2, _dirty: key === "value" ? true : r2._dirty } : r2)
+    );
   };
   const addRow = () => {
     setRows((prev) => [
       ...prev,
-      { key: "", value: "", description: "", fallback: "", _rid: `new:${v4()}`, _origIndex: null }
+      {
+        key: "",
+        value: "",
+        description: "",
+        fallback: "",
+        secret: false,
+        _rid: `new:${v4()}`,
+        _origIndex: null,
+        _storedValue: "",
+        _dirty: true
+      }
     ]);
+  };
+  const toggleSecret = async (rid) => {
+    const row = rows.find((r2) => r2._rid === rid);
+    if (!row || !ensureUsable()) return;
+    if (!row.secret) {
+      setRows((prev) => prev.map((r2) => r2._rid === rid ? { ...r2, secret: true, _dirty: true } : r2));
+      return;
+    }
+    let plain = row.value;
+    if (!row._dirty && isCiphertext$2(row._storedValue)) {
+      try {
+        plain = await window.electronAPI.revealSecret(row._storedValue);
+      } catch {
+        return setError("無法解密此變數，請先解鎖保險庫");
+      }
+    }
+    setRows(
+      (prev) => prev.map((r2) => r2._rid === rid ? { ...r2, secret: false, value: plain, _dirty: true } : r2)
+    );
+  };
+  const storedValueFor = async (r2) => {
+    if (r2.secret) {
+      return !r2._dirty && isCiphertext$2(r2._storedValue) ? r2._storedValue : await window.electronAPI.encryptSecret(r2.value);
+    }
+    if (!r2._dirty && isCiphertext$2(r2._storedValue)) {
+      return await window.electronAPI.revealSecret(r2._storedValue);
+    }
+    return r2.value;
   };
   const handleSave = async () => {
     if (!selectedProfile) return;
@@ -8723,14 +8934,22 @@ function ProfileEditorModal({ onClose }) {
     if (keys.some((k2) => !k2)) return setError("變數名稱不可為空");
     const dup = keys.find((k2, i) => keys.indexOf(k2) !== i);
     if (dup) return setError(`變數名稱重複：${dup}`);
+    if (rows.some((r2) => r2.secret) && !ensureUsable()) return;
     setError(null);
+    let values;
+    try {
+      values = await Promise.all(rows.map(storedValueFor));
+    } catch (err) {
+      return setError(`加密失敗：${String(err instanceof Error ? err.message : err)}`);
+    }
     await commitProfileVars(
       selectedProfile.id,
-      rows.map((r2) => ({
+      rows.map((r2, i) => ({
         origIndex: r2._origIndex,
         key: r2.key.trim(),
-        value: r2.value,
-        description: r2.description
+        value: values[i],
+        description: r2.description,
+        secret: r2.secret
       })),
       activeEnvironmentId
     );
@@ -8761,12 +8980,14 @@ function ProfileEditorModal({ onClose }) {
       end: el2.selectionEnd ?? el2.value.length
     };
   };
-  const envVarValueFor = (ev) => activeEnvironmentId ? ev.values[activeEnvironmentId] ?? "" : "";
+  const envVarValueFor = (ev) => ev.secret ? SECRET_MASK : activeEnvironmentId ? ev.values[activeEnvironmentId] ?? "" : "";
   const visibleEnvVars = (() => {
     const q2 = envSearch.trim().toLowerCase();
     if (!q2) return projectEnvVars;
     return projectEnvVars.filter(
-      (ev) => ev.key.toLowerCase().includes(q2) || envVarValueFor(ev).toLowerCase().includes(q2)
+      (ev) => ev.key.toLowerCase().includes(q2) || // Private values are excluded from the search corpus — matching on them would
+      // turn the filter box into an oracle for the very value being hidden.
+      !ev.secret && (ev.values[activeEnvironmentId ?? ""] ?? "").toLowerCase().includes(q2)
     );
   })();
   const handlePickEnvVar = (key) => {
@@ -9249,6 +9470,7 @@ function ProfileEditorModal({ onClose }) {
                                     }
                                   ),
                                   ev.key === DOMAIN_ENV_KEY && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10 }, title: "保留變數", children: "🔒" }),
+                                  ev.secret && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10 }, title: "私密資料（加密儲存）", children: "🔐" }),
                                   /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1 } }),
                                   copiedKey === ev.key && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#4ade80", flexShrink: 0 }, children: copiedMode === "insert" ? "已插入" : "已複製" })
                                 ] }),
@@ -9331,6 +9553,14 @@ function ProfileEditorModal({ onClose }) {
                           activeEnvName ? ` (${activeEnvName})` : ""
                         ] }),
                         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", fontWeight: 600 }, children: "敘述（選填）" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(
+                          "span",
+                          {
+                            style: { fontSize: 11, color: "#64748b", fontWeight: 600, textAlign: "center" },
+                            title: "私密資料：加密後才寫入檔案",
+                            children: "🔐"
+                          }
+                        ),
                         /* @__PURE__ */ jsxRuntimeExports.jsx("span", {})
                       ]
                     }
@@ -9364,6 +9594,7 @@ function ProfileEditorModal({ onClose }) {
                               ref: (el2) => {
                                 valueInputRefs.current[row._rid] = el2;
                               },
+                              type: row.secret ? "password" : "text",
                               value: row.value,
                               onChange: (e) => {
                                 rememberCaret(row._rid, e.currentTarget);
@@ -9372,10 +9603,10 @@ function ProfileEditorModal({ onClose }) {
                               onFocus: (e) => rememberCaret(row._rid, e.currentTarget),
                               onSelect: (e) => rememberCaret(row._rid, e.currentTarget),
                               onKeyDown: cellKeyDown,
-                              placeholder: activeEnvironmentId ? `預設: ${row.fallback || "(空)"}` : "value",
+                              placeholder: row.secret && !row._dirty ? "（已加密，輸入以覆寫）" : activeEnvironmentId ? `預設: ${row.fallback || "(空)"}` : "value",
                               style: {
                                 ...cellInputStyle$1,
-                                ...activeEnvironmentId ? { borderColor: "#166534" } : {}
+                                ...row.secret ? { borderColor: "#a16207" } : activeEnvironmentId ? { borderColor: "#166534" } : {}
                               }
                             }
                           ),
@@ -9387,6 +9618,23 @@ function ProfileEditorModal({ onClose }) {
                               onKeyDown: cellKeyDown,
                               placeholder: "說明此參數用途…",
                               style: { ...cellInputStyle$1, color: "#94a3b8" }
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "button",
+                            {
+                              onClick: () => void toggleSecret(row._rid),
+                              title: row.secret ? "目前為私密資料（加密儲存）— 點擊取消" : "設為私密資料（加密後才寫入檔案，所有配置共用）",
+                              style: {
+                                background: "transparent",
+                                border: "none",
+                                cursor: "pointer",
+                                fontSize: 13,
+                                padding: 2,
+                                opacity: row.secret ? 1 : 0.3,
+                                filter: row.secret ? void 0 : "grayscale(1)"
+                              },
+                              children: "🔐"
                             }
                           ),
                           /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -9492,7 +9740,7 @@ function ProfileEditorModal({ onClose }) {
     }
   );
 }
-const gridCols = "1fr 1.3fr 1fr 32px";
+const gridCols = "1fr 1.3fr 1fr 28px 32px";
 const envRefBtnStyle = {
   padding: "3px 10px",
   borderRadius: 4,
@@ -9544,13 +9792,21 @@ const closeBtnStyle$1 = {
   cursor: "pointer",
   fontSize: 13
 };
+const isCiphertext$1 = (v2) => v2.startsWith(SECRET_ENVELOPE_PREFIX);
 function toEditRows(vars, envId) {
-  return vars.map((v2, i) => ({
-    key: v2.key,
-    value: (envId && v2.values[envId]) ?? "",
-    _rid: `src:${i}`,
-    _origKey: v2.key
-  }));
+  return vars.map((v2, i) => {
+    const stored = (envId && v2.values[envId]) ?? "";
+    return {
+      key: v2.key,
+      // A private row starts masked: its plaintext is not in the renderer at all.
+      value: v2.secret ? "" : stored,
+      secret: !!v2.secret,
+      _rid: `src:${i}`,
+      _origKey: v2.key,
+      _storedValue: stored,
+      _dirty: false
+    };
+  });
 }
 function ProjectEnvVarModal({ onClose }) {
   const {
@@ -9563,6 +9819,7 @@ function ProjectEnvVarModal({ onClose }) {
     deleteEnvironment,
     commitProjectEnvVars
   } = useFlowStore();
+  const { ensureUsable } = useVault();
   const environments = currentProject?.environments ?? [];
   const envVars = currentProject?.envVars ?? [];
   const selectedEnv = environments.find((e) => e.id === activeEnvironmentId) ?? environments[0] ?? null;
@@ -9582,10 +9839,44 @@ function ProjectEnvVarModal({ onClose }) {
     setError(null);
   }, [tableKey]);
   const setCell = (rid, key, v2) => {
-    setRows((prev) => prev.map((r2) => r2._rid === rid ? { ...r2, [key]: v2 } : r2));
+    setRows(
+      (prev) => prev.map((r2) => r2._rid === rid ? { ...r2, [key]: v2, _dirty: key === "value" ? true : r2._dirty } : r2)
+    );
   };
   const addRow = () => {
-    setRows((prev) => [...prev, { key: "", value: "", _rid: `new:${v4()}`, _origKey: null }]);
+    setRows((prev) => [
+      ...prev,
+      { key: "", value: "", secret: false, _rid: `new:${v4()}`, _origKey: null, _storedValue: "", _dirty: true }
+    ]);
+  };
+  const toggleSecret = async (rid) => {
+    const row = rows.find((r2) => r2._rid === rid);
+    if (!row || row.key === DOMAIN_ENV_KEY) return;
+    if (!ensureUsable()) return;
+    if (!row.secret) {
+      setRows((prev) => prev.map((r2) => r2._rid === rid ? { ...r2, secret: true, _dirty: true } : r2));
+      return;
+    }
+    let plain = row.value;
+    if (!row._dirty && isCiphertext$1(row._storedValue)) {
+      try {
+        plain = await window.electronAPI.revealSecret(row._storedValue);
+      } catch {
+        return setError("無法解密此變數，請先解鎖保險庫");
+      }
+    }
+    setRows(
+      (prev) => prev.map((r2) => r2._rid === rid ? { ...r2, secret: false, value: plain, _dirty: true } : r2)
+    );
+  };
+  const storedValueFor = async (r2) => {
+    if (r2.secret) {
+      return !r2._dirty && isCiphertext$1(r2._storedValue) ? r2._storedValue : await window.electronAPI.encryptSecret(r2.value);
+    }
+    if (!r2._dirty && isCiphertext$1(r2._storedValue)) {
+      return await window.electronAPI.revealSecret(r2._storedValue);
+    }
+    return r2.value;
   };
   const handleSave = async () => {
     if (!selectedEnv) return;
@@ -9594,9 +9885,16 @@ function ProjectEnvVarModal({ onClose }) {
     const dup = keys.find((k2, i) => keys.indexOf(k2) !== i);
     if (dup) return setError(`變數名稱重複：${dup}`);
     if (!keys.includes(DOMAIN_ENV_KEY)) return setError(`${DOMAIN_ENV_KEY} 為保留變數，不可刪除或改名`);
+    if (rows.some((r2) => r2.secret) && !ensureUsable()) return;
     setError(null);
+    let values;
+    try {
+      values = await Promise.all(rows.map(storedValueFor));
+    } catch (err) {
+      return setError(`加密失敗：${String(err instanceof Error ? err.message : err)}`);
+    }
     await commitProjectEnvVars(
-      rows.map((r2) => ({ origKey: r2._origKey, key: r2.key.trim(), value: r2.value })),
+      rows.map((r2, i) => ({ origKey: r2._origKey, key: r2.key.trim(), value: values[i], secret: r2.secret })),
       selectedEnv.id
     );
     setRows(toEditRows(useFlowStore.getState().currentProject?.envVars ?? [], selectedEnv.id));
@@ -9650,7 +9948,7 @@ function ProjectEnvVarModal({ onClose }) {
     if (!ok2) return;
     setRows((prev) => prev.filter((r2) => r2._rid !== rid));
   };
-  const gridCols2 = "1fr 1fr 32px";
+  const gridCols2 = "1fr 1fr 28px 32px";
   const envBtnStyle = {
     background: "transparent",
     border: "1px solid #334155",
@@ -9841,6 +10139,7 @@ function ProjectEnvVarModal({ onClose }) {
                       "值",
                       selectedEnv ? ` (${selectedEnv.name})` : ""
                     ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textAlign: "center" }, title: "私密資料：加密後才寫入檔案", children: "🔐" }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", {})
                   ]
                 }
@@ -9873,11 +10172,36 @@ function ProjectEnvVarModal({ onClose }) {
                       /* @__PURE__ */ jsxRuntimeExports.jsx(
                         "input",
                         {
+                          type: row.secret ? "password" : "text",
                           value: row.value,
                           onChange: (e) => setCell(row._rid, "value", e.target.value),
                           onKeyDown: cellKeyDown,
-                          placeholder: "(空)",
-                          style: { ...cellInputStyle, borderColor: "#166534" }
+                          placeholder: row.secret && !row._dirty ? "（已加密，輸入以覆寫）" : "(空)",
+                          style: { ...cellInputStyle, borderColor: row.secret ? "#a16207" : "#166534" }
+                        }
+                      ),
+                      isDomain ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "span",
+                        {
+                          title: "domain 會被寫入 goto 網址，無法設為私密",
+                          style: { textAlign: "center", color: "#475569", fontSize: 11 },
+                          children: "—"
+                        }
+                      ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "button",
+                        {
+                          onClick: () => void toggleSecret(row._rid),
+                          title: row.secret ? "目前為私密資料（加密儲存）— 點擊取消" : "設為私密資料（加密後才寫入檔案）",
+                          style: {
+                            background: "transparent",
+                            border: "none",
+                            cursor: "pointer",
+                            fontSize: 13,
+                            padding: 2,
+                            opacity: row.secret ? 1 : 0.3,
+                            filter: row.secret ? void 0 : "grayscale(1)"
+                          },
+                          children: "🔐"
                         }
                       ),
                       isDomain ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: "domain 為保留變數，無法刪除", style: { textAlign: "center", color: "#475569", fontSize: 13 }, children: "🔒" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -9976,7 +10300,7 @@ const closeBtnStyle = {
   cursor: "pointer",
   fontSize: 13
 };
-const btn = (label, onClick, disabled = false, danger = false) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+const btn = (label2, onClick, disabled = false, danger = false) => /* @__PURE__ */ jsxRuntimeExports.jsx(
   "button",
   {
     onClick,
@@ -9991,9 +10315,30 @@ const btn = (label, onClick, disabled = false, danger = false) => /* @__PURE__ *
       fontSize: 13,
       fontWeight: 500
     },
-    children: label
+    children: label2
   }
 );
+const workspacePathStyle = {
+  maxWidth: 160,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  background: "#0f172a",
+  border: "1px solid #334155",
+  borderRadius: 4,
+  padding: "3px 8px",
+  color: "#94a3b8",
+  fontSize: 11,
+  cursor: "pointer"
+};
+const workspaceSwitchStyle = {
+  background: "#0f172a",
+  border: "1px solid #334155",
+  borderRadius: 4,
+  padding: "3px 6px",
+  color: "#94a3b8",
+  fontSize: 11
+};
 function Toolbar() {
   const {
     currentFlow,
@@ -10017,6 +10362,8 @@ function Toolbar() {
   } = useFlowStore();
   const { startRecording, stopRecording } = usePlaywright();
   const { newFlow } = useFlowManager();
+  const { root: workspaceRoot, pick: pickWorkspace, reveal } = useWorkspace();
+  const workspaceName = workspaceRoot?.split(/[\\/]/).filter(Boolean).pop() ?? workspaceRoot;
   const [showNewFlowDialog, setShowNewFlowDialog] = reactExports.useState(false);
   const [newName, setNewName] = reactExports.useState("");
   const [newProjectId, setNewProjectId] = reactExports.useState("");
@@ -10056,23 +10403,25 @@ function Toolbar() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [showEnvMenu]);
+  const { hasVault, usable: vaultUsable, promptUnlock, lock: lockVault, openVaultDialog } = useVault();
+  const confirm2 = useConfirmStore((s) => s.ask);
   const profiles = currentFlow?.profiles ?? [];
   const activeProfile = profiles.find((p2) => p2.id === activeProfileId) ?? profiles[0] ?? null;
   const activeProfileName = activeProfile?.name ?? "— 無配置 —";
   const isOverriding = activeProfile !== null && activeProfile !== profiles[0];
-  function getEnvVars2() {
-    return flattenProjectEnvVars(currentProject?.envVars, activeEnvironmentId);
-  }
-  function getProfileVars() {
-    if (!activeProfile) return void 0;
-    const envVars = getEnvVars2();
-    return Object.fromEntries(
-      activeProfile.vars.map((v2) => {
-        const raw = (activeEnvironmentId && v2.envValues?.[activeEnvironmentId]) ?? v2.value;
-        return [v2.key, resolveValue(raw, void 0, envVars)];
-      })
-    );
-  }
+  const getEnvVars$1 = () => getEnvVars(currentProject, activeEnvironmentId);
+  const getProfileVars = () => buildProfileVars$1(activeProfile, activeEnvironmentId, getEnvVars$1(), getSecretEnvKeys(currentProject));
+  const exportConfig = () => ({
+    outputDir: "",
+    helperFunctions: false,
+    useTestStep: true,
+    profileVars: getProfileVars(),
+    activeProfileId: activeProfileId ?? void 0,
+    activeEnvironmentId: activeEnvironmentId ?? void 0,
+    envVars: getEnvVars$1(),
+    activeProjectId: currentProject?.id,
+    secretEnvKeys: getSecretEnvKeys(currentProject)
+  });
   reactExports.useEffect(() => {
     const offOutput = window.electronAPI.onTestOutput((line) => {
       testLinesRef.current = [...testLinesRef.current, line];
@@ -10101,38 +10450,60 @@ function Toolbar() {
     const updated = useFlowStore.getState().currentFlow;
     if (updated) window.electronAPI.saveFlow(updated).catch(console.error);
   };
+  const isLockedError = (err) => String(err).includes("保險庫已鎖定");
   const handleExport = async () => {
     if (!currentFlow) return;
-    const config = {
-      outputDir: "",
-      helperFunctions: false,
-      useTestStep: true,
-      profileVars: getProfileVars(),
-      activeProfileId: activeProfileId ?? void 0,
-      activeEnvironmentId: activeEnvironmentId ?? void 0,
-      envVars: getEnvVars2(),
-      activeProjectId: currentProject?.id
-    };
     try {
-      const path = await window.electronAPI.exportScripts(currentFlow, config);
-      alert(`腳本已匯出到:
+      const path = await window.electronAPI.exportScripts(currentFlow, exportConfig());
+      const hasSecrets = getSecretEnvKeys(currentProject).length > 0 || (currentFlow.profiles ?? []).some((p2) => p2.vars.some((v2) => v2.secret)) || currentFlow.nodes.some((n2) => n2.action.secret);
+      if (hasSecrets) {
+        const choice = await confirm2({
+          title: "腳本已匯出",
+          message: `${path}
+
+私密資料以 process.env 參照匯出，不會出現在腳本中。
+若要在 FlowTest 之外用 npx playwright test 執行，需要一併匯出密鑰檔。`,
+          actions: [
+            { id: "secrets", label: "一併匯出密鑰檔", tone: "primary" },
+            { id: "ok", label: "知道了" }
+          ],
+          defaultActionId: "secrets"
+        });
+        if (choice === "secrets") await handleWriteSecretsFile();
+      } else {
+        alert(`腳本已匯出到:
 ${path}`);
+      }
     } catch (err) {
-      alert(`匯出失敗: ${String(err)}`);
+      if (isLockedError(err)) promptUnlock("匯出腳本需要讀取私密資料，請先解鎖。");
+      else alert(`匯出失敗: ${String(err)}`);
+    }
+  };
+  const handleWriteSecretsFile = async () => {
+    if (!currentFlow) return;
+    try {
+      const { path, count } = await window.electronAPI.writeSecretsFile(currentFlow, exportConfig());
+      await confirm2({
+        title: "密鑰檔已寫出",
+        message: `${path}
+
+已寫入 ${count} 個私密變數。
+
+⚠ 這是明文檔案。它位於 .flowtest/ 之下，已被 gitignore 忽略，請勿手動加入版控或外傳。`,
+        actions: [{ id: "ok", label: "知道了", tone: "primary" }],
+        defaultActionId: "ok"
+      });
+    } catch (err) {
+      if (isLockedError(err)) promptUnlock("匯出密鑰檔需要讀取私密資料，請先解鎖。");
+      else alert(`匯出密鑰檔失敗: ${String(err)}`);
     }
   };
   const handleRunTests = async () => {
     if (!currentFlow || isRunningTests) return;
-    const config = {
-      outputDir: "",
-      helperFunctions: false,
-      useTestStep: true,
-      profileVars: getProfileVars(),
-      activeProfileId: activeProfileId ?? void 0,
-      activeEnvironmentId: activeEnvironmentId ?? void 0,
-      envVars: getEnvVars2(),
-      activeProjectId: currentProject?.id
-    };
+    if (hasVault && !vaultUsable) {
+      return promptUnlock("執行測試需要讀取私密資料，請先解鎖。");
+    }
+    const config = exportConfig();
     testLinesRef.current = [];
     setTestLines([]);
     setTestFinished(null);
@@ -10153,7 +10524,64 @@ ${path}`);
         flexShrink: 0
       },
       children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 16, color: "#60a5fa", marginRight: 8 }, children: "FlowTest" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 16, color: "#60a5fa" }, children: "FlowTest" }),
+        workspaceRoot && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 2, marginRight: 4 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              onClick: reveal,
+              title: `${workspaceRoot}
+（點擊以在檔案總管中開啟）`,
+              style: workspacePathStyle,
+              children: [
+                "📂 ",
+                workspaceName
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: pickWorkspace,
+              title: "切換工作區",
+              disabled: isRecording || isReplaying,
+              style: {
+                ...workspaceSwitchStyle,
+                opacity: isRecording || isReplaying ? 0.4 : 1,
+                cursor: isRecording || isReplaying ? "not-allowed" : "pointer"
+              },
+              children: "⇄"
+            }
+          )
+        ] }),
+        hasVault && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => vaultUsable ? void confirm2({
+              title: "🔐 私密資料",
+              message: "保險庫目前為解鎖狀態。",
+              actions: [
+                { id: "lock", label: "鎖定" },
+                { id: "change", label: "變更通行碼" },
+                { id: "close", label: "關閉", tone: "primary" }
+              ],
+              defaultActionId: "close"
+            }).then((choice) => {
+              if (choice === "lock") void lockVault();
+              if (choice === "change") openVaultDialog("change");
+            }) : openVaultDialog("unlock"),
+            title: vaultUsable ? "私密資料已解鎖" : "私密資料已鎖定 — 點擊輸入通行碼",
+            style: {
+              ...workspaceSwitchStyle,
+              marginRight: 4,
+              padding: "3px 8px",
+              cursor: "pointer",
+              color: vaultUsable ? "#4ade80" : "#f87171",
+              borderColor: vaultUsable ? "#166534" : "#7f1d1d"
+            },
+            children: vaultUsable ? "🔓 已解鎖" : "🔒 已鎖定"
+          }
+        ),
         btn("新增流程", () => setShowNewFlowDialog(true)),
         btn("↶ 復原", undo, past.length === 0 || isRecording || isReplaying),
         btn("↷ 重做", redo, future.length === 0 || isRecording || isReplaying),
@@ -10176,7 +10604,7 @@ ${path}`);
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: "#94a3b8" }, children: "重播速度:" }),
-          [["快", 100], ["正常", 500], ["慢", 1e3]].map(([label, ms]) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+          [["快", 100], ["正常", 500], ["慢", 1e3]].map(([label2, ms]) => /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
               onClick: () => setReplaySpeed(ms),
@@ -10189,9 +10617,9 @@ ${path}`);
                 color: replaySpeed === ms ? "#fff" : "#94a3b8",
                 fontSize: 12
               },
-              children: label
+              children: label2
             },
-            label
+            label2
           ))
         ] }),
         currentFlow && currentProject && (() => {
@@ -13427,7 +13855,7 @@ function Attribution({ proOptions, position = "bottom-right" }) {
     React$2.createElement("a", { href: "https://reactflow.dev", target: "_blank", rel: "noopener noreferrer", "aria-label": "React Flow attribution" }, "React Flow")
   );
 }
-const EdgeText = ({ x: x2, y: y2, label, labelStyle = {}, labelShowBg = true, labelBgStyle = {}, labelBgPadding = [2, 4], labelBgBorderRadius = 2, children: children2, className, ...rest }) => {
+const EdgeText = ({ x: x2, y: y2, label: label2, labelStyle = {}, labelShowBg = true, labelBgStyle = {}, labelBgPadding = [2, 4], labelBgBorderRadius = 2, children: children2, className, ...rest }) => {
   const edgeRef = reactExports.useRef(null);
   const [edgeTextBbox, setEdgeTextBbox] = reactExports.useState({ x: 0, y: 0, width: 0, height: 0 });
   const edgeTextClasses = cc(["react-flow__edge-textwrapper", className]);
@@ -13441,15 +13869,15 @@ const EdgeText = ({ x: x2, y: y2, label, labelStyle = {}, labelShowBg = true, la
         height: textBbox.height
       });
     }
-  }, [label]);
-  if (typeof label === "undefined" || !label) {
+  }, [label2]);
+  if (typeof label2 === "undefined" || !label2) {
     return null;
   }
   return React$2.createElement(
     "g",
     { transform: `translate(${x2 - edgeTextBbox.width / 2} ${y2 - edgeTextBbox.height / 2})`, className: edgeTextClasses, visibility: edgeTextBbox.width ? "visible" : "hidden", ...rest },
     labelShowBg && React$2.createElement("rect", { width: edgeTextBbox.width + 2 * labelBgPadding[0], x: -labelBgPadding[0], y: -labelBgPadding[1], height: edgeTextBbox.height + 2 * labelBgPadding[1], className: "react-flow__edge-textbg", style: labelBgStyle, rx: labelBgBorderRadius, ry: labelBgBorderRadius }),
-    React$2.createElement("text", { className: "react-flow__edge-text", y: edgeTextBbox.height / 2, dy: "0.3em", ref: edgeRef, style: labelStyle }, label),
+    React$2.createElement("text", { className: "react-flow__edge-text", y: edgeTextBbox.height / 2, dy: "0.3em", ref: edgeRef, style: labelStyle }, label2),
     children2
   );
 };
@@ -13530,13 +13958,13 @@ const getEventPosition = (event, bounds) => {
   };
 };
 const isMacOs = () => typeof navigator !== "undefined" && navigator?.userAgent?.indexOf("Mac") >= 0;
-const BaseEdge = ({ id: id2, path, labelX, labelY, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth = 20 }) => {
+const BaseEdge = ({ id: id2, path, labelX, labelY, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth = 20 }) => {
   return React$2.createElement(
     React$2.Fragment,
     null,
     React$2.createElement("path", { id: id2, style: style2, d: path, fill: "none", className: "react-flow__edge-path", markerEnd, markerStart }),
     interactionWidth && React$2.createElement("path", { d: path, fill: "none", strokeOpacity: 0, strokeWidth: interactionWidth, className: "react-flow__edge-interaction" }),
-    label && isNumeric(labelX) && isNumeric(labelY) ? React$2.createElement(EdgeText$1, { x: labelX, y: labelY, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius }) : null
+    label2 && isNumeric(labelX) && isNumeric(labelY) ? React$2.createElement(EdgeText$1, { x: labelX, y: labelY, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius }) : null
   );
 };
 BaseEdge.displayName = "BaseEdge";
@@ -13637,7 +14065,7 @@ function getSimpleBezierPath({ sourceX, sourceY, sourcePosition = Position.Botto
     offsetY
   ];
 }
-const SimpleBezierEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, sourcePosition = Position.Bottom, targetPosition = Position.Top, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth }) => {
+const SimpleBezierEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, sourcePosition = Position.Bottom, targetPosition = Position.Top, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth }) => {
   const [path, labelX, labelY] = getSimpleBezierPath({
     sourceX,
     sourceY,
@@ -13646,7 +14074,7 @@ const SimpleBezierEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY
     targetY,
     targetPosition
   });
-  return React$2.createElement(BaseEdge, { path, labelX, labelY, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth });
+  return React$2.createElement(BaseEdge, { path, labelX, labelY, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth });
 });
 SimpleBezierEdge.displayName = "SimpleBezierEdge";
 const handleDirections = {
@@ -13786,7 +14214,7 @@ function getSmoothStepPath({ sourceX, sourceY, sourcePosition = Position.Bottom,
   }, "");
   return [path, labelX, labelY, offsetX, offsetY];
 }
-const SmoothStepEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, sourcePosition = Position.Bottom, targetPosition = Position.Top, markerEnd, markerStart, pathOptions, interactionWidth }) => {
+const SmoothStepEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, sourcePosition = Position.Bottom, targetPosition = Position.Top, markerEnd, markerStart, pathOptions, interactionWidth }) => {
   const [path, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -13797,7 +14225,7 @@ const SmoothStepEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, 
     borderRadius: pathOptions?.borderRadius,
     offset: pathOptions?.offset
   });
-  return React$2.createElement(BaseEdge, { path, labelX, labelY, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth });
+  return React$2.createElement(BaseEdge, { path, labelX, labelY, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth });
 });
 SmoothStepEdge.displayName = "SmoothStepEdge";
 const StepEdge = reactExports.memo((props) => React$2.createElement(SmoothStepEdge, { ...props, pathOptions: reactExports.useMemo(() => ({ borderRadius: 0, offset: props.pathOptions?.offset }), [props.pathOptions?.offset]) }));
@@ -13811,9 +14239,9 @@ function getStraightPath({ sourceX, sourceY, targetX, targetY }) {
   });
   return [`M ${sourceX},${sourceY}L ${targetX},${targetY}`, labelX, labelY, offsetX, offsetY];
 }
-const StraightEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth }) => {
+const StraightEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth }) => {
   const [path, labelX, labelY] = getStraightPath({ sourceX, sourceY, targetX, targetY });
-  return React$2.createElement(BaseEdge, { path, labelX, labelY, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth });
+  return React$2.createElement(BaseEdge, { path, labelX, labelY, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth });
 });
 StraightEdge.displayName = "StraightEdge";
 function calculateControlOffset(distance2, curvature) {
@@ -13869,7 +14297,7 @@ function getBezierPath({ sourceX, sourceY, sourcePosition = Position.Bottom, tar
     offsetY
   ];
 }
-const BezierEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, sourcePosition = Position.Bottom, targetPosition = Position.Top, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, pathOptions, interactionWidth }) => {
+const BezierEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, sourcePosition = Position.Bottom, targetPosition = Position.Top, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, pathOptions, interactionWidth }) => {
   const [path, labelX, labelY] = getBezierPath({
     sourceX,
     sourceY,
@@ -13879,7 +14307,7 @@ const BezierEdge = reactExports.memo(({ sourceX, sourceY, targetX, targetY, sour
     targetPosition,
     curvature: pathOptions?.curvature
   });
-  return React$2.createElement(BaseEdge, { path, labelX, labelY, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth });
+  return React$2.createElement(BaseEdge, { path, labelX, labelY, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, markerEnd, markerStart, interactionWidth });
 });
 BezierEdge.displayName = "BezierEdge";
 const NodeIdContext = reactExports.createContext(null);
@@ -16307,7 +16735,7 @@ const EdgeUpdaterClassName = "react-flow__edgeupdater";
 const EdgeAnchor = ({ position, centerX, centerY, radius = 10, onMouseDown, onMouseEnter, onMouseOut, type }) => React$2.createElement("circle", { onMouseDown, onMouseEnter, onMouseOut, className: cc([EdgeUpdaterClassName, `${EdgeUpdaterClassName}-${type}`]), cx: shiftX(centerX, radius, position), cy: shiftY(centerY, radius, position), r: radius, stroke: "transparent", fill: "transparent" });
 const alwaysValidConnection = () => true;
 var wrapEdge = (EdgeComponent) => {
-  const EdgeWrapper = ({ id: id2, className, type, data, onClick, onEdgeDoubleClick, selected, animated, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, source, target, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, elementsSelectable, hidden, sourceHandleId, targetHandleId, onContextMenu, onMouseEnter, onMouseMove, onMouseLeave, reconnectRadius, onReconnect, onReconnectStart, onReconnectEnd, markerEnd, markerStart, rfId, ariaLabel, isFocusable, isReconnectable, pathOptions, interactionWidth, disableKeyboardA11y }) => {
+  const EdgeWrapper = ({ id: id2, className, type, data, onClick, onEdgeDoubleClick, selected, animated, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, style: style2, source, target, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, elementsSelectable, hidden, sourceHandleId, targetHandleId, onContextMenu, onMouseEnter, onMouseMove, onMouseLeave, reconnectRadius, onReconnect, onReconnectStart, onReconnectEnd, markerEnd, markerStart, rfId, ariaLabel, isFocusable, isReconnectable, pathOptions, interactionWidth, disableKeyboardA11y }) => {
     const edgeRef = reactExports.useRef(null);
     const [updateHover, setUpdateHover] = reactExports.useState(false);
     const [updating, setUpdating] = reactExports.useState(false);
@@ -16397,7 +16825,7 @@ var wrapEdge = (EdgeComponent) => {
         className,
         { selected, animated, inactive, updating: updateHover }
       ]), onClick: onEdgeClick, onDoubleClick: onEdgeDoubleClickHandler, onContextMenu: onEdgeContextMenu, onMouseEnter: onEdgeMouseEnter, onMouseMove: onEdgeMouseMove, onMouseLeave: onEdgeMouseLeave, onKeyDown: isFocusable ? onKeyDown : void 0, tabIndex: isFocusable ? 0 : void 0, role: isFocusable ? "button" : "img", "data-testid": `rf__edge-${id2}`, "aria-label": ariaLabel === null ? void 0 : ariaLabel ? ariaLabel : `Edge from ${source} to ${target}`, "aria-describedby": isFocusable ? `${ARIA_EDGE_DESC_KEY}-${rfId}` : void 0, ref: edgeRef },
-      !updating && React$2.createElement(EdgeComponent, { id: id2, source, target, selected, animated, label, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, data, style: style2, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, sourceHandleId, targetHandleId, markerStart: markerStartUrl, markerEnd: markerEndUrl, pathOptions, interactionWidth }),
+      !updating && React$2.createElement(EdgeComponent, { id: id2, source, target, selected, animated, label: label2, labelStyle, labelShowBg, labelBgStyle, labelBgPadding, labelBgBorderRadius, data, style: style2, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, sourceHandleId, targetHandleId, markerStart: markerStartUrl, markerEnd: markerEndUrl, pathOptions, interactionWidth }),
       isReconnectable && React$2.createElement(
         React$2.Fragment,
         null,
@@ -17652,7 +18080,7 @@ function ActionNodeComponent({ data, selected }) {
         ),
         action.type === "callFlow" && (action.subFlowProfileName || action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 0) && (() => {
           const isDynamic = action.subFlowProfileMapping && Object.keys(action.subFlowProfileMapping).length > 1;
-          const label = isDynamic ? "動態配置" : action.subFlowProfileName ?? "已配置";
+          const label2 = isDynamic ? "動態配置" : action.subFlowProfileName ?? "已配置";
           return /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "div",
             {
@@ -17673,7 +18101,7 @@ function ActionNodeComponent({ data, selected }) {
               title: isDynamic ? "配置依父流程環境動態切換" : `配置: ${action.subFlowProfileName}`,
               children: [
                 "⚙ ",
-                label
+                label2
               ]
             }
           );
@@ -18004,7 +18432,7 @@ function NodeContextMenu({
 }
 function MenuItem({
   icon,
-  label,
+  label: label2,
   disabled,
   danger = false,
   onClick
@@ -18037,7 +18465,7 @@ function MenuItem({
       },
       children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, width: 16, textAlign: "center" }, children: icon }),
-        label
+        label2
       ]
     }
   );
@@ -18734,7 +19162,7 @@ function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }) {
                 children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, fontWeight: 500 }, children: sp.name }),
                   sp.vars.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: [
-                    sp.vars.slice(0, 3).map((v2) => `${v2.key}=${v2.value}`).join(", "),
+                    sp.vars.slice(0, 3).map((v2) => `${v2.key}=${v2.secret ? SECRET_MASK : v2.value}`).join(", "),
                     sp.vars.length > 3 ? " …" : ""
                   ] })
                 ]
@@ -18817,10 +19245,10 @@ function AddNodeModal({ onConfirm, onClose }) {
     }
     const profile = currentFlow?.profiles?.find((p2) => p2.id === activeProfileId) ?? currentFlow?.profiles?.[0];
     for (const pv of profile?.vars ?? []) {
-      if (pv.key) refs.push({ label: `vars.${pv.key}`, snippet: `vars.${pv.key}`, group: "環境配置" });
+      if (pv.key) refs.push({ label: `vars.${pv.key}`, snippet: `vars.${pv.key}`, group: "環境配置", secret: pv.secret });
     }
     for (const ev of currentProject?.envVars ?? []) {
-      if (ev.key) refs.push({ label: `vars.${ev.key}`, snippet: `vars.${ev.key}`, group: "專案環境" });
+      if (ev.key) refs.push({ label: `vars.${ev.key}`, snippet: `vars.${ev.key}`, group: "專案環境", secret: ev.secret });
     }
     const seen = /* @__PURE__ */ new Set();
     for (const n2 of currentFlow?.nodes ?? []) {
@@ -18977,7 +19405,10 @@ function AddNodeModal({ onConfirm, onClose }) {
                             gap: 6
                           },
                           children: [
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontSize: 11, color: "#7dd3fc" }, children: r2.label }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsxs("code", { style: { fontSize: 11, color: "#7dd3fc" }, children: [
+                              r2.label,
+                              r2.secret ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: "私密資料（執行時解密）", children: " 🔐" }) : null
+                            ] }),
                             copied === r2.snippet ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 9, color: "#4ade80" }, children: "已複製" }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 9, color: "#475569" }, children: r2.group })
                           ]
                         },
@@ -19289,7 +19720,7 @@ function FlowCanvasInner() {
       }
       const pending = pendingSaveRef.current;
       pendingSaveRef.current = null;
-      if (pending) window.electronAPI.saveFlow(pending).catch(console.error);
+      if (pending) window.electronAPI.saveFlow(pending, false).catch(console.error);
     };
   }, [currentFlow?.id]);
   reactExports.useEffect(() => {
@@ -19312,7 +19743,8 @@ function FlowCanvasInner() {
       onNodesChange(changes);
       for (const c of changes) {
         if (c.type === "position" && c.position) {
-          dragPosRef.current.set(c.id, c.position);
+          const { x: x2, y: y2 } = c.position;
+          dragPosRef.current.set(c.id, { x: Math.round(x2), y: Math.round(y2) });
         }
       }
       const dragStops = changes.filter(
@@ -19345,7 +19777,7 @@ function FlowCanvasInner() {
           saveTimerRef.current = null;
           const pending = pendingSaveRef.current;
           pendingSaveRef.current = null;
-          if (pending) window.electronAPI.saveFlow(pending).catch(console.error);
+          if (pending) window.electronAPI.saveFlow(pending, false).catch(console.error);
         }, 500);
       }
     },
@@ -20730,9 +21162,12 @@ function VariableList() {
     }
   );
 }
+const isCiphertext = (v2) => v2.startsWith(SECRET_ENVELOPE_PREFIX);
+const SECRETABLE_TYPES = ["fill", "press", "selectOption", "assertText", "assertValue"];
 function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode } = useFlowStore();
   const selectedNode = currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
+  const { ensureUsable } = useVault();
   const [subFlowProfiles, setSubFlowProfiles] = reactExports.useState([]);
   const [subFlowLoading, setSubFlowLoading] = reactExports.useState(false);
   const [desc, setDesc] = reactExports.useState("");
@@ -20741,15 +21176,46 @@ function PropertyPanel() {
   const [value, setValue] = reactExports.useState("");
   const [code, setCode] = reactExports.useState("");
   const [profileMapping, setProfileMapping] = reactExports.useState({});
+  const [secret, setSecret] = reactExports.useState(false);
+  const [storedValue, setStoredValue] = reactExports.useState("");
+  const [valueDirty, setValueDirty] = reactExports.useState(false);
   reactExports.useEffect(() => {
     const node = useFlowStore.getState().currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
+    const isSecret = !!node?.action.secret;
+    const stored = node?.action.value ?? "";
     setDesc(node?.action.description ?? "");
     setSelector(node?.action.selector ?? "");
     setLocatorExpr(node?.action.locatorExpr ?? "");
-    setValue(node?.action.value ?? "");
+    setValue(isSecret ? "" : stored);
     setCode(node?.action.code ?? "");
     setProfileMapping(node?.action.subFlowProfileMapping ?? {});
+    setSecret(isSecret);
+    setStoredValue(stored);
+    setValueDirty(false);
   }, [selectedNodeId]);
+  const toggleSecret = async () => {
+    if (!ensureUsable()) return;
+    if (!secret) {
+      const plain2 = value;
+      if (plain2) {
+        setDesc((d) => d.split(plain2).join(SECRET_MASK));
+      }
+      setSecret(true);
+      setValueDirty(true);
+      return;
+    }
+    let plain = value;
+    if (!valueDirty && isCiphertext(storedValue)) {
+      try {
+        plain = await window.electronAPI.revealSecret(storedValue);
+      } catch {
+        return;
+      }
+    }
+    setSecret(false);
+    setValue(plain);
+    setValueDirty(true);
+  };
   const saveNode = reactExports.useCallback(async () => {
     if (!selectedNodeId) return;
     const node = useFlowStore.getState().currentFlow?.nodes.find((n2) => n2.id === selectedNodeId);
@@ -20769,26 +21235,51 @@ function PropertyPanel() {
         callFlowUpdates = { subFlowProfileMapping: profileMapping };
       }
     }
+    let uploadUpdates = {};
+    let effectiveValue = value;
+    if (node.action.type === "upload") {
+      const typed = value.split(",").map((s) => s.trim()).filter(Boolean);
+      const filePaths = await window.electronAPI.normalizePaths(typed);
+      effectiveValue = filePaths.join(", ");
+      uploadUpdates = { filePaths };
+    }
+    let storedForDisk = effectiveValue;
+    try {
+      if (secret) {
+        storedForDisk = !valueDirty && isCiphertext(storedValue) ? storedValue : await window.electronAPI.encryptSecret(effectiveValue);
+      } else if (!valueDirty && isCiphertext(storedValue)) {
+        storedForDisk = await window.electronAPI.revealSecret(storedValue);
+      }
+    } catch (err) {
+      console.error("[FlowTest] 私密資料處理失敗", err);
+      return;
+    }
     updateNode(node.id, {
       action: {
         ...node.action,
         description: desc,
         selector: selector2,
+        secret,
         // Written verbatim so a cleared field actually clears. Only include locatorExpr for
         // nodes that already have one, so nodes without a locator don't gain an empty string.
         ...node.action.locatorExpr !== void 0 ? { locatorExpr } : {},
-        value,
-        // Multi-select nodes keep values[] in sync with the comma-joined value field
-        ...node.action.values ? { values: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+        value: storedForDisk,
+        // Multi-select nodes keep values[] in sync with the comma-joined value field.
+        // Skipped for private nodes — values[] would be a plaintext copy of what `value`
+        // just encrypted.
+        ...node.action.values && !secret ? { values: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
         // Upload nodes do the same for filePaths[], which replay/export read first
-        ...node.action.type === "upload" ? { filePaths: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+        ...uploadUpdates,
         ...node.action.type === "code" ? { code } : {},
         ...callFlowUpdates
       }
     });
+    if (!secret && effectiveValue !== value) setValue(effectiveValue);
+    setStoredValue(storedForDisk);
+    setValueDirty(false);
     const updated = useFlowStore.getState().currentFlow;
     if (updated) await window.electronAPI.saveFlow(updated);
-  }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector2, locatorExpr, value, code, profileMapping]);
+  }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector2, locatorExpr, value, code, profileMapping, secret, storedValue, valueDirty]);
   const fieldKeyDown = (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -20876,19 +21367,37 @@ function PropertyPanel() {
           ] })
         ] }),
         ["fill", "selectOption", "goto", "press", "upload", "assertText", "assertValue"].includes(selectedNode.action.type) && /* @__PURE__ */ jsxRuntimeExports.jsxs(Field, { label: selectedNode.action.type === "assertText" ? "驗證文字" : selectedNode.action.type === "assertValue" ? "驗證值" : selectedNode.action.type === "upload" ? "檔案路徑" : "值", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6, alignItems: "center" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               "input",
               {
+                type: secret ? "password" : "text",
                 value,
-                onChange: (e) => setValue(e.target.value),
+                onChange: (e) => {
+                  setValue(e.target.value);
+                  setValueDirty(true);
+                },
                 onKeyDown: fieldKeyDown,
-                style: inputStyle
+                placeholder: secret && !valueDirty ? "（已加密，輸入以覆寫）" : void 0,
+                style: { ...inputStyle, ...secret ? { borderColor: "#a16207" } : {} }
+              }
+            ),
+            SECRETABLE_TYPES.includes(selectedNode.action.type) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => void toggleSecret(),
+                title: secret ? "目前為私密資料（加密儲存）— 點擊取消" : "設為私密資料：值會加密後才寫入檔案，描述中的明文也會一併遮蔽",
+                style: {
+                  ...pickBtnStyle,
+                  opacity: secret ? 1 : 0.45,
+                  filter: secret ? void 0 : "grayscale(1)"
+                },
+                children: "🔐"
               }
             ),
             selectedNode.action.type === "upload" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: pickFiles, style: pickBtnStyle, title: "選擇檔案（會複製到 fixtures/）", children: "📂 選擇檔案…" })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: selectedNode.action.type === "upload" ? "路徑相對於資料根目錄（fixtures/…），也可填絕對路徑；多檔用逗號分隔" : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: secret ? "🔐 加密儲存；匯出的腳本以 process.env 參照，不含明文。" : selectedNode.action.type === "upload" ? "路徑相對於工作區（fixtures/…）；絕對路徑會在儲存時自動轉換，多檔用逗號分隔" : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
             "可插入變數，如 ",
             /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "{{randomText}}" })
           ] }) })
@@ -21002,9 +21511,9 @@ function PropertyPanel() {
     }
   );
 }
-function Field({ label, children: children2 }) {
+function Field({ label: label2, children: children2 }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 4, minWidth: 140 }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase" }, children: label }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", fontWeight: 600, textTransform: "uppercase" }, children: label2 }),
     children2
   ] });
 }
@@ -21038,6 +21547,60 @@ const saveBtnStyle = {
   fontSize: 12,
   fontWeight: 600
 };
+function SecretValue({ value, secret, emptyText = "(空)", style: style2 }) {
+  const [revealed, setRevealed] = reactExports.useState(null);
+  const [error, setError] = reactExports.useState(false);
+  reactExports.useEffect(() => {
+    setRevealed(null);
+    setError(false);
+  }, [value]);
+  if (!secret) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: style2, children: value || emptyText });
+  }
+  const toggle = async (e) => {
+    e.stopPropagation();
+    if (revealed !== null) return setRevealed(null);
+    try {
+      setRevealed(await window.electronAPI.revealSecret(value));
+      setError(false);
+    } catch {
+      setError(true);
+    }
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, ...style2 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "span",
+      {
+        style: {
+          fontFamily: revealed !== null ? void 0 : "monospace",
+          color: error ? "#f87171" : void 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap"
+        },
+        children: error ? "🔒 已鎖定" : revealed !== null ? revealed || emptyText : SECRET_MASK
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "button",
+      {
+        onClick: toggle,
+        title: revealed !== null ? "隱藏" : "顯示",
+        style: {
+          border: "none",
+          background: "transparent",
+          cursor: "pointer",
+          padding: 0,
+          fontSize: 11,
+          lineHeight: 1,
+          opacity: 0.7,
+          flexShrink: 0
+        },
+        children: revealed !== null ? "🙈" : "👁"
+      }
+    )
+  ] });
+}
 function SessionVarList() {
   const { currentFlow, updateNode, runWithoutHistory } = useFlowStore();
   const [copiedName, setCopiedName] = reactExports.useState(null);
@@ -21047,7 +21610,8 @@ function SessionVarList() {
     varName: n2.action.captureAs,
     placeholder: `{{${n2.action.captureAs}}}`,
     description: n2.action.description,
-    value: n2.action.value ?? ""
+    value: n2.action.value ?? "",
+    secret: !!n2.action.secret
   }));
   const ancestorCallFlowNodes = reactExports.useMemo(() => {
     return (currentFlow?.nodes ?? []).filter((n2) => isCallFlowAction(n2.action));
@@ -21267,6 +21831,7 @@ function SessionVarList() {
                 v2.value && /* @__PURE__ */ jsxRuntimeExports.jsxs(
                   "div",
                   {
+                    onClick: (e) => e.stopPropagation(),
                     style: {
                       fontSize: 10,
                       color: "#64748b",
@@ -21277,7 +21842,7 @@ function SessionVarList() {
                     },
                     children: [
                       "值：",
-                      v2.value
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(SecretValue, { value: v2.value, secret: v2.secret })
                     ]
                   }
                 )
@@ -21355,8 +21920,8 @@ function ProfileVarList() {
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflowY: "auto", flex: 1 }, children: !activeProfile || activeProfile.vars.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "12px 14px", color: "#64748b", fontSize: 12 }, children: activeProfile ? "此配置尚無變數。" : "尚無環境配置。" }) : activeProfile.vars.map((v2) => {
           const placeholder = `{{${v2.key}}}`;
           const rawValue = (activeEnvironmentId && v2.envValues?.[activeEnvironmentId]) ?? v2.value;
-          const referencesEnvVar = hasVariables(rawValue);
-          const resolvedValue = resolveValue(rawValue, void 0, envVars);
+          const referencesEnvVar = !v2.secret && hasVariables(rawValue);
+          const resolvedValue = v2.secret ? rawValue : resolveValue(rawValue, void 0, envVars);
           return /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "div",
             {
@@ -21401,6 +21966,14 @@ function ProfileVarList() {
                       children: "🌐"
                     }
                   ),
+                  v2.secret && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "span",
+                    {
+                      title: "私密資料（加密儲存）",
+                      style: { fontSize: 10, flexShrink: 0 },
+                      children: "🔐"
+                    }
+                  ),
                   copiedKey === v2.key && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#4ade80", flexShrink: 0 }, children: "已複製" })
                 ] }),
                 v2.description && /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -21420,6 +21993,7 @@ function ProfileVarList() {
                 resolvedValue && /* @__PURE__ */ jsxRuntimeExports.jsx(
                   "div",
                   {
+                    onClick: (e) => e.stopPropagation(),
                     style: {
                       fontSize: 10,
                       color: "#78716c",
@@ -21427,7 +22001,7 @@ function ProfileVarList() {
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap"
                     },
-                    children: resolvedValue
+                    children: /* @__PURE__ */ jsxRuntimeExports.jsx(SecretValue, { value: resolvedValue, secret: v2.secret })
                   }
                 )
               ]
@@ -21540,11 +22114,13 @@ function ProjectEnvVarList() {
                       children: placeholder
                     }
                   ),
+                  v2.secret && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: "私密資料（加密儲存）", style: { fontSize: 10, flexShrink: 0 }, children: "🔐" }),
                   copiedKey === v2.key && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#4ade80", flexShrink: 0 }, children: "已複製" })
                 ] }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx(
                   "div",
                   {
+                    onClick: (e) => e.stopPropagation(),
                     style: {
                       fontSize: 10,
                       color: value ? "#78716c" : "#475569",
@@ -21552,7 +22128,7 @@ function ProjectEnvVarList() {
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap"
                     },
-                    children: value || "(空)"
+                    children: /* @__PURE__ */ jsxRuntimeExports.jsx(SecretValue, { value, secret: v2.secret })
                   }
                 )
               ]
@@ -21644,6 +22220,401 @@ function ConfirmHost() {
     }
   );
 }
+const TITLES = {
+  setup: "🔐 建立私密資料保險庫",
+  unlock: "🔐 解鎖私密資料",
+  change: "🔐 變更通行碼"
+};
+const input = {
+  display: "block",
+  width: "100%",
+  padding: "8px 10px",
+  background: "#0f172a",
+  border: "1px solid #334155",
+  borderRadius: 6,
+  color: "#e2e8f0",
+  fontSize: 13,
+  outline: "none",
+  marginBottom: 10,
+  boxSizing: "border-box"
+};
+const label = { fontSize: 11, color: "#94a3b8", marginBottom: 4 };
+function VaultModal({ mode, reason, onClose, onDone }) {
+  const setVault = useWorkspaceStore((s) => s.setVault);
+  const canRemember = useWorkspaceStore((s) => s.vault?.canRemember ?? false);
+  const [current, setCurrent] = reactExports.useState("");
+  const [next, setNext] = reactExports.useState("");
+  const [confirm2, setConfirm] = reactExports.useState("");
+  const [error, setError] = reactExports.useState("");
+  const [busy, setBusy] = reactExports.useState(false);
+  const needsCurrent = mode === "unlock" || mode === "change";
+  const needsNew = mode === "setup" || mode === "change";
+  const submit = async () => {
+    setError("");
+    if (needsCurrent && !current) return setError("請輸入通行碼");
+    if (needsNew) {
+      if (!next) return setError("請輸入新通行碼");
+      if (next.length < 8) return setError("通行碼至少需要 8 個字元");
+      if (next !== confirm2) return setError("兩次輸入的通行碼不一致");
+    }
+    setBusy(true);
+    try {
+      if (mode === "setup") {
+        setVault(await window.electronAPI.setupVault(next));
+      } else if (mode === "unlock") {
+        const { ok: ok2, status } = await window.electronAPI.unlockVault(current);
+        setVault(status);
+        if (!ok2) return setError("通行碼錯誤");
+      } else {
+        const { ok: ok2, status } = await window.electronAPI.changeVaultPassphrase(current, next);
+        setVault(status);
+        if (!ok2) return setError("目前的通行碼錯誤");
+      }
+      onDone?.();
+      onClose();
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const onKeyDown = (e) => {
+    if (e.key === "Enter" && !busy) submit();
+    if (e.key === "Escape") onClose();
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 3500
+      },
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "#1e293b", border: "1px solid #334155", borderRadius: 12, padding: 24, width: 400 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: 16, color: "#e2e8f0", margin: "0 0 6px" }, children: TITLES[mode] }),
+        reason ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#fbbf24", marginBottom: 12 }, children: reason }) : null,
+        mode === "setup" ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, color: "#64748b", lineHeight: 1.6, marginBottom: 14 }, children: [
+          "被標記為私密的變數會用這組通行碼加密後才寫入檔案，因此可以安全地進 git。 同事 clone 之後輸入同一組通行碼就能使用。",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#f87171", marginTop: 6 }, children: "⚠ 通行碼遺失將無法復原任何私密資料，請自行妥善保管。" })
+        ] }) : null,
+        mode === "change" ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#64748b", lineHeight: 1.6, marginBottom: 14 }, children: "所有已儲存的私密資料都會用新通行碼重新加密。" }) : null,
+        needsCurrent ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: label, children: mode === "change" ? "目前的通行碼" : "通行碼" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              autoFocus: true,
+              type: "password",
+              value: current,
+              onChange: (e) => setCurrent(e.target.value),
+              onKeyDown,
+              style: input
+            }
+          )
+        ] }) : null,
+        needsNew ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: label, children: [
+            mode === "change" ? "新通行碼" : "通行碼",
+            "（至少 8 字元）"
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              autoFocus: mode === "setup",
+              type: "password",
+              value: next,
+              onChange: (e) => setNext(e.target.value),
+              onKeyDown,
+              style: input
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: label, children: "再次輸入" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              type: "password",
+              value: confirm2,
+              onChange: (e) => setConfirm(e.target.value),
+              onKeyDown,
+              style: input
+            }
+          )
+        ] }) : null,
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", marginBottom: 14 }, children: canRemember ? "✓ 通行碼會由作業系統金鑰圈記住，這台機器只需輸入一次。" : "⚠ 此系統無法使用金鑰圈，每次啟動都需要重新輸入。" }),
+        error ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#f87171", marginBottom: 12 }, children: error }) : null,
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, justifyContent: "flex-end" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: onClose,
+              disabled: busy,
+              style: {
+                padding: "6px 16px",
+                borderRadius: 6,
+                border: "1px solid #475569",
+                background: "transparent",
+                color: "#94a3b8",
+                cursor: busy ? "default" : "pointer",
+                fontSize: 12
+              },
+              children: "取消"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: submit,
+              disabled: busy,
+              style: {
+                padding: "6px 16px",
+                borderRadius: 6,
+                border: "none",
+                background: busy ? "#4c4f8a" : "#6366f1",
+                color: "#fff",
+                cursor: busy ? "default" : "pointer",
+                fontSize: 12
+              },
+              children: busy ? "處理中…" : mode === "setup" ? "建立" : mode === "unlock" ? "解鎖" : "變更"
+            }
+          )
+        ] })
+      ] })
+    }
+  );
+}
+function VaultHost() {
+  const dialog = useWorkspaceStore((s) => s.vaultDialog);
+  const close = useWorkspaceStore((s) => s.closeVaultDialog);
+  if (!dialog) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(VaultModal, { mode: dialog.mode, reason: dialog.reason, onClose: close });
+}
+function WelcomeScreen() {
+  const { info, installing, pick, switchTo, forget, installBrowser } = useWorkspace();
+  const [dragging, setDragging] = reactExports.useState(false);
+  const recent = info?.recent ?? [];
+  const needsBrowser = info ? !info.hasChromium : false;
+  const onDrop = async (e) => {
+    e.preventDefault();
+    setDragging(false);
+    const path = e.dataTransfer.files[0]?.path;
+    if (path) await switchTo(path);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      onDragOver: (e) => {
+        e.preventDefault();
+        setDragging(true);
+      },
+      onDragLeave: () => setDragging(false),
+      onDrop,
+      style: {
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        background: "#0f172a",
+        color: "#e2e8f0",
+        outline: dragging ? "2px dashed #38bdf8" : "none",
+        outlineOffset: -8
+      },
+      children: [
+        needsBrowser && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: bannerStyle, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "⚠ 尚未安裝 Chromium 瀏覽器，錄製與執行測試都會失敗。" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: installBrowser, disabled: installing, style: installBtnStyle, children: installing ? "安裝中…" : "安裝瀏覽器" })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: bodyStyle, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: "1 1 380px", minWidth: 320 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { style: { fontSize: 30, fontWeight: 600, margin: 0 }, children: "FlowTest" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { color: "#94a3b8", marginTop: 6, marginBottom: 34 }, children: "錄製瀏覽器操作，產生 Playwright 測試" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: sectionStyle, children: "開始" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: pick, style: linkStyle, children: "📂 開啟資料夾…" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", marginTop: 4, marginBottom: 30 }, children: "選一個空資料夾即可建立新的工作區" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: sectionStyle, children: "最近使用" }),
+            recent.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#64748b" }, children: "還沒有開啟過任何工作區" }) : recent.map((w2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: recentRowStyle, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "button",
+                {
+                  onClick: () => switchTo(w2.path),
+                  title: w2.exists ? w2.path : `找不到：${w2.path}`,
+                  style: {
+                    ...recentBtnStyle,
+                    color: w2.exists ? "#e2e8f0" : "#64748b"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { flexShrink: 0 }, children: w2.name }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: recentPathStyle, children: w2.path }),
+                    !w2.exists && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: missingStyle, children: "找不到" })
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: () => forget(w2.path),
+                  title: "從清單移除",
+                  style: forgetBtnStyle,
+                  children: "✕"
+                }
+              )
+            ] }, w2.path))
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: "0 1 320px", minWidth: 260, display: "flex", flexDirection: "column", gap: 12 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Card, { title: "什麼是工作區？", children: "工作區就是一個資料夾，你的流程、專案設定與上傳檔案都存在裡面。 把它放進你自己的專案 repo，就能用 git 版控、開 PR、切分支 —— 不同的 repo 之間也自然互不干擾。" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Card, { title: "工作區 vs 專案", children: "一個工作區可以含多個「專案」。工作區決定檔案存在哪裡；專案負責分組流程， 並持有環境（DEV / UAT / PRD）與環境變數。" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Card, { title: "產出物不會進版控", children: "工具會在工作區裡放好 .gitignore，把 exports/ 與 .flowtest/ 排除掉， 不會動到你原本的 .gitignore。" })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: hintStyle, children: "把資料夾拖曳到這裡也可以開啟" })
+      ]
+    }
+  );
+}
+function Card({ title, children: children2 }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: cardStyle, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, marginBottom: 6, color: "#f1f5f9" }, children: title }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, lineHeight: 1.7, color: "#94a3b8" }, children: children2 })
+  ] });
+}
+const bannerStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  padding: "10px 20px",
+  background: "#78350f",
+  color: "#fef3c7",
+  fontSize: 12,
+  flexShrink: 0
+};
+const installBtnStyle = {
+  background: "#f59e0b",
+  color: "#1c1917",
+  border: "none",
+  borderRadius: 4,
+  padding: "5px 12px",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+  flexShrink: 0
+};
+const bodyStyle = {
+  flex: 1,
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 48,
+  alignContent: "center",
+  justifyContent: "center",
+  padding: "32px 56px",
+  overflowY: "auto"
+};
+const sectionStyle = {
+  fontSize: 12,
+  fontWeight: 600,
+  textTransform: "uppercase",
+  letterSpacing: 0.6,
+  color: "#64748b",
+  margin: "0 0 10px"
+};
+const linkStyle = {
+  display: "block",
+  background: "none",
+  border: "none",
+  padding: 0,
+  color: "#38bdf8",
+  fontSize: 14,
+  cursor: "pointer",
+  textAlign: "left"
+};
+const recentRowStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: 4
+};
+const recentBtnStyle = {
+  flex: 1,
+  minWidth: 0,
+  display: "flex",
+  alignItems: "baseline",
+  gap: 10,
+  background: "none",
+  border: "none",
+  padding: "4px 0",
+  fontSize: 13,
+  cursor: "pointer",
+  textAlign: "left"
+};
+const recentPathStyle = {
+  flex: 1,
+  minWidth: 0,
+  fontSize: 11,
+  color: "#64748b",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  direction: "rtl",
+  // keep the tail (the folder itself) visible when truncating
+  textAlign: "left"
+};
+const missingStyle = {
+  fontSize: 10,
+  color: "#f87171",
+  flexShrink: 0
+};
+const forgetBtnStyle = {
+  background: "none",
+  border: "none",
+  color: "#475569",
+  cursor: "pointer",
+  fontSize: 12,
+  padding: "2px 6px",
+  flexShrink: 0
+};
+const cardStyle = {
+  background: "#1e293b",
+  border: "1px solid #334155",
+  borderRadius: 6,
+  padding: "14px 16px",
+  fontSize: 13
+};
+const hintStyle = {
+  textAlign: "center",
+  padding: "0 0 22px",
+  fontSize: 11,
+  color: "#475569",
+  flexShrink: 0
+};
+async function reloadFromDisk() {
+  if (!useWorkspaceStore.getState().info?.root) return;
+  const store = useFlowStore.getState();
+  if (store.isRecording || store.isReplaying) return;
+  store.setFlows(await window.electronAPI.listFlows());
+  store.setProjects(await window.electronAPI.listProjects());
+  const openProject = store.currentProject;
+  if (openProject) {
+    const project = await window.electronAPI.loadProject(openProject.id);
+    if (project && project.updatedAt > openProject.updatedAt) {
+      const s = useFlowStore.getState();
+      s.setCurrentProject(project);
+      if (!project.environments.some((e) => e.id === s.activeEnvironmentId)) {
+        s.setActiveEnvironment(project.environments[0]?.id ?? null);
+      }
+    }
+  }
+  const open = store.currentFlow;
+  if (!open) return;
+  const onDisk = await window.electronAPI.loadFlow(open.id);
+  if (!onDisk) {
+    useFlowStore.getState().setCurrentFlow(null);
+    return;
+  }
+  if (onDisk.updatedAt > open.updatedAt) {
+    useFlowStore.getState().setCurrentFlow(onDisk);
+  }
+}
 function usePlaywrightEvents() {
   const { setReplayStatus, setReplayingNode, setIsReplaying } = useFlowStore();
   reactExports.useEffect(() => {
@@ -21694,7 +22665,11 @@ function usePlaywrightEvents() {
     const unsubLocatorPick = window.electronAPI.onLocatorPickNeeded((payload) => {
       useFlowStore.getState().setPendingLocatorPick(payload);
     });
+    const unsubReload = window.electronAPI.onWorkspaceReload(() => {
+      void reloadFromDisk();
+    });
     return () => {
+      unsubReload();
       unsubCaptured();
       unsubUpdated();
       unsubRemoved();
@@ -21730,6 +22705,17 @@ function App() {
   usePlaywrightEvents();
   useUndoRedo();
   const { selectedNodeId, currentFlow } = useFlowStore();
+  const { info, loading, load } = useWorkspaceStore();
+  reactExports.useEffect(() => {
+    void load();
+  }, [load]);
+  if (loading) return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: splashStyle });
+  if (!info?.root) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(WelcomeScreen, {}),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(ConfirmHost, {})
+    ] });
+  }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", height: "100vh" }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx(Toolbar, {}),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flex: 1, overflow: "hidden" }, children: [
@@ -21745,9 +22731,11 @@ function App() {
         /* @__PURE__ */ jsxRuntimeExports.jsx(SessionVarList, {})
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(ConfirmHost, {})
+    /* @__PURE__ */ jsxRuntimeExports.jsx(ConfirmHost, {}),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(VaultHost, {})
   ] });
 }
+const splashStyle = { height: "100vh", background: "#0f172a" };
 client.createRoot(document.getElementById("root")).render(
   /* @__PURE__ */ jsxRuntimeExports.jsx(React$2.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) })
 );

@@ -1,14 +1,9 @@
 import { promises as fs } from 'fs'
 import { createHash } from 'crypto'
-import { basename, extname, isAbsolute, join, resolve } from 'path'
-import { app } from 'electron'
+import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'path'
+import { dataRoot } from './workspace'
 
-/** Root that flows/, projects/, exports/ and fixtures/ all live under.
- *  Also the cwd used when spawning `npx playwright test` (see ipcHandlers RUN_TESTS),
- *  which is why fixture paths can be stored relative to it. */
-export function dataRoot(): string {
-  return app.isPackaged ? app.getPath('userData') : process.cwd()
-}
+export { dataRoot }
 
 function fixturesDir(): string {
   return join(dataRoot(), 'fixtures')
@@ -59,5 +54,34 @@ export class FixtureStorage {
    */
   static toAbsolute(stored: string): string {
     return isAbsolute(stored) ? stored : resolve(dataRoot(), stored)
+  }
+
+  /**
+   * Make a user-supplied path portable before it is stored on an Action.
+   *
+   * An absolute path pins the flow to one machine, which defeats sharing the
+   * workspace through git. Anything already inside the workspace just loses its
+   * prefix — that also means a flow can reference the surrounding repo's own
+   * test data (testdata/foo.png) without a redundant copy under fixtures/.
+   * Anything outside is copied in, since nothing else would travel with the repo.
+   *
+   * Bare filenames (drag & drop uploads, which never expose a path) are left
+   * alone for the UI to flag.
+   */
+  static async normalizeStoredPath(input: string): Promise<string> {
+    const value = input.trim()
+    if (!value || !isAbsolute(value)) return value
+
+    const rel = relative(dataRoot(), value)
+    // Inside the workspace: no '..' escape and not a different drive.
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
+      return rel.split(sep).join('/')
+    }
+
+    try {
+      return (await FixtureStorage.importFile(value)).stored
+    } catch {
+      return value // unreadable source — keep what the user typed rather than lose it
+    }
   }
 }

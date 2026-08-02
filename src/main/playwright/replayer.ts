@@ -7,6 +7,7 @@ import { resolveValueWithSession, resolveValue } from '../../shared/variableReso
 import { getCursorHighlightScript } from './captureShared'
 import { FlowStorage } from '../storage/flowStorage'
 import { FixtureStorage } from '../storage/fixtureStorage'
+import { decryptIfNeeded } from '../security/vault'
 
 // Async function constructor — used to run a code node's body with (page, expect, vars) in scope.
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
@@ -159,7 +160,9 @@ export class Replayer {
       Object.fromEntries(
         vars.map((v) => {
           const raw = (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value
-          return [v.key, resolveValue(raw, undefined, subFlowEnvVars)]
+          // Decrypt BEFORE resolution — resolveValue would otherwise splice ciphertext into
+          // a larger string, which can never be unwrapped again.
+          return [v.key, resolveValue(decryptIfNeeded(raw), undefined, subFlowEnvVars)]
         }),
       )
 
@@ -268,8 +271,12 @@ export class Replayer {
   }
 
   private async executeAction(action: Action): Promise<void> {
-    const val = action.value != null
-      ? resolveValueWithSession(action.value, this.sessionVars, this.profileVars, this.envVars)
+    // A node marked private stores ciphertext, so unwrap it before anything else looks at it.
+    const rawValue = action.value != null
+      ? (action.secret ? decryptIfNeeded(action.value) : action.value)
+      : undefined
+    const val = rawValue != null
+      ? resolveValueWithSession(rawValue, this.sessionVars, this.profileVars, this.envVars)
       : undefined
 
     // If this action opens a popup, start waiting for the page event BEFORE executing

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import type { Action, Flow, FlowNode } from '@shared/types'
+import { SECRET_MASK } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
 
 interface CallFlowModalProps {
@@ -328,7 +329,10 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
                         <div style={{ fontSize: 13, fontWeight: 500 }}>{sp.name}</div>
                         {sp.vars.length > 0 && (
                           <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
-                            {sp.vars.slice(0, 3).map((v) => `${v.key}=${v.value}`).join(', ')}
+                            {sp.vars
+                              .slice(0, 3)
+                              .map((v) => `${v.key}=${v.secret ? SECRET_MASK : v.value}`)
+                              .join(', ')}
                             {sp.vars.length > 3 ? ' …' : ''}
                           </div>
                         )}

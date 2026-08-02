@@ -1,6 +1,9 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc/ipcHandlers'
+import { IPC_CHANNELS } from '../shared/types'
+import { loadSettings, hasWorkspace } from './storage/workspace'
+import { load as loadVault } from './security/vault'
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -29,6 +32,16 @@ function createWindow(): BrowserWindow {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
+  // The workspace lives in the user's own git repo, so it can change under us
+  // while the app is open (a pull, a branch switch). Regaining focus is the
+  // moment right after the user did that in a terminal — cheap, and it covers
+  // the case that would otherwise be silently overwritten by the next autosave.
+  // Guarded on hasWorkspace: this also fires for the initial win.focus() below,
+  // when there is nothing to reload and storage would throw.
+  win.on('focus', () => {
+    if (hasWorkspace()) win.webContents.send(IPC_CHANNELS.WORKSPACE_RELOAD)
+  })
+
   win.on('ready-to-show', () => {
     win.show()
     // Windows can deny SetForegroundWindow if too much time passed since the
@@ -43,7 +56,14 @@ function createWindow(): BrowserWindow {
   return win
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Must precede the window: the renderer asks for the workspace on mount, and
+  // storage throws until one is set.
+  await loadSettings()
+  // Read the vault metadata (and try the remembered passphrase) before any IPC can run,
+  // so the locked-state guards are never answering from an unloaded state.
+  await loadVault()
+
   const win = createWindow()
   registerIpcHandlers(win)
 

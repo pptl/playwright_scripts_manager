@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
+import { SecretValue } from '../common/SecretValue'
 
 /** Sidebar list of the current project's environment variables, showing each
  *  key with its value for the active environment. Click a row to copy {{key}}. */
@@ -108,11 +109,17 @@ export function ProjectEnvVarList() {
                   >
                     {placeholder}
                   </code>
+                  {v.secret && (
+                    <span title="私密資料（加密儲存）" style={{ fontSize: 10, flexShrink: 0 }}>
+                      🔐
+                    </span>
+                  )}
                   {copiedKey === v.key && (
                     <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>已複製</span>
                   )}
                 </div>
                 <div
+                  onClick={(e) => e.stopPropagation()}
                   style={{
                     fontSize: 10,
                     color: value ? '#78716c' : '#475569',
@@ -121,7 +128,7 @@ export function ProjectEnvVarList() {
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  {value || '(空)'}
+                  <SecretValue value={value} secret={v.secret} />
                 </div>
               </div>
             )

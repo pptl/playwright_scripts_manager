@@ -1,31 +1,35 @@
 import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
-import type { Flow, Project } from '../../../shared/types'
-import { flattenProjectEnvVars, resolveValue } from '@shared/variableResolver'
+import type { Flow } from '@shared/types'
 import { DOMAIN_ENV_KEY } from '@shared/types'
+import { buildProfileVars as buildVars, getEnvVars, getSecretEnvKeys } from '../utils/varMaps'
+import { useWorkspaceStore } from '../stores/workspaceStore'
+
+/**
+ * Refuse anything that would drive a real browser while private values are unreadable,
+ * and raise the unlock dialog. Blanket rather than "only when a secret is involved" —
+ * failing loudly beats silently typing `enc:v1:…` into a login form.
+ */
+function blockedByLock(reason: string): boolean {
+  const { vault, openVaultDialog } = useWorkspaceStore.getState()
+  if (!vault || vault.state !== 'locked') return false
+  openVaultDialog('unlock', reason)
+  return true
+}
 
 function buildProfileVars(
   flow: Flow | null,
   activeProfileId: string | null,
   activeEnvironmentId: string | null,
   envVars: Record<string, string>,
+  secretEnvKeys: string[],
 ): Record<string, string> | undefined {
-  const profile = flow?.profiles?.find((p) => p.id === activeProfileId)
-  if (!profile) return undefined
-  return Object.fromEntries(
-    profile.vars.map((v) => {
-      const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
-      return [v.key, resolveValue(raw, undefined, envVars)]
-    }),
+  return buildVars(
+    flow?.profiles?.find((p) => p.id === activeProfileId),
+    activeEnvironmentId,
+    envVars,
+    secretEnvKeys,
   )
-}
-
-/** Active project's environment variables flattened for the active environment. */
-function getEnvVars(
-  currentProject: Project | null,
-  activeEnvironmentId: string | null,
-): Record<string, string> {
-  return flattenProjectEnvVars(currentProject?.envVars, activeEnvironmentId)
 }
 
 /**
@@ -60,12 +64,15 @@ export function usePlaywright() {
     async (fromNodeId: string) => {
       const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore.getState()
       if (!currentFlow) return
+      // Branch recording silently replays to the branch point first, which may type
+      // private values into the page.
+      if (blockedByLock('分支錄製會先重播到該節點，需要讀取私密資料。請先解鎖。')) return
       // Set recording head so new actions append as children of this node
       useFlowStore.getState().setRecordingHead(fromNodeId)
       setIsRecording(true)
 
       const envVars = getEnvVars(currentProject, activeEnvironmentId)
-      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars)
+      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars, getSecretEnvKeys(currentProject))
 
       try {
         await window.electronAPI.startRecording({
@@ -105,11 +112,12 @@ export function usePlaywright() {
     async (targetNodeId: string, speed: number) => {
       const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore.getState()
       if (!currentFlow) return
+      if (blockedByLock('重播需要讀取私密資料，請先解鎖。')) return
       clearReplayStatus()
       setIsReplaying(true)
 
       const envVars = getEnvVars(currentProject, activeEnvironmentId)
-      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars)
+      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars, getSecretEnvKeys(currentProject))
 
       try {
         await window.electronAPI.replayToNode(

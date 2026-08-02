@@ -1,29 +1,43 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
-import { DOMAIN_ENV_KEY } from '@shared/types'
+import { DOMAIN_ENV_KEY, SECRET_ENVELOPE_PREFIX } from '@shared/types'
 import type { ProjectEnvVar } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
+import { useVault } from '../../hooks/useVault'
+
+const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
 
 /** One row of the env-var table: a key plus its value for the currently selected environment. */
 interface EnvVarRow {
   key: string
   value: string
+  /** Private: the stored value is ciphertext and the UI masks it. */
+  secret: boolean
 }
 
 /** A row as edited in the table. `_rid` is a stable client id (React keys); `_origKey` is the
  *  key this row had in the store at load time — `commitProjectEnvVars` uses it to carry other
- *  environments' values across a rename, and `null` marks a row added here. */
-type EditRow = EnvVarRow & { _rid: string; _origKey: string | null }
+ *  environments' values across a rename, and `null` marks a row added here.
+ *  `_storedValue` is what is actually on disk (ciphertext for private rows); `value` holds the
+ *  plaintext only once revealed or freshly typed. */
+type EditRow = EnvVarRow & { _rid: string; _origKey: string | null; _storedValue: string; _dirty: boolean }
 
 /** Store env vars → table rows, resolved for the selected environment. */
 function toEditRows(vars: ProjectEnvVar[], envId: string | null): EditRow[] {
-  return vars.map((v, i) => ({
-    key: v.key,
-    value: (envId && v.values[envId]) ?? '',
-    _rid: `src:${i}`,
-    _origKey: v.key,
-  }))
+  return vars.map((v, i) => {
+    const stored = (envId && v.values[envId]) ?? ''
+    return {
+      key: v.key,
+      // A private row starts masked: its plaintext is not in the renderer at all.
+      value: v.secret ? '' : stored,
+      secret: !!v.secret,
+      _rid: `src:${i}`,
+      _origKey: v.key,
+      _storedValue: stored,
+      _dirty: false,
+    }
+  })
 }
 
 interface ProjectEnvVarModalProps {
@@ -47,6 +61,8 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     deleteEnvironment,
     commitProjectEnvVars,
   } = useFlowStore()
+
+  const { ensureUsable } = useVault()
 
   const environments = currentProject?.environments ?? []
   const envVars = currentProject?.envVars ?? []
@@ -83,11 +99,56 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
   }, [tableKey])
 
   const setCell = <K extends keyof EnvVarRow>(rid: string, key: K, v: EnvVarRow[K]) => {
-    setRows((prev) => prev.map((r) => (r._rid === rid ? { ...r, [key]: v } : r)))
+    setRows((prev) =>
+      prev.map((r) => (r._rid === rid ? { ...r, [key]: v, _dirty: key === 'value' ? true : r._dirty } : r)),
+    )
   }
 
   const addRow = () => {
-    setRows((prev) => [...prev, { key: '', value: '', _rid: `new:${uuidv4()}`, _origKey: null }])
+    setRows((prev) => [
+      ...prev,
+      { key: '', value: '', secret: false, _rid: `new:${uuidv4()}`, _origKey: null, _storedValue: '', _dirty: true },
+    ])
+  }
+
+  /** Flip a row's private flag. Turning it ON needs a usable vault to encrypt with;
+   *  turning it OFF needs one to recover the plaintext being un-encrypted. */
+  const toggleSecret = async (rid: string) => {
+    const row = rows.find((r) => r._rid === rid)
+    if (!row || row.key === DOMAIN_ENV_KEY) return
+    if (!ensureUsable()) return
+
+    if (!row.secret) {
+      setRows((prev) => prev.map((r) => (r._rid === rid ? { ...r, secret: true, _dirty: true } : r)))
+      return
+    }
+    // Un-marking: pull the plaintext back into the field so the user can see what they
+    // are about to store in the clear.
+    let plain = row.value
+    if (!row._dirty && isCiphertext(row._storedValue)) {
+      try {
+        plain = await window.electronAPI.revealSecret(row._storedValue)
+      } catch {
+        return setError('無法解密此變數，請先解鎖保險庫')
+      }
+    }
+    setRows((prev) =>
+      prev.map((r) => (r._rid === rid ? { ...r, secret: false, value: plain, _dirty: true } : r)),
+    )
+  }
+
+  /** What actually gets written for a row: ciphertext for private values, and the
+   *  untouched stored ciphertext when the user never revealed or edited it. */
+  const storedValueFor = async (r: EditRow): Promise<string> => {
+    if (r.secret) {
+      return !r._dirty && isCiphertext(r._storedValue)
+        ? r._storedValue
+        : await window.electronAPI.encryptSecret(r.value)
+    }
+    if (!r._dirty && isCiphertext(r._storedValue)) {
+      return await window.electronAPI.revealSecret(r._storedValue)
+    }
+    return r.value
   }
 
   const handleSave = async () => {
@@ -98,9 +159,18 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     if (dup) return setError(`變數名稱重複：${dup}`)
     // `domain` is reserved: it must survive and keep its name.
     if (!keys.includes(DOMAIN_ENV_KEY)) return setError(`${DOMAIN_ENV_KEY} 為保留變數，不可刪除或改名`)
+    if (rows.some((r) => r.secret) && !ensureUsable()) return
     setError(null)
+
+    let values: string[]
+    try {
+      values = await Promise.all(rows.map(storedValueFor))
+    } catch (err) {
+      return setError(`加密失敗：${String(err instanceof Error ? err.message : err)}`)
+    }
+
     await commitProjectEnvVars(
-      rows.map((r) => ({ origKey: r._origKey, key: r.key.trim(), value: r.value })),
+      rows.map((r, i) => ({ origKey: r._origKey, key: r.key.trim(), value: values[i], secret: r.secret })),
       selectedEnv.id,
     )
     // Re-load from the store: rows added here still carry `_origKey: null`, so a second
@@ -165,7 +235,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     setRows((prev) => prev.filter((r) => r._rid !== rid))
   }
 
-  const gridCols = '1fr 1fr 32px'
+  const gridCols = '1fr 1fr 28px 32px'
   const envBtnStyle: React.CSSProperties = {
     background: 'transparent',
     border: '1px solid #334155',
@@ -341,6 +411,9 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                 <span style={{ fontSize: 11, color: '#4ade80', fontWeight: 600 }}>
                   值{selectedEnv ? ` (${selectedEnv.name})` : ''}
                 </span>
+                <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textAlign: 'center' }} title="私密資料：加密後才寫入檔案">
+                  🔐
+                </span>
                 <span />
               </div>
 
@@ -369,12 +442,39 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     title={isDomain ? 'domain 為保留變數，無法改名或刪除' : '變數名稱（配置以 {{key}} 引用）'}
                   />
                   <input
+                    type={row.secret ? 'password' : 'text'}
                     value={row.value}
                     onChange={(e) => setCell(row._rid, 'value', e.target.value)}
                     onKeyDown={cellKeyDown}
-                    placeholder="(空)"
-                    style={{ ...cellInputStyle, borderColor: '#166534' }}
+                    // A private row loads masked with no plaintext in the renderer at all,
+                    // so say so rather than showing a misleading empty field.
+                    placeholder={row.secret && !row._dirty ? '（已加密，輸入以覆寫）' : '(空)'}
+                    style={{ ...cellInputStyle, borderColor: row.secret ? '#a16207' : '#166534' }}
                   />
+                  {isDomain ? (
+                    <span
+                      title="domain 會被寫入 goto 網址，無法設為私密"
+                      style={{ textAlign: 'center', color: '#475569', fontSize: 11 }}
+                    >
+                      —
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => void toggleSecret(row._rid)}
+                      title={row.secret ? '目前為私密資料（加密儲存）— 點擊取消' : '設為私密資料（加密後才寫入檔案）'}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontSize: 13,
+                        padding: 2,
+                        opacity: row.secret ? 1 : 0.3,
+                        filter: row.secret ? undefined : 'grayscale(1)',
+                      }}
+                    >
+                      🔐
+                    </button>
+                  )}
                   {isDomain ? (
                     <span title="domain 為保留變數，無法刪除" style={{ textAlign: 'center', color: '#475569', fontSize: 13 }}>🔒</span>
                   ) : (

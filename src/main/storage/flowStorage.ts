@@ -1,15 +1,11 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { app } from 'electron'
 import type { Flow, FlowListItem } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
+import { getWorkspaceRoot } from './workspace'
 
 function flowsDir(): string {
-  // In dev: next to package.json; in production: next to the app
-  const base = app.isPackaged
-    ? join(app.getPath('userData'), 'flows')
-    : join(process.cwd(), 'flows')
-  return base
+  return join(getWorkspaceRoot(), 'flows')
 }
 
 export class FlowStorage {
@@ -21,9 +17,15 @@ export class FlowStorage {
     return join(flowsDir(), `${flowId}.json`)
   }
 
-  static async save(flow: Flow): Promise<void> {
+  /**
+   * `touch: false` writes without bumping updatedAt. Used by the debounced save
+   * behind node dragging: repositioning is not a content change, and stamping a
+   * new timestamp on every drag makes the flow's JSON conflict in git for what
+   * is really just a cosmetic move.
+   */
+  static async save(flow: Flow, opts?: { touch?: boolean }): Promise<void> {
     await FlowStorage.ensureDir()
-    flow.updatedAt = new Date().toISOString()
+    if (opts?.touch !== false) flow.updatedAt = new Date().toISOString()
     await fs.writeFile(FlowStorage.filePath(flow.id), JSON.stringify(flow, null, 2), 'utf-8')
   }
 

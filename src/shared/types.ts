@@ -29,6 +29,11 @@ export interface Action {
   /** Full Playwright locator expression from Codegen, e.g. getByRole('button', { name: 'Login' }) */
   locatorExpr?: string
   value?: string
+  /** Private data: `value` holds ciphertext (see SECRET_ENVELOPE_PREFIX) rather than the
+   *  typed text, and code generation emits a process.env reference instead of a literal.
+   *  Not offered for `goto` (the domain is substituted into the URL) or `upload`
+   *  (fixture paths are not secrets). */
+  secret?: boolean
   /** click only: mouse button — absent means left */
   button?: 'left' | 'right' | 'middle'
   /** click only: modifier keys held during the click (Playwright names: Alt/Control/Meta/Shift) */
@@ -114,12 +119,18 @@ export interface FlowGroup {
 
 export interface ProfileVariable {
   key: string
-  /** Standalone / fallback value used when no project environment is active */
+  /** Standalone / fallback value used when no project environment is active.
+   *  Ciphertext (see SECRET_ENVELOPE_PREFIX) when `secret` is set. */
   value: string
   description?: string
   /** Per-environment value overrides keyed by ProjectEnvironment.id.
    *  Resolution: envValues[activeEnvId] ?? value */
   envValues?: Record<string, string>
+  /** Private data: `value` and every `envValues` entry are stored encrypted, and code
+   *  generation emits a process.env reference instead of a literal.
+   *  Keys are shared across all profiles of a flow, so this is a per-KEY attribute —
+   *  it must be identical on the same key in every profile (see commitProfileVars). */
+  secret?: boolean
 }
 
 export interface FlowProfile {
@@ -138,9 +149,13 @@ export interface ProjectEnvironment {
  *  active environment. Resolution: values[activeEnvironmentId] ?? '' */
 export interface ProjectEnvVar {
   key: string
-  /** Per-environment value keyed by ProjectEnvironment.id */
+  /** Per-environment value keyed by ProjectEnvironment.id.
+   *  Ciphertext (see SECRET_ENVELOPE_PREFIX) when `secret` is set. */
   values: Record<string, string>
   description?: string
+  /** Private data — see ProfileVariable.secret. The reserved `domain` key can never be
+   *  secret: it is baked into goto URLs as a literal. */
+  secret?: boolean
 }
 
 /** Reserved default project ("未分類"). Any flow with no projectId — or a projectId
@@ -156,6 +171,36 @@ export const DOMAIN_ENV_KEY = 'domain'
 export const DEFAULT_ENV_NAME = 'DEV'
 /** Default value for the seeded `domain` environment variable. */
 export const DEFAULT_DOMAIN = 'http://localhost:3000/'
+
+// ── Private data (the vault) ──────────────────────────────────────────────────
+
+/** Marker that makes an encrypted value self-describing, so ciphertext can live in the
+ *  same `string` fields as plaintext with no schema surgery.
+ *  Full envelope: `enc:v1:<base64 iv>:<base64 ciphertext+authTag>` */
+export const SECRET_ENVELOPE_PREFIX = 'enc:v1:'
+
+/** What the UI shows in place of a private value. */
+export const SECRET_MASK = '••••••'
+
+/** Environment-variable name prefix used by generated specs to look up private values. */
+export const SECRET_ENV_PREFIX = 'FT_SECRET_'
+
+/** Gitignored file the generated spec falls back to when the env var is absent —
+ *  written on demand so `npx playwright test` works outside the app. */
+export const SECRETS_FILE = '.flowtest/secrets.env'
+
+/** Vault state of the open workspace.
+ *  - `none`     — no vault has been created; nothing is encrypted yet
+ *  - `locked`   — a vault exists but the key is not in memory; secrets are unreadable
+ *  - `unlocked` — the key is in memory; secrets can be read and written */
+export type VaultState = 'none' | 'locked' | 'unlocked'
+
+export interface VaultStatus {
+  state: VaultState
+  /** False when the OS keychain is unavailable (some Linux setups) — the passphrase then
+   *  cannot be remembered and must be entered on every launch. */
+  canRemember: boolean
+}
 
 export interface Project {
   id: string
@@ -217,6 +262,10 @@ export interface ExportConfig {
   envVars?: Record<string, string>
   /** ID of the active project — env-var references only resolve for (sub-)flows in this project */
   activeProjectId?: string
+  /** Which of `envVars`' keys are private. Profile-var secrecy is read off the Flow objects
+   *  the exporter already loads; project env vars only ever arrive as a flat map, so their
+   *  secrecy has to be carried alongside. */
+  secretEnvKeys?: string[]
 }
 
 export interface TestPath {
@@ -266,8 +315,33 @@ export const IPC_CHANNELS = {
 
   // Renderer → Main (native file picker — returns paths imported into fixtures/)
   PICK_FILES: 'files:pick',
+  // Rewrite hand-typed paths into workspace-relative ones before they are stored
+  NORMALIZE_PATHS: 'files:normalize',
+
+  // Workspace (the user-chosen folder everything is read from / written to)
+  WORKSPACE_GET: 'workspace:get',
+  WORKSPACE_PICK: 'workspace:pick',
+  WORKSPACE_SET: 'workspace:set',
+  WORKSPACE_FORGET: 'workspace:forget',
+  WORKSPACE_REVEAL: 'workspace:reveal',
+
+  // Renderer → Main (download the Playwright browsers)
+  BROWSER_INSTALL: 'browser:install',
+  BROWSER_CHECK: 'browser:check',
+
+  // Private data — the key never leaves the main process; the renderer only ever
+  // holds ciphertext, plus whatever single value it explicitly asks to reveal.
+  VAULT_STATUS: 'vault:status',
+  VAULT_SETUP: 'vault:setup',
+  VAULT_UNLOCK: 'vault:unlock',
+  VAULT_LOCK: 'vault:lock',
+  VAULT_CHANGE_PASSPHRASE: 'vault:changePassphrase',
+  SECRET_ENCRYPT: 'secret:encrypt',
+  SECRET_REVEAL: 'secret:reveal',
+  SECRETS_FILE_WRITE: 'secret:writeFile',
 
   // Main → Renderer
+  WORKSPACE_RELOAD: 'workspace:reload',
   LOCATOR_PICK_NEEDED: 'locator:pickNeeded',
   ASSERTION_PICK_CANCELLED: 'assertion:pickCancelled',
   ACTION_CAPTURED: 'action:captured',
@@ -282,6 +356,20 @@ export const IPC_CHANNELS = {
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
+
+/** A remembered workspace, with whether it still exists on disk. */
+export interface RecentWorkspace {
+  path: string
+  name: string
+  exists: boolean
+}
+
+export interface WorkspaceInfo {
+  root: string | null
+  recent: RecentWorkspace[]
+  /** false only when no Chromium build exists at all — never on a version mismatch. */
+  hasChromium: boolean
+}
 
 // IPC payload types
 export interface ReplayToNodePayload {
@@ -315,6 +403,8 @@ export interface ExportScriptsPayload {
 
 export interface FlowSavePayload {
   flow: Flow
+  /** false leaves updatedAt alone — for saves that only move nodes around. */
+  touch?: boolean
 }
 
 export interface FlowLoadPayload {

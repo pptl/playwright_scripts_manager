@@ -1,6 +1,7 @@
-import { BrowserWindow, ipcMain, app, dialog } from 'electron'
+import { BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import { spawn } from 'child_process'
-import { join, basename } from 'path'
+import { promises as fs } from 'fs'
+import { basename } from 'path'
 import { IPC_CHANNELS } from '../../shared/types'
 import type {
   ReplayToNodePayload,
@@ -11,6 +12,7 @@ import type {
   ActionType,
   ProjectSavePayload,
   ProjectLoadPayload,
+  WorkspaceInfo,
 } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
@@ -20,6 +22,22 @@ import { FlowStorage } from '../storage/flowStorage'
 import { FixtureStorage } from '../storage/fixtureStorage'
 import { ProjectStorage } from '../storage/projectStorage'
 import { ScriptExporter } from '../storage/scriptExporter'
+import {
+  getWorkspaceRoot,
+  hasWorkspace,
+  getRecentWorkspaces,
+  setWorkspaceRoot,
+  removeRecentWorkspace,
+  configPath,
+  warnAbout,
+} from '../storage/workspace'
+import { hasChromium, isMissingBrowserError } from '../playwright/browserCheck'
+import {
+  resolvePlaywrightCli,
+  runPlaywright,
+  MISSING_CLI_MESSAGE,
+  HTML_REPORT_DIR,
+} from '../playwright/runner'
 
 let browserController: BrowserController | null = null
 let recorder: Recorder | null = null
@@ -40,6 +58,12 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     if (result.canceled || !result.filePaths.length) return []
     return await importFiles(result.filePaths)
   })
+
+  // Hand-typed paths bypass the picker, so they arrive absolute and would pin the
+  // flow to one machine. Rewrite them relative to the workspace (or copy them in).
+  ipcMain.handle(IPC_CHANNELS.NORMALIZE_PATHS, async (_e, paths: string[]) =>
+    await Promise.all(paths.map((p) => FixtureStorage.normalizeStoredPath(p))),
+  )
 
   // ── Browser ──────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.BROWSER_LAUNCH, async () => {
@@ -151,7 +175,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
   // ── Storage ──────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.FLOW_SAVE, async (_e, payload: FlowSavePayload) => {
-    await FlowStorage.save(payload.flow)
+    await FlowStorage.save(payload.flow, { touch: payload.touch })
   })
 
   ipcMain.handle(IPC_CHANNELS.FLOW_LOAD, async (_e, payload: FlowLoadPayload) => {
@@ -200,48 +224,141 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   })
 
   // ── Run Tests ────────────────────────────────────────────
+  const out = (text: string): void => win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, text)
+
   ipcMain.handle(IPC_CHANNELS.RUN_TESTS, async (_e, payload: ExportScriptsPayload) => {
-    const cwd = app.isPackaged ? join(app.getPath('userData')) : process.cwd()
+    const finish = (exitCode: number): void => {
+      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 })
+    }
+
+    const cli = resolvePlaywrightCli()
+    if (!cli) {
+      out(MISSING_CLI_MESSAGE)
+      return finish(1)
+    }
 
     // 1. Export script
     let specPath: string
     try {
       specPath = await ScriptExporter.export(payload.flow, payload.config)
-      win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `✓ 腳本已匯出: ${specPath}\n\n`)
+      out(`✓ 腳本已匯出: ${specPath}\n`)
     } catch (err) {
-      win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `✗ 匯出失敗: ${String(err)}\n`)
-      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode: 1, passed: false })
-      return
+      out(`✗ 匯出失敗: ${String(err)}\n`)
+      return finish(1)
     }
 
-    // 2. Run playwright test — pass only the filename because playwright.config.ts
-    //    sets testDir to './exports', so Playwright already scopes its search there.
-    //    Passing the full relative path (exports/uuid.spec.ts) makes Playwright treat
-    //    it as a regex filter against paths relative to testDir, which never matches.
+    // 2. Run the bundled CLI. Only the filename is passed: the generated config
+    //    sets testDir to './exports', and Playwright treats a path argument as a
+    //    regex against paths relative to testDir, so 'exports/x.spec.ts' matches
+    //    nothing. --config is explicit so a config higher up the user's tree
+    //    cannot take over the run.
     const specFilename = basename(specPath)
-    win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${specFilename}\n\n`)
-    const exitCode = await new Promise<number>((resolve) => {
-      const child = spawn('npx', ['playwright', 'test', specFilename, '--reporter=list,html'], {
-        cwd,
-        shell: true,
-      })
-      child.stdout.on('data', (d: Buffer) =>
-        win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, d.toString()),
-      )
-      child.stderr.on('data', (d: Buffer) =>
-        win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, d.toString()),
-      )
-      child.on('close', (code) => resolve(code ?? 1))
-    })
+    const cwd = getWorkspaceRoot()
+    const args = ['test', specFilename, '--config', configPath(), '--reporter=list,html']
 
-    win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 })
+    out(`✓ 執行器: ${cli.path} (v${cli.version})\n`)
+    out(`▶ playwright ${args.join(' ')}\n\n`)
+
+    const { exitCode, output } = await runPlaywright(cli, args, cwd, out)
+
+    if (exitCode !== 0 && isMissingBrowserError(output)) {
+      out('\n⚠ 缺少 Chromium 瀏覽器 — 請點擊「安裝瀏覽器」後重試。\n')
+    }
+    finish(exitCode)
   })
 
   ipcMain.handle(IPC_CHANNELS.SHOW_REPORT, async () => {
-    const cwd = app.isPackaged ? join(app.getPath('userData')) : process.cwd()
+    const cli = resolvePlaywrightCli()
+    if (!cli) return out(MISSING_CLI_MESSAGE)
+
     await killProcessOnPort(9323)
-    spawn('npx', ['playwright', 'show-report'], { cwd, shell: true, detached: true })
+    // Detached: the report server outlives this handler until the user closes it.
+    spawn(process.execPath, [cli.path, 'show-report', HTML_REPORT_DIR], {
+      cwd: getWorkspaceRoot(),
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_PATH: cli.nodePath },
+      detached: true,
+      stdio: 'ignore',
+    }).unref()
   })
+
+  // ── Browsers ─────────────────────────────────────────────
+  ipcMain.handle(IPC_CHANNELS.BROWSER_CHECK, async () => await hasChromium())
+
+  ipcMain.handle(IPC_CHANNELS.BROWSER_INSTALL, async () => {
+    const cli = resolvePlaywrightCli()
+    if (!cli) {
+      out(MISSING_CLI_MESSAGE)
+      return false
+    }
+    out('▶ 正在下載 Chromium…\n\n')
+    const { exitCode } = await runPlaywright(cli, ['install', 'chromium'], getWorkspaceRoot(), out)
+    out(exitCode === 0 ? '\n✓ 瀏覽器安裝完成\n' : `\n✗ 安裝失敗 (exit ${exitCode})\n`)
+    win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 })
+    return exitCode === 0
+  })
+
+  // ── Workspace ────────────────────────────────────────────
+  const workspaceInfo = async (): Promise<WorkspaceInfo> => ({
+    root: hasWorkspace() ? getWorkspaceRoot() : null,
+    recent: await Promise.all(
+      getRecentWorkspaces().map(async (p) => ({
+        path: p,
+        name: basename(p) || p,
+        exists: await pathExists(p),
+      })),
+    ),
+    hasChromium: await hasChromium(),
+  })
+
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_GET, workspaceInfo)
+
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_PICK, async () => {
+    const result = await dialog.showOpenDialog(win, {
+      title: '選擇工作區資料夾',
+      properties: ['openDirectory', 'createDirectory'],
+    })
+    if (result.canceled || !result.filePaths.length) return null
+
+    const dir = result.filePaths[0]
+    const warning = warnAbout(dir)
+    if (warning) {
+      const { response } = await dialog.showMessageBox(win, {
+        type: 'warning',
+        buttons: ['取消', '仍要使用'],
+        defaultId: 0,
+        cancelId: 0,
+        message: warning,
+        detail: dir,
+      })
+      if (response === 0) return null
+    }
+
+    await setWorkspaceRoot(dir)
+    return await workspaceInfo()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_SET, async (_e, dir: string) => {
+    await setWorkspaceRoot(dir)
+    return await workspaceInfo()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_FORGET, async (_e, dir: string) => {
+    await removeRecentWorkspace(dir)
+    return await workspaceInfo()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_REVEAL, async () => {
+    if (hasWorkspace()) await shell.openPath(getWorkspaceRoot())
+  })
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p)
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function hasCallFlowCycle(

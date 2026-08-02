@@ -1,6 +1,55 @@
 import { useEffect } from 'react'
 import { useFlowStore } from '../stores/flowStore'
+import { useWorkspaceStore } from '../stores/workspaceStore'
 import type { Action } from '@shared/types'
+
+/**
+ * Re-read the workspace after it may have changed on disk.
+ *
+ * Skipped outright while recording or replaying: those own the flow, and both
+ * are short-lived enough that the next focus event will catch up.
+ */
+async function reloadFromDisk(): Promise<void> {
+  // Nothing to reload before a workspace is open — and storage throws without one.
+  if (!useWorkspaceStore.getState().info?.root) return
+
+  const store = useFlowStore.getState()
+  if (store.isRecording || store.isReplaying) return
+
+  store.setFlows(await window.electronAPI.listFlows())
+  store.setProjects(await window.electronAPI.listProjects())
+
+  // The open project's environments / env vars can have changed too.
+  const openProject = store.currentProject
+  if (openProject) {
+    const project = await window.electronAPI.loadProject(openProject.id)
+    if (project && project.updatedAt > openProject.updatedAt) {
+      const s = useFlowStore.getState()
+      s.setCurrentProject(project)
+      // Drop an active environment the incoming version no longer defines.
+      if (!project.environments.some((e) => e.id === s.activeEnvironmentId)) {
+        s.setActiveEnvironment(project.environments[0]?.id ?? null)
+      }
+    }
+  }
+
+  const open = store.currentFlow
+  if (!open) return
+
+  const onDisk = await window.electronAPI.loadFlow(open.id)
+  if (!onDisk) {
+    // Deleted out from under us (a branch that never had it).
+    useFlowStore.getState().setCurrentFlow(null)
+    return
+  }
+  // Only take the disk copy when it is genuinely newer — otherwise a focus event
+  // during ordinary editing would throw away unsaved in-memory state.
+  if (onDisk.updatedAt > open.updatedAt) {
+    // setCurrentFlow clears undo history, which is correct: those snapshots
+    // describe a version of the flow that no longer exists.
+    useFlowStore.getState().setCurrentFlow(onDisk)
+  }
+}
 
 /**
  * Registers IPC event listeners from the Electron main process.
@@ -76,7 +125,16 @@ export function usePlaywrightEvents() {
       useFlowStore.getState().setPendingLocatorPick(payload)
     })
 
+    // The workspace sits in the user's own repo, so a pull or a branch switch can
+    // change these files while we hold them in memory — and the next autosave
+    // would quietly write our stale copy back over them. Regaining focus is the
+    // moment right after the user ran that git command elsewhere.
+    const unsubReload = window.electronAPI.onWorkspaceReload(() => {
+      void reloadFromDisk()
+    })
+
     return () => {
+      unsubReload()
       unsubCaptured()
       unsubUpdated()
       unsubRemoved()

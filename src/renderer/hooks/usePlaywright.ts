@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
-import type { Flow, Project } from '../../../shared/types'
+import type { Flow, Project } from '@shared/types'
 import { flattenProjectEnvVars, resolveValue } from '@shared/variableResolver'
 import { DOMAIN_ENV_KEY } from '@shared/types'
 

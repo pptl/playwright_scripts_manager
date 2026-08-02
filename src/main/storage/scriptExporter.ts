@@ -1,9 +1,9 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { app } from 'electron'
 import type { Flow, FlowNode, ExportConfig, TestPath } from '../../shared/types'
 import { isCallFlowAction, DEFAULT_PROJECT_ID, DOMAIN_ENV_KEY } from '../../shared/types'
 import { FlowStorage } from './flowStorage'
+import { getWorkspaceRoot } from './workspace'
 import type { CodegenVarScope } from '../../shared/variableResolver'
 import {
   hasVariables,
@@ -17,9 +17,7 @@ import {
 } from '../../shared/variableResolver'
 
 function exportsDir(): string {
-  return app.isPackaged
-    ? join(app.getPath('userData'), 'exports')
-    : join(process.cwd(), 'exports')
+  return join(getWorkspaceRoot(), 'exports')
 }
 
 /** One inlined step in a generated test path, carrying the flow-level context needed to emit it. */

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 import { usePlaywright } from '../../hooks/usePlaywright'
 import { useFlowManager } from '../../hooks/useFlowStore'
+import { useWorkspace } from '../../hooks/useWorkspace'
 import { TestOutputModal } from './TestOutputModal'
 import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
 import { ProjectEnvVarModal } from '../ProjectEnvVar/ProjectEnvVarModal'
@@ -28,6 +29,29 @@ const btn = (label: string, onClick: () => void, disabled = false, danger = fals
   </button>
 )
 
+const workspacePathStyle: React.CSSProperties = {
+  maxWidth: 160,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  background: '#0f172a',
+  border: '1px solid #334155',
+  borderRadius: 4,
+  padding: '3px 8px',
+  color: '#94a3b8',
+  fontSize: 11,
+  cursor: 'pointer',
+}
+
+const workspaceSwitchStyle: React.CSSProperties = {
+  background: '#0f172a',
+  border: '1px solid #334155',
+  borderRadius: 4,
+  padding: '3px 6px',
+  color: '#94a3b8',
+  fontSize: 11,
+}
+
 export function Toolbar() {
   const {
     currentFlow,
@@ -51,6 +75,9 @@ export function Toolbar() {
   } = useFlowStore()
   const { startRecording, stopRecording } = usePlaywright()
   const { newFlow } = useFlowManager()
+  const { root: workspaceRoot, pick: pickWorkspace, reveal } = useWorkspace()
+  // Show just the folder name; the full path lives in the tooltip.
+  const workspaceName = workspaceRoot?.split(/[\\/]/).filter(Boolean).pop() ?? workspaceRoot
   const [showNewFlowDialog, setShowNewFlowDialog] = useState(false)
   const [newName, setNewName] = useState('')
   const [newProjectId, setNewProjectId] = useState('')
@@ -208,9 +235,35 @@ export function Toolbar() {
         flexShrink: 0,
       }}
     >
-      <span style={{ fontWeight: 700, fontSize: 16, color: '#60a5fa', marginRight: 8 }}>
+      <span style={{ fontWeight: 700, fontSize: 16, color: '#60a5fa' }}>
         FlowTest
       </span>
+
+      {/* Which folder everything is being read from / written to. Easy to lose
+          track of once several repos each carry their own workspace. */}
+      {workspaceRoot && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginRight: 4 }}>
+          <button
+            onClick={reveal}
+            title={`${workspaceRoot}\n（點擊以在檔案總管中開啟）`}
+            style={workspacePathStyle}
+          >
+            📂 {workspaceName}
+          </button>
+          <button
+            onClick={pickWorkspace}
+            title="切換工作區"
+            disabled={isRecording || isReplaying}
+            style={{
+              ...workspaceSwitchStyle,
+              opacity: isRecording || isReplaying ? 0.4 : 1,
+              cursor: isRecording || isReplaying ? 'not-allowed' : 'pointer',
+            }}
+          >
+            ⇄
+          </button>
+        </div>
+      )}
 
       {btn('新增流程', () => setShowNewFlowDialog(true))}
 

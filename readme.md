@@ -2,9 +2,9 @@
 
 > FlowTest 是一套 **Electron 桌面應用**，把使用者在瀏覽器中的操作錄製成「視覺化分支流程圖」，再一鍵產生可獨立執行的 Playwright `.spec.ts` 測試套件。
 >
-> 技術堆疊：Electron 30 + React 18 + React Flow 11 + Zustand 4 + playwright-core 1.44 + TypeScript 5（建置：electron-vite / electron-builder）
+> 技術堆疊：Electron 30 + React 18 + React Flow 11 + Zustand 4 + Playwright 1.60（`playwright-core` 與 `@playwright/test` 鎖定同版）+ TypeScript 5（建置：electron-vite / electron-builder）
 >
-> 文件版本：2026-07-26　對應分支：`develop`
+> 文件版本：2026-08-02　對應分支：`develop`
 
 ---
 
@@ -20,7 +20,7 @@
 8. [專案與環境（Project / Environment）系統](#8-專案與環境projectenvironment系統)
 9. [程式碼節點（Code Node）](#9-程式碼節點code-node)
 10. [腳本匯出與測試執行](#10-腳本匯出與測試執行)
-11. [資料儲存](#11-資料儲存)
+11. [工作區與資料儲存](#11-工作區與資料儲存)
 12. [使用者介面總覽](#12-使用者介面總覽)
 13. [系統架構](#13-系統架構)
 14. [功能速查表](#14-功能速查表)
@@ -35,9 +35,11 @@
 | **2** | **樹狀分支流程，而非線性腳本** | 一個 Flow 是一棵（可多根）節點樹，每條 root→leaf 路徑即一個測試案例。共用前綴只錄一次，分歧點自然形成多個測試。 |
 | **3** | **Playwright 原生等級的 Locator 品質** | 直接從 `playwright-core` 的 `coreBundle.js` 抽出官方 `InjectedScript`，複用其 `generateSelectorSimple` + `asLocator`，因此錄出來的是 `getByRole('button', { name: '登入' })` 這類語意化 locator，而非脆弱的 CSS 路徑。 |
 | **4** | **產出的是可獨立執行的標準 Playwright 專案** | 匯出的 `.spec.ts` 不依賴本應用，可直接 `npx playwright test` 執行、可進版控、可接 CI。 |
-| **5** | **多層環境抽象** | 「專案環境變數」→「流程環境配置」→「區域（Session）變數」→「內建變數」四層優先序，一次切換 DEV / UAT / PRD 即換掉整組值與網域。 |
-| **6** | **子流程可重用與 N 層巢狀** | 登入、選單導覽等共用步驟抽成子流程，被多個測試引用；支援無限層巢狀與逐層的配置對應（Profile Mapping）。 |
-| **7** | **錄製時的瀏覽器內互動 UI** | 斷言選取器、Locator 選擇器都直接渲染在「被錄製的瀏覽器」內，不需切回應用視窗，錄製節奏不中斷。 |
+| **5** | **測試資料放進你自己的 repo，版控由你掌握** | 所有資料存在一個由使用者指定的**工作區資料夾**中。把它放進專案 repo，流程就能跟原始碼一起 commit、開 PR、切分支；不同 repo 的測試天然互相隔離。工具只寫入自帶的分層 `.gitignore`，**絕不改動你原本的 `.gitignore`**。 |
+| **6** | **內建測試執行器，不依賴使用者的 Node 環境** | App 打包了 `@playwright/test`，以 Electron 內建的 Node 執行，並用 `--config` 明確指定工作區的設定檔。使用者的專案不必是 Node 專案、不必裝 `node_modules`、離線也能跑，而且不會被 repo 中既有的 `playwright.config.ts` 劫持。 |
+| **7** | **多層環境抽象** | 「專案環境變數」→「流程環境配置」→「區域（Session）變數」→「內建變數」四層優先序，一次切換 DEV / UAT / PRD 即換掉整組值與網域。 |
+| **8** | **子流程可重用與 N 層巢狀** | 登入、選單導覽等共用步驟抽成子流程，被多個測試引用；支援無限層巢狀與逐層的配置對應（Profile Mapping）。 |
+| **9** | **錄製時的瀏覽器內互動 UI** | 斷言選取器、Locator 選擇器都直接渲染在「被錄製的瀏覽器」內，不需切回應用視窗，錄製節奏不中斷。 |
 
 ---
 
@@ -88,7 +90,8 @@
 - **刻意不攔截 file chooser** — 讓 Chromium 開自己的原生對話框（在使用者當前視窗上），而非跳出突兀的 Electron 跨視窗對話框。
 - 透過 CDP 的 `Runtime.evaluate` + **`DOM.getFileInfo`** 讀取瀏覽器端的**真實檔案路徑**（頁面 JS 只看得到 `File.name`）。
 - 讀到的檔案由 `FixtureStorage.importFile()` **複製進 `fixtures/`**，同名衝突時加上內容雜湊後綴。
-- 路徑以**相對於資料根目錄**（`fixtures/cat.jpg`）儲存 → 匯出的 spec 具可攜性。
+- 路徑以**相對於工作區**（`fixtures/cat.jpg`）儲存 → 匯出的 spec 隨 repo 移動也不會失效。
+- **手動輸入的絕對路徑會在儲存時自動正規化**：位於工作區內者去掉前綴轉成相對路徑（因此也可以直接引用 repo 中既有的 `testdata/`，不必多複製一份到 `fixtures/`）；位於工作區外者才複製進 `fixtures/`。避免流程被綁死在某一台機器上。
 - **自動移除「開啟檔案選擇器的那個點擊」**：該點擊不可重播（input 被隱藏在樣式化觸發器後），系統會丟棄緩衝中的點擊，或以 `ACTION_REMOVED` 通道通知畫布刪除該節點並回退錄製游標。
 - **Locator 帶標籤限定**：這類元件常讓觸發器與隱藏 input 共用同一個 id，故產生 `input#id` 而非裸 `#id`；舊節點在重播時由 `resolveFileInput()` 逐步收斂（`.and(input[type=file])` → 子孫 → 原 locator → 全頁唯一 file input）。
 - **拖放上傳**無 chooser 事件，只能取得裸檔名 → 節點顯示紅色 `⚠ 缺少檔案路徑` 徽章，可在屬性面板用「📂 選擇檔案…」補上。
@@ -137,7 +140,7 @@
 - **自動樹狀佈局**：`computeTreeLayout`（子樹置中演算法）與 `computeAllRootsLayout`（多根並排）。
 - **`positionsFinalized` 機制**：節點座標一旦由使用者手動調整（或首次載入時被物化）即成為唯一真實來源，之後不再自動重排。
 - **🧹 整理節點**：隨時無條件重新套用自動佈局。
-- **拖曳移動**：位置變更以 **debounce 寫入磁碟**，且走 `runWithoutHistory`，不會灌爆 undo 歷史。
+- **拖曳移動**：位置變更以 **debounce 寫入磁碟**，且走 `runWithoutHistory`，不會灌爆 undo 歷史。座標會**取整數**、且存檔時**不更新 `updatedAt`** —— 純粹移動版面不是內容變更，否則光是拖一下節點就會在 git 產生 diff。
 - **MiniMap + Controls + 網格背景**。
 
 ### 4.2 節點圖編輯
@@ -351,29 +354,91 @@
 - **環境專屬匯出**：goto 的網域直接烘焙成當前環境的字面值（`await page.goto('<domain>/path')`），匯出結果對應特定環境
 - popup 產生官方 `waitForEvent('popup')` 樣板；iframe 產生 `.contentFrame()` 鏈；雙擊產生 `dblclick`
 
-### 10.2 執行測試
+### 10.2 執行測試（內建執行器）
 
 1. 工具列「▶ 執行所有測試」→ 先匯出 spec
-2. 以子行程 spawn `npx playwright test <file> --reporter=list,html`
+2. 以子行程執行 **App 自帶的** Playwright CLI
 3. stdout / stderr **逐行串流**回渲染程序，`TestOutputModal` 即時顯示執行輸出
 4. 結束時回報離開碼與通過與否
 5. HTML 報告另由 `SHOW_REPORT` 開啟（會先清掉佔用 9323 埠的行程）
 
-執行設定見 `playwright.config.ts`：`testDir: './exports'`、`headless: false`、HTML reporter。
+**為什麼不用 `npx playwright test`**：Playwright 是從 cwd **往上層目錄**尋找設定檔的。工作區換成使用者專案中的任意資料夾之後，這個行為有兩種壞法 —— 他的 repo 可能自帶一份 `playwright.config.ts` 而**悄悄劫持**整個執行，或是根本沒有 `@playwright/test`，讓 npx 臨時從 npm 下載一個不確定的版本（離線則直接失敗）。因此改為：
+
+| 機制 | 作用 |
+|------|------|
+| `process.execPath` + `ELECTRON_RUN_AS_NODE=1` | 把 App 自己的執行檔當成純 Node 直譯器，**使用者機器不需要安裝 Node** |
+| `NODE_PATH` = App 的 `node_modules` | 只打包 CLI 並不夠：產生的 config 與每一份 spec 都有 `import ... from '@playwright/test'`，而 Node 是**從 import 它的檔案往上走**去解析的 —— 也就是使用者的工作區，那裡沒有 `node_modules`，會直接 `MODULE_NOT_FOUND` |
+| `--config <工作區>/playwright.config.ts` | 明確指定，杜絕上層目錄的設定檔劫持 |
+| `cwd` = 工作區 | 讓 spec 中的 `fixtures/…` 相對路徑解析得到 |
+| `PLAYWRIGHT_HTML_OUTPUT_DIR` | 強制報告輸出到 `.flowtest/playwright-report`，優先於設定檔，讓「查看報告」不必去解析使用者的設定內容 |
+
+解析不到內建執行器時**明確報錯**，不會偷偷退回 npx —— 靜默 fallback 只會讓版本問題更難查。
+
+**瀏覽器檢查**只判斷 `ms-playwright/` 底下有沒有任何 `chromium*` 目錄，**不比對 revision**（`executablePath()` 是綁版本的，只要本機裝的是別的版本就會誤報「未安裝」）。真正版本不合時，讓 Playwright 自己的錯誤訊息浮上來，才附上「安裝瀏覽器」按鈕。
+
+工作區中的 `playwright.config.ts` 由工具產生：`testDir: './exports'`、`outputDir: './.flowtest/test-results'`、`headless: false`、HTML reporter 輸出至 `.flowtest/playwright-report`。
 
 ---
 
-## 11. 資料儲存
+## 11. 工作區與資料儲存
 
-全部是純 JSON 檔案，開發模式放在專案目錄，打包後放在 Electron 的 `userData`：
+### 11.1 什麼是工作區
 
-| 路徑 | 內容 |
-|------|------|
-| `flows/{flowId}.json` | 流程（節點、座標、群組、配置、專案歸屬） |
-| `projects/{projectId}.json` | 專案（環境清單、專案環境變數） |
-| `fixtures/` | 上傳測試用的檔案副本（同名衝突加內容雜湊後綴） |
-| `exports/{flowId}.spec.ts` | 產生的 Playwright 測試 |
-| `exports/helpers/{flowId}-helpers.ts` | 抽取出的共用前綴函式 |
+**所有資料都放在一個由使用者指定的資料夾（工作區）底下。** 把它放進自己專案的 repo，測試流程的版本控制就完全交由你自己的 git 處理，不同專案之間也自然完全隔離。
+
+- **首次啟動必須先選資料夾**：未選定之前只顯示 Welcome 畫面，其餘 UI 完全不掛載。
+- **選過的路徑記在工作區「之外」**（Electron `userData/settings.json`）—— 它正是用來決定要開哪個工作區的，不能存在工作區裡。若記住的路徑已不存在，會自動從清單移除並退回 Welcome 畫面。
+- **可隨時切換工作區**（工具列 ⇄）。切換時會擋在錄製 / 重播中，並清空目前流程、專案、環境與復原歷史，再重新載入清單。
+
+### 11.2 工作區結構
+
+```
+你的專案 repo/
+├─ src/  ...你自己的原始碼...
+├─ .gitignore          ← 工具「絕不」改動這個檔案
+└─ e2e/                ← 你選定的工作區（放哪都可以，含 repo 根目錄）
+   ├─ flows/{flowId}.json          流程（節點、座標、群組、配置、專案歸屬）
+   ├─ projects/{id}.json           專案（環境清單、專案環境變數）
+   ├─ fixtures/                    上傳測試用的檔案副本
+   ├─ exports/                     產生的 .spec.ts 與 helpers（不進版控）
+   │  └─ .gitignore                 內容：*  +  !.gitignore
+   ├─ .flowtest/                   Playwright 的執行產出物（不進版控）
+   │  ├─ test-results/
+   │  ├─ playwright-report/
+   │  └─ .gitignore                 內容：*  +  !.gitignore
+   ├─ playwright.config.ts         工具產生，執行時以 --config 指定
+   └─ .flowtest.json               工作區標記檔
+```
+
+**進版控**：`flows/`、`projects/`、`fixtures/`、`playwright.config.ts`、`.flowtest.json`，以及兩個忽略檔本身
+**不進版控**：`exports/` 與 `.flowtest/` 的**內容**
+
+### 11.3 為什麼用分層 `.gitignore` 而不是改你的
+
+git 會套用**每個目錄各自的** `.gitignore`，規則相對於該檔案所在的目錄。因此工具只需在 `exports/` 與 `.flowtest/` 各放一個忽略檔，就完全不必碰使用者根目錄那份 —— 零衝突、零協調。
+
+兩個檔案的內容都是 `*` 加上 `!.gitignore`。**那行 `!.gitignore` 是必要的**：如果只寫 `*`，忽略檔會連自己也一起忽略掉，於是永遠不會被 commit，別人 clone 之後這條規則就消失了，git status 會被一堆產出物洗版。
+
+> Playwright 每次執行前會清空 `outputDir`，所以忽略檔必須放在 `test-results/` 的**上一層**（`.flowtest/`）才活得下來 —— 這也是所有產出物都集中到 `.flowtest/` 的原因。
+
+### 11.4 建立與修復（scaffold）
+
+`scaffold()` 在**每次開啟**工作區時執行（不只第一次），且**永不覆寫已存在的檔案**：
+
+- 選一個空資料夾 → 建立完整結構
+- 開啟既有工作區 → 只補齊缺少的部分。這對 `git clone` 特別重要：被 gitignore 的 `exports/`、`.flowtest/` 在新 clone 上根本不存在，需要重新補上
+- 選到磁碟根目錄或使用者家目錄時會**跳出警告二次確認**（不硬性阻擋）
+
+### 11.5 外部變更（git pull / 切分支）
+
+工作區在使用者自己的 repo 裡，所以可能在 App 開著時被改動。**視窗重新取得焦點時**會重新載入：重抓流程與專案清單，若目前開啟的流程 / 專案在磁碟上的 `updatedAt` 較新才覆蓋記憶體版本（並清空已失效的復原歷史）；檔案已被刪除則關閉該流程。錄製 / 重播進行中則跳過，不打斷作業。
+
+### 11.6 降低 git diff 噪音
+
+- 節點拖曳的存檔**不更新 `updatedAt`**，座標也**取整數** —— 移動版面不是內容變更，不該在每次 commit 製造假 diff。
+- 每個流程一個檔案，衝突範圍限縮在單一流程內。
+
+### 11.7 其他儲存行為
 
 - `FlowStorage.list()` 會掃描所有流程的 callFlow 節點以計算 `refCount`，並依 `updatedAt` 排序
 - `ProjectStorage.ensureDefault()` 會實體化保留的 `未分類` 專案（DEV 環境 + `domain`），讓它擁有穩定的環境 ID
@@ -383,9 +448,33 @@
 
 ## 12. 使用者介面總覽
 
+**未選定工作區時**只顯示 Welcome 畫面（版面參考 VSCode Get Started）：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  ⚠ 尚未安裝 Chromium 瀏覽器          [ 安裝瀏覽器 ]           │ ← 僅在完全沒裝時
+├──────────────────────────────────────────────────────────────┤
+│   FlowTest                          ┌──────────────────────┐ │
+│   錄製瀏覽器操作，產生 Playwright     │ 什麼是工作區？        │ │
+│                                     ├──────────────────────┤ │
+│   開始                              │ 工作區 vs 專案        │ │
+│   📂 開啟資料夾…                     ├──────────────────────┤ │
+│                                     │ 產出物不會進版控      │ │
+│   最近使用                           └──────────────────────┘ │
+│   my-shop-e2e   C:\proj\my-shop  ✕                          │
+│   old-stuff     E:\gone      找不到                          │
+│              把資料夾拖曳到這裡也可以開啟                       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+- 最近使用清單顯示資料夾名 + 完整路徑；已失效的項目仍會列出但變灰並標「找不到」，可用 ✕ 從清單移除
+- 支援**把資料夾直接拖曳進視窗**開啟
+
+**選定工作區後**進入主畫面：
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ 工具列：新增流程 │ ↶↷ │ ▶錄製 │ 🧹整理 │ 匯出 │ ▶執行 │ 狀態 │ 速度 │ 🌐環境 │ ⚙配置 │
+│ 工具列：📂工作區 ⇄ │ 新增流程 │ ↶↷ │ ▶錄製 │ 🧹整理 │ 匯出 │ ▶執行 │ 狀態 │ 速度 │ 🌐環境 │ ⚙配置 │
 ├────────────┬──────────────────────────────────────────┬──────────────────┤
 │            │                                          │  內建變數        │
 │  流程清單  │            React Flow 畫布               │  配置變數        │
@@ -401,7 +490,8 @@
 
 | 元件 | 用途 |
 |------|------|
-| `Toolbar` | 主要動作列、狀態徽章、環境與配置選擇器 |
+| `WelcomeScreen` | 未選定工作區時的整頁畫面：開啟資料夾、最近使用清單、說明卡片、拖放開啟、瀏覽器未安裝提示 |
+| `Toolbar` | 主要動作列、工作區名稱（📂 點擊開啟檔案總管）與切換（⇄）、狀態徽章、環境與配置選擇器 |
 | `FlowList` | 依專案分組的流程清單、右鍵選單、新增專案 / 改名對話框 |
 | `FlowCanvas` | React Flow 畫布，含節點衍生、拖曳、連接、多選、右鍵選單 |
 | `ActionNode` | 節點外觀：類型圖示與顏色、描述、selector、重播狀態邊框、頁面導覽邊框、配置徽章、缺檔警告 |
@@ -423,13 +513,16 @@
 ### 三個獨立打包的 bundle（由 electron-vite 建置）
 
 ```
-主行程 (Node.js)              Preload 橋接           渲染程序 (React)
-──────────────────            ──────────────         ────────────────
-ipcHandlers.ts                preload/index.ts       App.tsx
-  ├── BrowserController         contextBridge          Zustand store (flowStore)
-  ├── Recorder                  window.electronAPI     React Flow 畫布
-  ├── Replayer                                         Hooks
-  ├── CodegenCapture                                   Canvas utils
+主行程 (Node.js)                    Preload 橋接        渲染程序 (React)
+──────────────────                  ──────────────      ────────────────
+ipcHandlers.ts                      preload/index.ts    App.tsx
+  ├── BrowserController               contextBridge       ├── WelcomeScreen（未選工作區）
+  ├── Recorder                        electronAPI         └── Toolbar / FlowList / Canvas / 屬性面板
+  ├── Replayer                                          Zustand（flowStore、workspaceStore）
+  ├── CodegenCapture                                    Hooks（useWorkspace…）
+  ├── runner（內建 Playwright CLI）                       Canvas utils
+  ├── browserCheck
+  ├── workspace ◄── 以下所有路徑都經由它解析
   ├── FlowStorage
   ├── ProjectStorage
   ├── FixtureStorage
@@ -437,10 +530,12 @@ ipcHandlers.ts                preload/index.ts       App.tsx
 ```
 
 - **安全設定**：`contextIsolation: true`、`nodeIntegration: false`，所有能力透過 preload 的 `contextBridge` 明確暴露
+- **工作區為儲存層的唯一路徑來源**：`getWorkspaceRoot()` 是唯一真實來源，storage 中已無 `app.isPackaged` / `process.cwd()` 分支。主行程在**建立視窗之前**先 `await loadSettings()`，因為渲染程序一掛載就會詢問工作區
 - **IPC 為唯一接縫**：`ipcHandlers.ts` 是唯一協調主行程模組的檔案；所有通道常數集中在 `src/shared/types.ts` 的 `IPC_CHANNELS`
-  - 渲染 → 主：**22 個通道**（瀏覽器、錄製、重播、流程 CRUD、專案 CRUD、匯出、執行、報告、斷言拾取、Locator 拾取、檔案選擇）
-  - 主 → 渲染：**11 個通道**（動作捕獲 / 更新 / 移除、重播進度與結果、測試輸出與結束、拾取取消等）
+  - 渲染 → 主：**31 個通道**（瀏覽器、錄製、重播、流程 CRUD、專案 CRUD、**工作區開啟 / 切換 / 移除 / 開檔案總管**、**瀏覽器檢查 / 安裝**、**路徑正規化**、匯出、執行、報告、斷言拾取、Locator 拾取、檔案選擇）
+  - 主 → 渲染：**12 個通道**（動作捕獲 / 更新 / 移除、重播進度與結果、測試輸出與結束、拾取取消、**工作區重新載入**）
 - **路徑別名**：`@shared/*` → `src/shared/*`，`@renderer/*` → `src/renderer/*`
+- **打包**：`@playwright/test` / `playwright` / `playwright-core` 皆為正式相依並經 `asarUnpack`（子行程無法從 asar 壓縮檔內執行）。安裝設定集中在 `package.json#build` —— electron-builder 只要看到 `package.json` 裡有 `build` 就不會再讀 `electron-builder.yml`，因此後者已移除以免成為誤導性的死設定
 
 ### 指令
 
@@ -449,6 +544,8 @@ npm run dev       # 熱重載開發（electron-vite dev）
 npm run build     # 建置三個 bundle
 npm run preview   # 預覽正式建置
 npm run dist      # 建置 + 產生安裝檔（electron-builder）
+
+npx tsc --noEmit  # 型別檢查（涵蓋三個 bundle，是目前最接近測試的驗證關卡）
 ```
 
 ---
@@ -464,9 +561,10 @@ npm run dist      # 建置 + 產生安裝檔（electron-builder）
 | **子流程** | 引用既有流程 · 從選取抽取 · 循環引用檢查 · 出口節點選擇 · N 層巢狀 · 配置對應 · 引用計數分類 |
 | **變數** | 5 個內建變數 · 區域變數（captureAs） · 配置變數 · 專案環境變數 · 四層優先序 · locator 內變數改寫 · `useTestStep` 變數提升 |
 | **環境管理** | 多組 Profile（key 跨配置同步） · 專案 / 環境 / 環境變數的完整 CRUD + 複製 · 保留的 `domain` 變數驅動網域切換 · 每環境值覆寫 |
-| **匯出執行** | 路徑展開為多個 test · `test.step` 包裝 · 共用前綴抽 helper · 子流程內嵌展開 · 環境專屬烘焙 · 一鍵執行 + 即時輸出 · HTML 報告 |
-| **儲存** | 純 JSON · 錄製即時自動存檔 · fixtures 相對路徑（可攜） · 開發 / 打包雙路徑 |
+| **匯出執行** | 路徑展開為多個 test · `test.step` 包裝 · 共用前綴抽 helper · 子流程內嵌展開 · 環境專屬烘焙 · 一鍵執行 + 即時輸出 · HTML 報告 · **內建執行器（不需使用者安裝 Node）** · **`--config` 防設定劫持** · **只檢查存在性的瀏覽器偵測 + 一鍵安裝** |
+| **工作區與版控** | 使用者指定資料夾 · 首次啟動強制選取（Welcome 畫面 / 最近使用 / 拖放開啟） · 隨時切換 · **不動使用者的 `.gitignore`（改用分層忽略檔）** · 每次開啟自動補齊結構（相容 git clone） · **視窗 focus 時偵測外部變更** · 拖曳不產生假 diff |
+| **儲存** | 純 JSON · 錄製即時自動存檔 · fixtures 相對於工作區（隨 repo 移動） · 絕對路徑自動正規化 · 每流程一檔（衝突範圍最小） |
 
 ---
 
-*本文件由分析 `src/` 原始碼產生，反映 `develop` 分支於 2026-07-26 的實際實作狀態。*
+*本文件由分析 `src/` 原始碼產生，反映 `develop` 分支於 2026-08-02 的實際實作狀態。*

@@ -28,7 +28,19 @@ const IPC_CHANNELS = {
   LOCATOR_PICK_RESOLVED: "locator:pickResolved",
   // Renderer → Main (native file picker — returns paths imported into fixtures/)
   PICK_FILES: "files:pick",
+  // Rewrite hand-typed paths into workspace-relative ones before they are stored
+  NORMALIZE_PATHS: "files:normalize",
+  // Workspace (the user-chosen folder everything is read from / written to)
+  WORKSPACE_GET: "workspace:get",
+  WORKSPACE_PICK: "workspace:pick",
+  WORKSPACE_SET: "workspace:set",
+  WORKSPACE_FORGET: "workspace:forget",
+  WORKSPACE_REVEAL: "workspace:reveal",
+  // Renderer → Main (download the Playwright browsers)
+  BROWSER_INSTALL: "browser:install",
+  BROWSER_CHECK: "browser:check",
   // Main → Renderer
+  WORKSPACE_RELOAD: "workspace:reload",
   LOCATOR_PICK_NEEDED: "locator:pickNeeded",
   ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
@@ -52,7 +64,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   replayToNode: (nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId) => electron.ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId }),
   stopReplay: () => electron.ipcRenderer.invoke(IPC_CHANNELS.REPLAY_STOP),
   // Storage
-  saveFlow: (flow) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_SAVE, { flow }),
+  saveFlow: (flow, touch) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_SAVE, { flow, touch }),
   loadFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_LOAD, { flowId }),
   listFlows: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_LIST),
   deleteFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_DELETE, flowId),
@@ -67,9 +79,19 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
   resolveLocatorPick: () => electron.ipcRenderer.invoke(IPC_CHANNELS.LOCATOR_PICK_RESOLVED),
   // Native file picker — copies the picks into fixtures/ and returns their stored paths
   pickFiles: (multiple) => electron.ipcRenderer.invoke(IPC_CHANNELS.PICK_FILES, { multiple }),
+  normalizePaths: (paths) => electron.ipcRenderer.invoke(IPC_CHANNELS.NORMALIZE_PATHS, paths),
   // Sub-flow support
   getFlow: (flowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
   checkFlowCycle: (currentFlowId, candidateSubFlowId) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOW_CHECK_CYCLE, { currentFlowId, candidateSubFlowId }),
+  // Workspace — the user-chosen folder everything is read from / written to
+  getWorkspace: () => electron.ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_GET),
+  pickWorkspace: () => electron.ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_PICK),
+  setWorkspace: (dir) => electron.ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_SET, dir),
+  forgetWorkspace: (dir) => electron.ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_FORGET, dir),
+  revealWorkspace: () => electron.ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_REVEAL),
+  // Browsers
+  checkBrowser: () => electron.ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CHECK),
+  installBrowser: () => electron.ipcRenderer.invoke(IPC_CHANNELS.BROWSER_INSTALL),
   // Projects
   saveProject: (project) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, { project }),
   loadProject: (projectId) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_LOAD, { projectId }),
@@ -130,5 +152,10 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     const handler = (_, payload) => cb(payload);
     electron.ipcRenderer.on(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler);
     return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler);
+  },
+  onWorkspaceReload: (cb) => {
+    const handler = () => cb();
+    electron.ipcRenderer.on(IPC_CHANNELS.WORKSPACE_RELOAD, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.WORKSPACE_RELOAD, handler);
   }
 });

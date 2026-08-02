@@ -56,6 +56,17 @@ export function PropertyPanel() {
         callFlowUpdates = { subFlowProfileMapping: profileMapping }
       }
     }
+    // Upload paths are made workspace-relative before storing, so a flow shared
+    // through git isn't pinned to the machine it was authored on.
+    let uploadUpdates: object = {}
+    let effectiveValue = value
+    if (node.action.type === 'upload') {
+      const typed = value.split(',').map((s) => s.trim()).filter(Boolean)
+      const filePaths = await window.electronAPI.normalizePaths(typed)
+      effectiveValue = filePaths.join(', ')
+      uploadUpdates = { filePaths }
+    }
+
     updateNode(node.id, {
       action: {
         ...node.action,
@@ -64,19 +75,18 @@ export function PropertyPanel() {
         // Written verbatim so a cleared field actually clears. Only include locatorExpr for
         // nodes that already have one, so nodes without a locator don't gain an empty string.
         ...(node.action.locatorExpr !== undefined ? { locatorExpr } : {}),
-        value,
+        value: effectiveValue,
         // Multi-select nodes keep values[] in sync with the comma-joined value field
         ...(node.action.values
           ? { values: value.split(',').map((s) => s.trim()).filter(Boolean) }
           : {}),
         // Upload nodes do the same for filePaths[], which replay/export read first
-        ...(node.action.type === 'upload'
-          ? { filePaths: value.split(',').map((s) => s.trim()).filter(Boolean) }
-          : {}),
+        ...uploadUpdates,
         ...(node.action.type === 'code' ? { code } : {}),
         ...callFlowUpdates,
       },
     })
+    if (effectiveValue !== value) setValue(effectiveValue)
     const updated = useFlowStore.getState().currentFlow
     if (updated) await window.electronAPI.saveFlow(updated)
   }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector, locatorExpr, value, code, profileMapping])
@@ -211,7 +221,7 @@ export function PropertyPanel() {
                 </div>
                 <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
                   {selectedNode.action.type === 'upload'
-                    ? '路徑相對於資料根目錄（fixtures/…），也可填絕對路徑；多檔用逗號分隔'
+                    ? '路徑相對於工作區（fixtures/…）；絕對路徑會在儲存時自動轉換，多檔用逗號分隔'
                     : <>可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code></>}
                 </div>
               </Field>

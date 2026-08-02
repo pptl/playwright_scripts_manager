@@ -2,11 +2,12 @@
 const electron = require("electron");
 const path = require("path");
 const child_process = require("child_process");
+const fs = require("fs");
 const playwrightCore = require("playwright-core");
 const uuid = require("uuid");
-const fs = require("fs");
 const vm = require("vm");
 const module$1 = require("module");
+const os = require("os");
 const crypto = require("crypto");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
@@ -63,7 +64,19 @@ const IPC_CHANNELS = {
   LOCATOR_PICK_RESOLVED: "locator:pickResolved",
   // Renderer → Main (native file picker — returns paths imported into fixtures/)
   PICK_FILES: "files:pick",
+  // Rewrite hand-typed paths into workspace-relative ones before they are stored
+  NORMALIZE_PATHS: "files:normalize",
+  // Workspace (the user-chosen folder everything is read from / written to)
+  WORKSPACE_GET: "workspace:get",
+  WORKSPACE_PICK: "workspace:pick",
+  WORKSPACE_SET: "workspace:set",
+  WORKSPACE_FORGET: "workspace:forget",
+  WORKSPACE_REVEAL: "workspace:reveal",
+  // Renderer → Main (download the Playwright browsers)
+  BROWSER_INSTALL: "browser:install",
+  BROWSER_CHECK: "browser:check",
   // Main → Renderer
+  WORKSPACE_RELOAD: "workspace:reload",
   LOCATOR_PICK_NEEDED: "locator:pickNeeded",
   ASSERTION_PICK_CANCELLED: "assertion:pickCancelled",
   ACTION_CAPTURED: "action:captured",
@@ -141,10 +154,10 @@ function generateDescription(kind, label, value, selectedText, clickOpts) {
   }
 }
 function extractSource3() {
-  const _req = module$1.createRequire(require("url").pathToFileURL(__filename).href);
+  const _req2 = module$1.createRequire(require("url").pathToFileURL(__filename).href);
   let coreBundlePath;
   try {
-    coreBundlePath = _req.resolve("playwright-core/lib/coreBundle.js");
+    coreBundlePath = _req2.resolve("playwright-core/lib/coreBundle.js");
   } catch {
     coreBundlePath = path__namespace.join(process.cwd(), "node_modules", "playwright-core", "lib", "coreBundle.js");
   }
@@ -1099,8 +1112,8 @@ class CodegenCapture {
    *  iframe[name=…]/iframe[src=…] when the frame element can't be resolved. */
   async frameLocatorChain(frame, page) {
     if (frame === page.mainFrame()) return [];
-    const cached = this.frameChainCache.get(frame);
-    if (cached) return cached;
+    const cached2 = this.frameChainCache.get(frame);
+    if (cached2) return cached2;
     const chain = [];
     let cur = frame;
     while (cur && cur !== page.mainFrame()) {
@@ -1437,9 +1450,127 @@ function _ftTimestamp() {
   return \`\${d.getFullYear()}\${p(d.getMonth() + 1)}\${p(d.getDate())}\${p(d.getHours())}\${p(d.getMinutes())}\${p(d.getSeconds())}\${p(d.getMilliseconds(), 3)}\`;
 }
 `;
+const RECENT_LIMIT = 8;
+const MARKER = ".flowtest.json";
+const ARTIFACT_DIR = ".flowtest";
+let workspaceRoot = null;
+let recent = [];
+let settingsLoaded = false;
+function settingsPath() {
+  return path.join(electron.app.getPath("userData"), "settings.json");
+}
+function hasWorkspace() {
+  return workspaceRoot !== null;
+}
+function getWorkspaceRoot() {
+  if (workspaceRoot === null) {
+    throw new Error("[FlowTest] No workspace is open — 請先開啟資料夾");
+  }
+  return workspaceRoot;
+}
+function dataRoot() {
+  return getWorkspaceRoot();
+}
+function getRecentWorkspaces() {
+  return [...recent];
+}
+function configPath(root = getWorkspaceRoot()) {
+  return path.join(root, "playwright.config.ts");
+}
+async function loadSettings() {
+  if (settingsLoaded) return;
+  settingsLoaded = true;
+  try {
+    const raw = await fs.promises.readFile(settingsPath(), "utf-8");
+    const data = JSON.parse(raw);
+    recent = Array.isArray(data.recentWorkspaces) ? data.recentWorkspaces : [];
+    if (data.workspaceRoot && await isDirectory(data.workspaceRoot)) {
+      try {
+        await scaffold(data.workspaceRoot);
+        workspaceRoot = data.workspaceRoot;
+      } catch {
+      }
+    } else if (data.workspaceRoot) {
+      recent = recent.filter((p) => p !== data.workspaceRoot);
+      await persist();
+    }
+  } catch {
+  }
+}
+async function persist() {
+  const payload = { workspaceRoot, recentWorkspaces: recent };
+  await fs.promises.mkdir(electron.app.getPath("userData"), { recursive: true });
+  await fs.promises.writeFile(settingsPath(), JSON.stringify(payload, null, 2), "utf-8");
+}
+async function removeRecentWorkspace(dir) {
+  recent = recent.filter((p) => p !== dir);
+  await persist();
+}
+async function isDirectory(p) {
+  try {
+    return (await fs.promises.stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+function warnAbout(dir) {
+  const abs = path.resolve(dir);
+  if (abs === path.parse(abs).root) return "這是磁碟根目錄，工作區檔案會散落在整個磁碟中。";
+  if (abs === path.resolve(os.homedir())) return "這是你的使用者家目錄，建議改選一個專屬的子資料夾。";
+  return null;
+}
+async function setWorkspaceRoot(dir) {
+  const abs = path.resolve(dir);
+  if (!await isDirectory(abs)) throw new Error(`資料夾不存在：${abs}`);
+  try {
+    await scaffold(abs);
+  } catch (err) {
+    throw new Error(`無法寫入資料夾：${abs}
+${String(err)}`);
+  }
+  workspaceRoot = abs;
+  recent = [abs, ...recent.filter((p) => p !== abs)].slice(0, RECENT_LIMIT);
+  await persist();
+  return abs;
+}
+async function writeIfMissing(path2, content) {
+  try {
+    await fs.promises.access(path2);
+  } catch {
+    await fs.promises.writeFile(path2, content, "utf-8");
+  }
+}
+async function scaffold(root) {
+  for (const dir of ["flows", "projects", "fixtures", "exports", ARTIFACT_DIR]) {
+    await fs.promises.mkdir(path.join(root, dir), { recursive: true });
+  }
+  await writeIfMissing(path.join(root, "exports", ".gitignore"), "*\n!.gitignore\n");
+  await writeIfMissing(path.join(root, ARTIFACT_DIR, ".gitignore"), "*\n!.gitignore\n");
+  await writeIfMissing(configPath(root), PLAYWRIGHT_CONFIG);
+  await writeIfMissing(path.join(root, MARKER), JSON.stringify({ version: 1 }, null, 2) + "\n");
+}
+const PLAYWRIGHT_CONFIG = `import { defineConfig } from '@playwright/test';
+
+// Generated by FlowTest. Runs are always pointed here explicitly with --config,
+// so this file is never shadowed by a playwright.config.ts further up the tree.
+export default defineConfig({
+  testDir: './exports',
+  outputDir: './.flowtest/test-results',
+  timeout: 30000,
+  reporter: [['html', { outputFolder: './.flowtest/playwright-report', open: 'never' }]],
+  use: {
+    headless: false,
+    viewport: null,
+    launchOptions: {
+      args: ['--start-maximized'],
+    },
+    screenshot: 'only-on-failure',
+    video: 'retain-on-failure',
+  },
+});
+`;
 function flowsDir() {
-  const base = electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "flows") : path.join(process.cwd(), "flows");
-  return base;
+  return path.join(getWorkspaceRoot(), "flows");
 }
 class FlowStorage {
   static async ensureDir() {
@@ -1448,9 +1579,15 @@ class FlowStorage {
   static filePath(flowId) {
     return path.join(flowsDir(), `${flowId}.json`);
   }
-  static async save(flow) {
+  /**
+   * `touch: false` writes without bumping updatedAt. Used by the debounced save
+   * behind node dragging: repositioning is not a content change, and stamping a
+   * new timestamp on every drag makes the flow's JSON conflict in git for what
+   * is really just a cosmetic move.
+   */
+  static async save(flow, opts) {
     await FlowStorage.ensureDir();
-    flow.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    if (opts?.touch !== false) flow.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     await fs.promises.writeFile(FlowStorage.filePath(flow.id), JSON.stringify(flow, null, 2), "utf-8");
   }
   static async load(flowId) {
@@ -1496,9 +1633,6 @@ class FlowStorage {
     }
   }
 }
-function dataRoot() {
-  return electron.app.isPackaged ? electron.app.getPath("userData") : process.cwd();
-}
 function fixturesDir() {
   return path.join(dataRoot(), "fixtures");
 }
@@ -1540,6 +1674,31 @@ class FixtureStorage {
    */
   static toAbsolute(stored) {
     return path.isAbsolute(stored) ? stored : path.resolve(dataRoot(), stored);
+  }
+  /**
+   * Make a user-supplied path portable before it is stored on an Action.
+   *
+   * An absolute path pins the flow to one machine, which defeats sharing the
+   * workspace through git. Anything already inside the workspace just loses its
+   * prefix — that also means a flow can reference the surrounding repo's own
+   * test data (testdata/foo.png) without a redundant copy under fixtures/.
+   * Anything outside is copied in, since nothing else would travel with the repo.
+   *
+   * Bare filenames (drag & drop uploads, which never expose a path) are left
+   * alone for the UI to flag.
+   */
+  static async normalizeStoredPath(input) {
+    const value = input.trim();
+    if (!value || !path.isAbsolute(value)) return value;
+    const rel = path.relative(dataRoot(), value);
+    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+      return rel.split(path.sep).join("/");
+    }
+    try {
+      return (await FixtureStorage.importFile(value)).stored;
+    } catch {
+      return value;
+    }
   }
 }
 const AsyncFunction = Object.getPrototypeOf(async () => {
@@ -1896,7 +2055,7 @@ class Replayer {
   }
 }
 function projectsDir() {
-  return electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "projects") : path.join(process.cwd(), "projects");
+  return path.join(getWorkspaceRoot(), "projects");
 }
 class ProjectStorage {
   static async ensureDir() {
@@ -1968,7 +2127,7 @@ class ProjectStorage {
   }
 }
 function exportsDir() {
-  return electron.app.isPackaged ? path.join(electron.app.getPath("userData"), "exports") : path.join(process.cwd(), "exports");
+  return path.join(getWorkspaceRoot(), "exports");
 }
 function gateEnvVars(flow, envVars, activeProjectId) {
   return activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId ? envVars ?? {} : {};
@@ -2383,6 +2542,82 @@ ${body}
     return { helperCode, helperImport };
   }
 }
+function browsersRoot() {
+  const override = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (override) return override === "0" ? null : override;
+  switch (process.platform) {
+    case "win32":
+      return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "ms-playwright");
+    case "darwin":
+      return path.join(os.homedir(), "Library", "Caches", "ms-playwright");
+    default:
+      return path.join(os.homedir(), ".cache", "ms-playwright");
+  }
+}
+async function hasChromium() {
+  const root = browsersRoot();
+  if (root === null) return true;
+  try {
+    const entries = await fs.promises.readdir(root);
+    return entries.some((e) => e.startsWith("chromium"));
+  } catch {
+    return false;
+  }
+}
+function isMissingBrowserError(text) {
+  return text.includes("Executable doesn't exist") || text.includes("playwright install") || text.includes("browserType.launch: Executable");
+}
+const _req = module$1.createRequire(require("url").pathToFileURL(__filename).href);
+function unpacked(p) {
+  return p.replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
+}
+let cached;
+function resolvePlaywrightCli() {
+  if (cached !== void 0) return cached;
+  try {
+    const path$1 = unpacked(_req.resolve("@playwright/test/cli"));
+    const version = _req("@playwright/test/package.json").version;
+    cached = { path: path$1, version, nodePath: path.resolve(path$1, "..", "..", "..") };
+  } catch {
+    cached = null;
+  }
+  return cached;
+}
+const HTML_REPORT_DIR = ".flowtest/playwright-report";
+function runPlaywright(cli, args, cwd, onOutput) {
+  return new Promise((resolve2) => {
+    const child = child_process.spawn(process.execPath, [cli.path, ...args], {
+      cwd,
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        NODE_PATH: process.env.NODE_PATH ? `${cli.nodePath}${path.delimiter}${process.env.NODE_PATH}` : cli.nodePath,
+        PLAYWRIGHT_HTML_OUTPUT_DIR: HTML_REPORT_DIR,
+        // The run must never block on a browser popping open by itself; the user
+        // opens the report deliberately via SHOW_REPORT.
+        PLAYWRIGHT_HTML_OPEN: "never"
+      }
+    });
+    let output = "";
+    const pipe = (d) => {
+      const text = d.toString();
+      output += text;
+      onOutput(text);
+    };
+    child.stdout.on("data", pipe);
+    child.stderr.on("data", pipe);
+    child.on("error", (err) => {
+      const text = `
+✗ 無法啟動測試執行器: ${String(err)}
+`;
+      output += text;
+      onOutput(text);
+      resolve2({ exitCode: 1, output });
+    });
+    child.on("close", (code) => resolve2({ exitCode: code ?? 1, output }));
+  });
+}
+const MISSING_CLI_MESSAGE = "✗ 找不到內建的測試執行器 (@playwright/test)。\n  這是打包問題，不是設定問題 — 請確認建置時有包含並解壓 node_modules/@playwright/test。\n";
 let browserController = null;
 let recorder = null;
 let replayer = null;
@@ -2396,6 +2631,10 @@ function registerIpcHandlers(win) {
     if (result.canceled || !result.filePaths.length) return [];
     return await importFiles(result.filePaths);
   });
+  electron.ipcMain.handle(
+    IPC_CHANNELS.NORMALIZE_PATHS,
+    async (_e, paths) => await Promise.all(paths.map((p) => FixtureStorage.normalizeStoredPath(p)))
+  );
   electron.ipcMain.handle(IPC_CHANNELS.BROWSER_LAUNCH, async () => {
     browserController = new BrowserController();
     await browserController.launch();
@@ -2486,7 +2725,7 @@ function registerIpcHandlers(win) {
     replayer = null;
   });
   electron.ipcMain.handle(IPC_CHANNELS.FLOW_SAVE, async (_e, payload) => {
-    await FlowStorage.save(payload.flow);
+    await FlowStorage.save(payload.flow, { touch: payload.touch });
   });
   electron.ipcMain.handle(IPC_CHANNELS.FLOW_LOAD, async (_e, payload) => {
     return await FlowStorage.load(payload.flowId);
@@ -2521,46 +2760,119 @@ function registerIpcHandlers(win) {
   electron.ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload) => {
     return await ScriptExporter.export(payload.flow, payload.config);
   });
+  const out = (text) => win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, text);
   electron.ipcMain.handle(IPC_CHANNELS.RUN_TESTS, async (_e, payload) => {
-    const cwd = electron.app.isPackaged ? path.join(electron.app.getPath("userData")) : process.cwd();
+    const finish = (exitCode2) => {
+      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode: exitCode2, passed: exitCode2 === 0 });
+    };
+    const cli = resolvePlaywrightCli();
+    if (!cli) {
+      out(MISSING_CLI_MESSAGE);
+      return finish(1);
+    }
     let specPath;
     try {
       specPath = await ScriptExporter.export(payload.flow, payload.config);
-      win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `✓ 腳本已匯出: ${specPath}
-
+      out(`✓ 腳本已匯出: ${specPath}
 `);
     } catch (err) {
-      win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `✗ 匯出失敗: ${String(err)}
+      out(`✗ 匯出失敗: ${String(err)}
 `);
-      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode: 1, passed: false });
-      return;
+      return finish(1);
     }
     const specFilename = path.basename(specPath);
-    win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, `▶ npx playwright test ${specFilename}
+    const cwd = getWorkspaceRoot();
+    const args = ["test", specFilename, "--config", configPath(), "--reporter=list,html"];
+    out(`✓ 執行器: ${cli.path} (v${cli.version})
+`);
+    out(`▶ playwright ${args.join(" ")}
 
 `);
-    const exitCode = await new Promise((resolve) => {
-      const child = child_process.spawn("npx", ["playwright", "test", specFilename, "--reporter=list,html"], {
-        cwd,
-        shell: true
-      });
-      child.stdout.on(
-        "data",
-        (d) => win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, d.toString())
-      );
-      child.stderr.on(
-        "data",
-        (d) => win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, d.toString())
-      );
-      child.on("close", (code) => resolve(code ?? 1));
-    });
-    win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 });
+    const { exitCode, output } = await runPlaywright(cli, args, cwd, out);
+    if (exitCode !== 0 && isMissingBrowserError(output)) {
+      out("\n⚠ 缺少 Chromium 瀏覽器 — 請點擊「安裝瀏覽器」後重試。\n");
+    }
+    finish(exitCode);
   });
   electron.ipcMain.handle(IPC_CHANNELS.SHOW_REPORT, async () => {
-    const cwd = electron.app.isPackaged ? path.join(electron.app.getPath("userData")) : process.cwd();
+    const cli = resolvePlaywrightCli();
+    if (!cli) return out(MISSING_CLI_MESSAGE);
     await killProcessOnPort(9323);
-    child_process.spawn("npx", ["playwright", "show-report"], { cwd, shell: true, detached: true });
+    child_process.spawn(process.execPath, [cli.path, "show-report", HTML_REPORT_DIR], {
+      cwd: getWorkspaceRoot(),
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", NODE_PATH: cli.nodePath },
+      detached: true,
+      stdio: "ignore"
+    }).unref();
   });
+  electron.ipcMain.handle(IPC_CHANNELS.BROWSER_CHECK, async () => await hasChromium());
+  electron.ipcMain.handle(IPC_CHANNELS.BROWSER_INSTALL, async () => {
+    const cli = resolvePlaywrightCli();
+    if (!cli) {
+      out(MISSING_CLI_MESSAGE);
+      return false;
+    }
+    out("▶ 正在下載 Chromium…\n\n");
+    const { exitCode } = await runPlaywright(cli, ["install", "chromium"], getWorkspaceRoot(), out);
+    out(exitCode === 0 ? "\n✓ 瀏覽器安裝完成\n" : `
+✗ 安裝失敗 (exit ${exitCode})
+`);
+    win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 });
+    return exitCode === 0;
+  });
+  const workspaceInfo = async () => ({
+    root: hasWorkspace() ? getWorkspaceRoot() : null,
+    recent: await Promise.all(
+      getRecentWorkspaces().map(async (p) => ({
+        path: p,
+        name: path.basename(p) || p,
+        exists: await pathExists(p)
+      }))
+    ),
+    hasChromium: await hasChromium()
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.WORKSPACE_GET, workspaceInfo);
+  electron.ipcMain.handle(IPC_CHANNELS.WORKSPACE_PICK, async () => {
+    const result = await electron.dialog.showOpenDialog(win, {
+      title: "選擇工作區資料夾",
+      properties: ["openDirectory", "createDirectory"]
+    });
+    if (result.canceled || !result.filePaths.length) return null;
+    const dir = result.filePaths[0];
+    const warning = warnAbout(dir);
+    if (warning) {
+      const { response } = await electron.dialog.showMessageBox(win, {
+        type: "warning",
+        buttons: ["取消", "仍要使用"],
+        defaultId: 0,
+        cancelId: 0,
+        message: warning,
+        detail: dir
+      });
+      if (response === 0) return null;
+    }
+    await setWorkspaceRoot(dir);
+    return await workspaceInfo();
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.WORKSPACE_SET, async (_e, dir) => {
+    await setWorkspaceRoot(dir);
+    return await workspaceInfo();
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.WORKSPACE_FORGET, async (_e, dir) => {
+    await removeRecentWorkspace(dir);
+    return await workspaceInfo();
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.WORKSPACE_REVEAL, async () => {
+    if (hasWorkspace()) await electron.shell.openPath(getWorkspaceRoot());
+  });
+}
+async function pathExists(p) {
+  try {
+    await fs.promises.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 async function hasCallFlowCycle(startFlowId, candidateSubFlowId, visited = /* @__PURE__ */ new Set()) {
   if (candidateSubFlowId === startFlowId) return true;
@@ -2651,6 +2963,9 @@ function createWindow() {
   } else {
     win.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
+  win.on("focus", () => {
+    if (hasWorkspace()) win.webContents.send(IPC_CHANNELS.WORKSPACE_RELOAD);
+  });
   win.on("ready-to-show", () => {
     win.show();
     win.setAlwaysOnTop(true);
@@ -2659,7 +2974,8 @@ function createWindow() {
   });
   return win;
 }
-electron.app.whenReady().then(() => {
+electron.app.whenReady().then(async () => {
+  await loadSettings();
   const win = createWindow();
   registerIpcHandlers(win);
   electron.app.on("activate", () => {

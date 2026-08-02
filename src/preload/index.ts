@@ -31,7 +31,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopReplay: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_STOP),
 
   // Storage
-  saveFlow: (flow: Flow) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_SAVE, { flow }),
+  saveFlow: (flow: Flow, touch?: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.FLOW_SAVE, { flow, touch }),
   loadFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_LOAD, { flowId }),
   listFlows: () => ipcRenderer.invoke(IPC_CHANNELS.FLOW_LIST),
   deleteFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_DELETE, flowId),
@@ -54,11 +55,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Native file picker — copies the picks into fixtures/ and returns their stored paths
   pickFiles: (multiple?: boolean) => ipcRenderer.invoke(IPC_CHANNELS.PICK_FILES, { multiple }),
+  normalizePaths: (paths: string[]) => ipcRenderer.invoke(IPC_CHANNELS.NORMALIZE_PATHS, paths),
 
   // Sub-flow support
   getFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_GET, { flowId }),
   checkFlowCycle: (currentFlowId: string, candidateSubFlowId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.FLOW_CHECK_CYCLE, { currentFlowId, candidateSubFlowId }),
+
+  // Workspace — the user-chosen folder everything is read from / written to
+  getWorkspace: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_GET),
+  pickWorkspace: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_PICK),
+  setWorkspace: (dir: string) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_SET, dir),
+  forgetWorkspace: (dir: string) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_FORGET, dir),
+  revealWorkspace: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_REVEAL),
+
+  // Browsers
+  checkBrowser: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CHECK),
+  installBrowser: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_INSTALL),
 
   // Projects
   saveProject: (project: Project) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, { project }),
@@ -122,5 +135,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_: Electron.IpcRendererEvent, payload: LocatorPickPayload) => cb(payload)
     ipcRenderer.on(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler)
+  },
+  onWorkspaceReload: (cb: () => void) => {
+    const handler = () => cb()
+    ipcRenderer.on(IPC_CHANNELS.WORKSPACE_RELOAD, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.WORKSPACE_RELOAD, handler)
   },
 })

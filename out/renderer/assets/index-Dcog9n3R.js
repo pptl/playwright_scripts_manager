@@ -8447,6 +8447,113 @@ function useFlowManager() {
   }, [setCurrentFlow, refreshFlowList]);
   return { refreshFlowList, refreshProjectList, openFlow, newFlow, deleteCurrentFlow };
 }
+const useWorkspaceStore = create$1((set2) => ({
+  info: null,
+  loading: true,
+  installing: false,
+  load: async () => {
+    const info = await window.electronAPI.getWorkspace();
+    set2({ info, loading: false });
+  },
+  setInfo: (info) => set2({ info, loading: false }),
+  forget: async (dir) => {
+    set2({ info: await window.electronAPI.forgetWorkspace(dir) });
+  },
+  installBrowser: async () => {
+    set2({ installing: true });
+    try {
+      await window.electronAPI.installBrowser();
+      set2({ info: await window.electronAPI.getWorkspace() });
+    } finally {
+      set2({ installing: false });
+    }
+  }
+}));
+let nextId = 1;
+const useConfirmStore = create$1((set2, get2) => ({
+  queue: [],
+  ask: (req) => new Promise((resolve) => {
+    set2((s) => ({ queue: [...s.queue, { ...req, id: nextId++, resolve }] }));
+  }),
+  answer: (actionId) => {
+    const [front, ...rest] = get2().queue;
+    if (!front) return;
+    set2({ queue: rest });
+    front.resolve(actionId);
+  }
+}));
+const CONFIRM_CANCEL = "cancel";
+const CONFIRM_OK = "ok";
+async function confirm(opts) {
+  const answer = await useConfirmStore.getState().ask({
+    title: opts.title,
+    message: opts.message,
+    detail: opts.detail,
+    actions: [
+      { id: CONFIRM_CANCEL, label: opts.cancelLabel ?? "取消", tone: "ghost" },
+      { id: CONFIRM_OK, label: opts.confirmLabel ?? "確認", tone: opts.danger ? "danger" : "primary" }
+    ],
+    defaultActionId: opts.danger ? CONFIRM_CANCEL : CONFIRM_OK
+  });
+  return answer === CONFIRM_OK;
+}
+function notify(title, message) {
+  return useConfirmStore.getState().ask({
+    title,
+    message,
+    actions: [{ id: "ok", label: "知道了", tone: "primary" }],
+    defaultActionId: "ok"
+  });
+}
+function useWorkspace() {
+  const { info, loading, installing, setInfo, forget, installBrowser } = useWorkspaceStore();
+  const { refreshFlowList, refreshProjectList } = useFlowManager();
+  const resetForNewWorkspace = reactExports.useCallback(async () => {
+    useFlowStore.getState().setCurrentFlow(null);
+    useFlowStore.getState().setFlows([]);
+    useFlowStore.getState().setProjects([]);
+    await refreshFlowList();
+    await refreshProjectList();
+  }, [refreshFlowList, refreshProjectList]);
+  const busy = reactExports.useCallback(async () => {
+    const { isRecording, isReplaying } = useFlowStore.getState();
+    if (!isRecording && !isReplaying) return false;
+    await notify("無法切換工作區", isRecording ? "請先停止錄製。" : "請先停止重播。");
+    return true;
+  }, []);
+  const pick = reactExports.useCallback(async () => {
+    if (await busy()) return;
+    const next = await window.electronAPI.pickWorkspace();
+    if (!next) return;
+    setInfo(next);
+    await resetForNewWorkspace();
+  }, [busy, setInfo, resetForNewWorkspace]);
+  const switchTo = reactExports.useCallback(
+    async (dir) => {
+      if (await busy()) return;
+      try {
+        setInfo(await window.electronAPI.setWorkspace(dir));
+      } catch (err) {
+        await notify("無法開啟工作區", String(err instanceof Error ? err.message : err));
+        await forget(dir);
+        return;
+      }
+      await resetForNewWorkspace();
+    },
+    [busy, setInfo, forget, resetForNewWorkspace]
+  );
+  return {
+    info,
+    loading,
+    installing,
+    root: info?.root ?? null,
+    pick,
+    switchTo,
+    forget,
+    installBrowser,
+    reveal: () => window.electronAPI.revealWorkspace()
+  };
+}
 function TestOutputModal({ lines, finished, onClose }) {
   const bottomRef = reactExports.useRef(null);
   reactExports.useEffect(() => {
@@ -8572,34 +8679,6 @@ function TestOutputModal({ lines, finished, onClose }) {
       )
     }
   );
-}
-let nextId = 1;
-const useConfirmStore = create$1((set2, get2) => ({
-  queue: [],
-  ask: (req) => new Promise((resolve) => {
-    set2((s) => ({ queue: [...s.queue, { ...req, id: nextId++, resolve }] }));
-  }),
-  answer: (actionId) => {
-    const [front, ...rest] = get2().queue;
-    if (!front) return;
-    set2({ queue: rest });
-    front.resolve(actionId);
-  }
-}));
-const CONFIRM_CANCEL = "cancel";
-const CONFIRM_OK = "ok";
-async function confirm(opts) {
-  const answer = await useConfirmStore.getState().ask({
-    title: opts.title,
-    message: opts.message,
-    detail: opts.detail,
-    actions: [
-      { id: CONFIRM_CANCEL, label: opts.cancelLabel ?? "取消", tone: "ghost" },
-      { id: CONFIRM_OK, label: opts.confirmLabel ?? "確認", tone: opts.danger ? "danger" : "primary" }
-    ],
-    defaultActionId: opts.danger ? CONFIRM_CANCEL : CONFIRM_OK
-  });
-  return answer === CONFIRM_OK;
 }
 function toEditRows$1(vars, envId) {
   return vars.map((v2, i) => ({
@@ -9994,6 +10073,27 @@ const btn = (label, onClick, disabled = false, danger = false) => /* @__PURE__ *
     children: label
   }
 );
+const workspacePathStyle = {
+  maxWidth: 160,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  background: "#0f172a",
+  border: "1px solid #334155",
+  borderRadius: 4,
+  padding: "3px 8px",
+  color: "#94a3b8",
+  fontSize: 11,
+  cursor: "pointer"
+};
+const workspaceSwitchStyle = {
+  background: "#0f172a",
+  border: "1px solid #334155",
+  borderRadius: 4,
+  padding: "3px 6px",
+  color: "#94a3b8",
+  fontSize: 11
+};
 function Toolbar() {
   const {
     currentFlow,
@@ -10017,6 +10117,8 @@ function Toolbar() {
   } = useFlowStore();
   const { startRecording, stopRecording } = usePlaywright();
   const { newFlow } = useFlowManager();
+  const { root: workspaceRoot, pick: pickWorkspace, reveal } = useWorkspace();
+  const workspaceName = workspaceRoot?.split(/[\\/]/).filter(Boolean).pop() ?? workspaceRoot;
   const [showNewFlowDialog, setShowNewFlowDialog] = reactExports.useState(false);
   const [newName, setNewName] = reactExports.useState("");
   const [newProjectId, setNewProjectId] = reactExports.useState("");
@@ -10153,7 +10255,36 @@ ${path}`);
         flexShrink: 0
       },
       children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 16, color: "#60a5fa", marginRight: 8 }, children: "FlowTest" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: 16, color: "#60a5fa" }, children: "FlowTest" }),
+        workspaceRoot && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 2, marginRight: 4 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              onClick: reveal,
+              title: `${workspaceRoot}
+（點擊以在檔案總管中開啟）`,
+              style: workspacePathStyle,
+              children: [
+                "📂 ",
+                workspaceName
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: pickWorkspace,
+              title: "切換工作區",
+              disabled: isRecording || isReplaying,
+              style: {
+                ...workspaceSwitchStyle,
+                opacity: isRecording || isReplaying ? 0.4 : 1,
+                cursor: isRecording || isReplaying ? "not-allowed" : "pointer"
+              },
+              children: "⇄"
+            }
+          )
+        ] }),
         btn("新增流程", () => setShowNewFlowDialog(true)),
         btn("↶ 復原", undo, past.length === 0 || isRecording || isReplaying),
         btn("↷ 重做", redo, future.length === 0 || isRecording || isReplaying),
@@ -19289,7 +19420,7 @@ function FlowCanvasInner() {
       }
       const pending = pendingSaveRef.current;
       pendingSaveRef.current = null;
-      if (pending) window.electronAPI.saveFlow(pending).catch(console.error);
+      if (pending) window.electronAPI.saveFlow(pending, false).catch(console.error);
     };
   }, [currentFlow?.id]);
   reactExports.useEffect(() => {
@@ -19312,7 +19443,8 @@ function FlowCanvasInner() {
       onNodesChange(changes);
       for (const c of changes) {
         if (c.type === "position" && c.position) {
-          dragPosRef.current.set(c.id, c.position);
+          const { x: x2, y: y2 } = c.position;
+          dragPosRef.current.set(c.id, { x: Math.round(x2), y: Math.round(y2) });
         }
       }
       const dragStops = changes.filter(
@@ -19345,7 +19477,7 @@ function FlowCanvasInner() {
           saveTimerRef.current = null;
           const pending = pendingSaveRef.current;
           pendingSaveRef.current = null;
-          if (pending) window.electronAPI.saveFlow(pending).catch(console.error);
+          if (pending) window.electronAPI.saveFlow(pending, false).catch(console.error);
         }, 500);
       }
     },
@@ -20769,6 +20901,14 @@ function PropertyPanel() {
         callFlowUpdates = { subFlowProfileMapping: profileMapping };
       }
     }
+    let uploadUpdates = {};
+    let effectiveValue = value;
+    if (node.action.type === "upload") {
+      const typed = value.split(",").map((s) => s.trim()).filter(Boolean);
+      const filePaths = await window.electronAPI.normalizePaths(typed);
+      effectiveValue = filePaths.join(", ");
+      uploadUpdates = { filePaths };
+    }
     updateNode(node.id, {
       action: {
         ...node.action,
@@ -20777,15 +20917,16 @@ function PropertyPanel() {
         // Written verbatim so a cleared field actually clears. Only include locatorExpr for
         // nodes that already have one, so nodes without a locator don't gain an empty string.
         ...node.action.locatorExpr !== void 0 ? { locatorExpr } : {},
-        value,
+        value: effectiveValue,
         // Multi-select nodes keep values[] in sync with the comma-joined value field
         ...node.action.values ? { values: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
         // Upload nodes do the same for filePaths[], which replay/export read first
-        ...node.action.type === "upload" ? { filePaths: value.split(",").map((s) => s.trim()).filter(Boolean) } : {},
+        ...uploadUpdates,
         ...node.action.type === "code" ? { code } : {},
         ...callFlowUpdates
       }
     });
+    if (effectiveValue !== value) setValue(effectiveValue);
     const updated = useFlowStore.getState().currentFlow;
     if (updated) await window.electronAPI.saveFlow(updated);
   }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector2, locatorExpr, value, code, profileMapping]);
@@ -20888,7 +21029,7 @@ function PropertyPanel() {
             ),
             selectedNode.action.type === "upload" && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: pickFiles, style: pickBtnStyle, title: "選擇檔案（會複製到 fixtures/）", children: "📂 選擇檔案…" })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: selectedNode.action.type === "upload" ? "路徑相對於資料根目錄（fixtures/…），也可填絕對路徑；多檔用逗號分隔" : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 2 }, children: selectedNode.action.type === "upload" ? "路徑相對於工作區（fixtures/…）；絕對路徑會在儲存時自動轉換，多檔用逗號分隔" : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
             "可插入變數，如 ",
             /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { color: "#7dd3fc" }, children: "{{randomText}}" })
           ] }) })
@@ -21644,6 +21785,229 @@ function ConfirmHost() {
     }
   );
 }
+function WelcomeScreen() {
+  const { info, installing, pick, switchTo, forget, installBrowser } = useWorkspace();
+  const [dragging, setDragging] = reactExports.useState(false);
+  const recent = info?.recent ?? [];
+  const needsBrowser = info ? !info.hasChromium : false;
+  const onDrop = async (e) => {
+    e.preventDefault();
+    setDragging(false);
+    const path = e.dataTransfer.files[0]?.path;
+    if (path) await switchTo(path);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      onDragOver: (e) => {
+        e.preventDefault();
+        setDragging(true);
+      },
+      onDragLeave: () => setDragging(false),
+      onDrop,
+      style: {
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        background: "#0f172a",
+        color: "#e2e8f0",
+        outline: dragging ? "2px dashed #38bdf8" : "none",
+        outlineOffset: -8
+      },
+      children: [
+        needsBrowser && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: bannerStyle, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "⚠ 尚未安裝 Chromium 瀏覽器，錄製與執行測試都會失敗。" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: installBrowser, disabled: installing, style: installBtnStyle, children: installing ? "安裝中…" : "安裝瀏覽器" })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: bodyStyle, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: "1 1 380px", minWidth: 320 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { style: { fontSize: 30, fontWeight: 600, margin: 0 }, children: "FlowTest" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { color: "#94a3b8", marginTop: 6, marginBottom: 34 }, children: "錄製瀏覽器操作，產生 Playwright 測試" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: sectionStyle, children: "開始" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: pick, style: linkStyle, children: "📂 開啟資料夾…" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#64748b", marginTop: 4, marginBottom: 30 }, children: "選一個空資料夾即可建立新的工作區" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: sectionStyle, children: "最近使用" }),
+            recent.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "#64748b" }, children: "還沒有開啟過任何工作區" }) : recent.map((w2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: recentRowStyle, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "button",
+                {
+                  onClick: () => switchTo(w2.path),
+                  title: w2.exists ? w2.path : `找不到：${w2.path}`,
+                  style: {
+                    ...recentBtnStyle,
+                    color: w2.exists ? "#e2e8f0" : "#64748b"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { flexShrink: 0 }, children: w2.name }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: recentPathStyle, children: w2.path }),
+                    !w2.exists && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: missingStyle, children: "找不到" })
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: () => forget(w2.path),
+                  title: "從清單移除",
+                  style: forgetBtnStyle,
+                  children: "✕"
+                }
+              )
+            ] }, w2.path))
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: "0 1 320px", minWidth: 260, display: "flex", flexDirection: "column", gap: 12 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Card, { title: "什麼是工作區？", children: "工作區就是一個資料夾，你的流程、專案設定與上傳檔案都存在裡面。 把它放進你自己的專案 repo，就能用 git 版控、開 PR、切分支 —— 不同的 repo 之間也自然互不干擾。" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Card, { title: "工作區 vs 專案", children: "一個工作區可以含多個「專案」。工作區決定檔案存在哪裡；專案負責分組流程， 並持有環境（DEV / UAT / PRD）與環境變數。" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Card, { title: "產出物不會進版控", children: "工具會在工作區裡放好 .gitignore，把 exports/ 與 .flowtest/ 排除掉， 不會動到你原本的 .gitignore。" })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: hintStyle, children: "把資料夾拖曳到這裡也可以開啟" })
+      ]
+    }
+  );
+}
+function Card({ title, children: children2 }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: cardStyle, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, marginBottom: 6, color: "#f1f5f9" }, children: title }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, lineHeight: 1.7, color: "#94a3b8" }, children: children2 })
+  ] });
+}
+const bannerStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  padding: "10px 20px",
+  background: "#78350f",
+  color: "#fef3c7",
+  fontSize: 12,
+  flexShrink: 0
+};
+const installBtnStyle = {
+  background: "#f59e0b",
+  color: "#1c1917",
+  border: "none",
+  borderRadius: 4,
+  padding: "5px 12px",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+  flexShrink: 0
+};
+const bodyStyle = {
+  flex: 1,
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 48,
+  alignContent: "center",
+  justifyContent: "center",
+  padding: "32px 56px",
+  overflowY: "auto"
+};
+const sectionStyle = {
+  fontSize: 12,
+  fontWeight: 600,
+  textTransform: "uppercase",
+  letterSpacing: 0.6,
+  color: "#64748b",
+  margin: "0 0 10px"
+};
+const linkStyle = {
+  display: "block",
+  background: "none",
+  border: "none",
+  padding: 0,
+  color: "#38bdf8",
+  fontSize: 14,
+  cursor: "pointer",
+  textAlign: "left"
+};
+const recentRowStyle = {
+  display: "flex",
+  alignItems: "center",
+  gap: 4
+};
+const recentBtnStyle = {
+  flex: 1,
+  minWidth: 0,
+  display: "flex",
+  alignItems: "baseline",
+  gap: 10,
+  background: "none",
+  border: "none",
+  padding: "4px 0",
+  fontSize: 13,
+  cursor: "pointer",
+  textAlign: "left"
+};
+const recentPathStyle = {
+  flex: 1,
+  minWidth: 0,
+  fontSize: 11,
+  color: "#64748b",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  direction: "rtl",
+  // keep the tail (the folder itself) visible when truncating
+  textAlign: "left"
+};
+const missingStyle = {
+  fontSize: 10,
+  color: "#f87171",
+  flexShrink: 0
+};
+const forgetBtnStyle = {
+  background: "none",
+  border: "none",
+  color: "#475569",
+  cursor: "pointer",
+  fontSize: 12,
+  padding: "2px 6px",
+  flexShrink: 0
+};
+const cardStyle = {
+  background: "#1e293b",
+  border: "1px solid #334155",
+  borderRadius: 6,
+  padding: "14px 16px",
+  fontSize: 13
+};
+const hintStyle = {
+  textAlign: "center",
+  padding: "0 0 22px",
+  fontSize: 11,
+  color: "#475569",
+  flexShrink: 0
+};
+async function reloadFromDisk() {
+  if (!useWorkspaceStore.getState().info?.root) return;
+  const store = useFlowStore.getState();
+  if (store.isRecording || store.isReplaying) return;
+  store.setFlows(await window.electronAPI.listFlows());
+  store.setProjects(await window.electronAPI.listProjects());
+  const openProject = store.currentProject;
+  if (openProject) {
+    const project = await window.electronAPI.loadProject(openProject.id);
+    if (project && project.updatedAt > openProject.updatedAt) {
+      const s = useFlowStore.getState();
+      s.setCurrentProject(project);
+      if (!project.environments.some((e) => e.id === s.activeEnvironmentId)) {
+        s.setActiveEnvironment(project.environments[0]?.id ?? null);
+      }
+    }
+  }
+  const open = store.currentFlow;
+  if (!open) return;
+  const onDisk = await window.electronAPI.loadFlow(open.id);
+  if (!onDisk) {
+    useFlowStore.getState().setCurrentFlow(null);
+    return;
+  }
+  if (onDisk.updatedAt > open.updatedAt) {
+    useFlowStore.getState().setCurrentFlow(onDisk);
+  }
+}
 function usePlaywrightEvents() {
   const { setReplayStatus, setReplayingNode, setIsReplaying } = useFlowStore();
   reactExports.useEffect(() => {
@@ -21694,7 +22058,11 @@ function usePlaywrightEvents() {
     const unsubLocatorPick = window.electronAPI.onLocatorPickNeeded((payload) => {
       useFlowStore.getState().setPendingLocatorPick(payload);
     });
+    const unsubReload = window.electronAPI.onWorkspaceReload(() => {
+      void reloadFromDisk();
+    });
     return () => {
+      unsubReload();
       unsubCaptured();
       unsubUpdated();
       unsubRemoved();
@@ -21730,6 +22098,17 @@ function App() {
   usePlaywrightEvents();
   useUndoRedo();
   const { selectedNodeId, currentFlow } = useFlowStore();
+  const { info, loading, load } = useWorkspaceStore();
+  reactExports.useEffect(() => {
+    void load();
+  }, [load]);
+  if (loading) return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: splashStyle });
+  if (!info?.root) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(WelcomeScreen, {}),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(ConfirmHost, {})
+    ] });
+  }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", height: "100vh" }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx(Toolbar, {}),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flex: 1, overflow: "hidden" }, children: [
@@ -21748,6 +22127,7 @@ function App() {
     /* @__PURE__ */ jsxRuntimeExports.jsx(ConfirmHost, {})
   ] });
 }
+const splashStyle = { height: "100vh", background: "#0f172a" };
 client.createRoot(document.getElementById("root")).render(
   /* @__PURE__ */ jsxRuntimeExports.jsx(React$2.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) })
 );

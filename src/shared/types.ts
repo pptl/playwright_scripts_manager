@@ -266,8 +266,22 @@ export const IPC_CHANNELS = {
 
   // Renderer → Main (native file picker — returns paths imported into fixtures/)
   PICK_FILES: 'files:pick',
+  // Rewrite hand-typed paths into workspace-relative ones before they are stored
+  NORMALIZE_PATHS: 'files:normalize',
+
+  // Workspace (the user-chosen folder everything is read from / written to)
+  WORKSPACE_GET: 'workspace:get',
+  WORKSPACE_PICK: 'workspace:pick',
+  WORKSPACE_SET: 'workspace:set',
+  WORKSPACE_FORGET: 'workspace:forget',
+  WORKSPACE_REVEAL: 'workspace:reveal',
+
+  // Renderer → Main (download the Playwright browsers)
+  BROWSER_INSTALL: 'browser:install',
+  BROWSER_CHECK: 'browser:check',
 
   // Main → Renderer
+  WORKSPACE_RELOAD: 'workspace:reload',
   LOCATOR_PICK_NEEDED: 'locator:pickNeeded',
   ASSERTION_PICK_CANCELLED: 'assertion:pickCancelled',
   ACTION_CAPTURED: 'action:captured',
@@ -282,6 +296,20 @@ export const IPC_CHANNELS = {
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
+
+/** A remembered workspace, with whether it still exists on disk. */
+export interface RecentWorkspace {
+  path: string
+  name: string
+  exists: boolean
+}
+
+export interface WorkspaceInfo {
+  root: string | null
+  recent: RecentWorkspace[]
+  /** false only when no Chromium build exists at all — never on a version mismatch. */
+  hasChromium: boolean
+}
 
 // IPC payload types
 export interface ReplayToNodePayload {
@@ -315,6 +343,8 @@ export interface ExportScriptsPayload {
 
 export interface FlowSavePayload {
   flow: Flow
+  /** false leaves updatedAt alone — for saves that only move nodes around. */
+  touch?: boolean
 }
 
 export interface FlowLoadPayload {

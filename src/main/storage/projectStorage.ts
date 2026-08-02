@@ -1,7 +1,6 @@
 import { promises as fs } from 'fs'
 import { randomUUID } from 'crypto'
 import { join } from 'path'
-import { app } from 'electron'
 import type { Project } from '../../shared/types'
 import {
   DEFAULT_PROJECT_ID,
@@ -10,11 +9,10 @@ import {
   DEFAULT_DOMAIN,
   DOMAIN_ENV_KEY,
 } from '../../shared/types'
+import { getWorkspaceRoot } from './workspace'
 
 function projectsDir(): string {
-  return app.isPackaged
-    ? join(app.getPath('userData'), 'projects')
-    : join(process.cwd(), 'projects')
+  return join(getWorkspaceRoot(), 'projects')
 }
 
 export class ProjectStorage {

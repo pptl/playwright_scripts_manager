@@ -84,21 +84,13 @@ function FlowCanvasInner() {
   // Latest position per node seen during an in-progress drag (drag-stop events omit position)
   const dragPosRef = useRef<Map<string, { x: number; y: number }>>(new Map())
 
-  // Flip a group's collapsed state / dissolve a group, then persist.
+  // Flip a group's collapsed state / dissolve a group. Both actions persist themselves.
   const onToggleGroup = useCallback(
-    (groupId: string) => {
-      toggleGroupCollapsed(groupId)
-      const updated = useFlowStore.getState().currentFlow
-      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
-    },
+    (groupId: string) => toggleGroupCollapsed(groupId),
     [toggleGroupCollapsed],
   )
   const onUngroup = useCallback(
-    (groupId: string) => {
-      ungroupGroup(groupId)
-      const updated = useFlowStore.getState().currentFlow
-      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
-    },
+    (groupId: string) => ungroupGroup(groupId),
     [ungroupGroup],
   )
 
@@ -192,14 +184,12 @@ function FlowCanvasInner() {
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
 
   // On flow load: if positions were never finalized, materialize the tree layout into the
-  // store (one source of truth) and persist, so render and drag share the same positions.
+  // store (one source of truth), so render and drag share the same positions. Persists itself.
   useEffect(() => {
     if (!currentFlow || currentFlow.positionsFinalized || !currentFlow.rootNodeId) return
     const layout = computeTreeLayout(currentFlow.nodes, currentFlow.rootNodeId)
     // History suppression lives inside materializeLayout — this is automatic, not a user edit.
     materializeLayout(layout)
-    const updated = useFlowStore.getState().currentFlow
-    if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
   }, [currentFlow?.id, materializeLayout])
 
   // Flush any debounced drag save before the flow changes or the canvas unmounts — otherwise
@@ -339,8 +329,6 @@ function FlowCanvasInner() {
     (connection: Connection) => {
       if (!connection.source || !connection.target) return
       connectNodes(connection.source, connection.target)
-      const updated = useFlowStore.getState().currentFlow
-      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
     },
     [connectNodes],
   )
@@ -373,8 +361,6 @@ function FlowCanvasInner() {
       createGroup(Array.from(selectedNodeIds), name)
       setSelectedNodeIds(new Set())
       setGroupModal(false)
-      const updated = useFlowStore.getState().currentFlow
-      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
     },
     [selectedNodeIds, createGroup],
   )
@@ -448,34 +434,29 @@ function FlowCanvasInner() {
             // Node deletion is deliberately NOT confirmed: it is a high-frequency editing
             // gesture and Ctrl+Z already restores the node (and its subtree). Every other
             // destructive action in the app does confirm — this is the intended exception.
-            onDelete={async () => {
+            onDelete={() => {
               deleteNode(contextMenu.nodeId)
-              const updated = useFlowStore.getState().currentFlow
-              if (updated) await window.electronAPI.saveFlow(updated)
             }}
             deleteOnlyLabel={deleteOnlyLabel}
-            onDeleteNodeOnly={async () => {
+            onDeleteNodeOnly={() => {
               const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId]
               deleteNodesOnly(ids)
               setSelectedNodeIds(new Set())
-              const updated = useFlowStore.getState().currentFlow
-              if (updated) await window.electronAPI.saveFlow(updated)
             }}
             isRecording={isRecording}
             isReplaying={isReplaying}
             hasValue={hasValue}
             currentCaptureAs={contextNode?.action.captureAs}
-            onCaptureAsVar={async (varName) => {
+            onCaptureAsVar={(varName) => {
               if (!contextNode) return
               // Session variables are config — kept out of undo history so the canvas and the
               // SessionVarList 🗑 behave the same way (see flowStore's history header comment).
+              // updateNode persists itself (this isn't a position-only update).
               runWithoutHistory(() => {
                 updateNode(contextNode.id, {
                   action: { ...contextNode.action, captureAs: varName },
                 })
               })
-              const updated = useFlowStore.getState().currentFlow
-              if (updated) await window.electronAPI.saveFlow(updated)
             }}
             onInsertCallFlowBefore={() => setCallFlowModal({ mode: 'insertBefore', targetNodeId: contextMenu.nodeId })}
             onAppendCallFlowAfter={() => setCallFlowModal({ mode: 'appendAfter', targetNodeId: contextMenu.nodeId })}
@@ -483,12 +464,10 @@ function FlowCanvasInner() {
             selectedCount={selectedNodeIds.size}
             onExtract={handleExtractClick}
             onGroup={handleGroupClick}
-            onDisconnect={async () => {
+            onDisconnect={() => {
               const ids = multi ? Array.from(selectedNodeIds) : [contextMenu.nodeId]
               // One gesture = one Ctrl+Z, however many nodes were selected.
               runAsOneHistoryStep(() => ids.forEach((id) => disconnectNode(id)))
-              const updated = useFlowStore.getState().currentFlow
-              if (updated) await window.electronAPI.saveFlow(updated)
             }}
             disconnectLabel={disconnectLabel}
           />
@@ -499,8 +478,9 @@ function FlowCanvasInner() {
           mode={callFlowModal.mode}
           targetNodeId={callFlowModal.targetNodeId}
           onClose={() => setCallFlowModal(null)}
-          onConfirm={async (callFlowAction: Action) => {
+          onConfirm={(callFlowAction: Action) => {
             // Insert + relayout is one gesture — batch so a single Ctrl+Z reverses both.
+            // Both actions persist themselves; relayoutAll's save (running last) wins.
             runAsOneHistoryStep(() => {
               if (callFlowModal.mode === 'insertBefore') {
                 insertCallFlowBefore(callFlowModal.targetNodeId, callFlowAction)
@@ -512,8 +492,6 @@ function FlowCanvasInner() {
               }
             })
             setCallFlowModal(null)
-            const updated = useFlowStore.getState().currentFlow
-            if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
           }}
         />
       )}
@@ -584,12 +562,10 @@ function FlowCanvasInner() {
       {addNodeModal && (
         <AddNodeModal
           onClose={() => setAddNodeModal(null)}
-          onConfirm={async (action: Action) => {
+          onConfirm={(action: Action) => {
             addNodeAt(action, { x: addNodeModal.flowX, y: addNodeModal.flowY })
             selectNode(action.id)
             setAddNodeModal(null)
-            const updated = useFlowStore.getState().currentFlow
-            if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
           }}
         />
       )}
@@ -646,12 +622,11 @@ function FlowCanvasInner() {
         onConnect={onConnect}
         onNodesDelete={() => { /* no-op: node deletion only via context menu */ }}
         onEdgesDelete={(edgesToDelete) => {
-          // One gesture = one Ctrl+Z, however many edges were selected.
+          // One gesture = one Ctrl+Z, however many edges were selected. disconnectNodes
+          // persists itself on each call; the last one wins.
           runAsOneHistoryStep(() => {
             edgesToDelete.forEach((e) => disconnectNodes(e.source, e.target))
           })
-          const updated = useFlowStore.getState().currentFlow
-          if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
         }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}

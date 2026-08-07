@@ -2,10 +2,12 @@ import { Page, Locator, FrameLocator } from 'playwright-core'
 import { createRequire } from 'module'
 import { existsSync } from 'fs'
 import type { Action, FlowNode } from '../../shared/types'
-import { isCallFlowAction, DEFAULT_PROJECT_ID, DOMAIN_ENV_KEY } from '../../shared/types'
+import { isCallFlowAction, DOMAIN_ENV_KEY } from '../../shared/types'
 import { resolveValueWithSession, resolveValue } from '../../shared/variableResolver'
+import { resolveProjectId } from '../../shared/projectResolution'
 import { getCursorHighlightScript } from './captureShared'
 import { FlowStorage } from '../storage/flowStorage'
+import { ProjectStorage } from '../storage/projectStorage'
 import { FixtureStorage } from '../storage/fixtureStorage'
 import { decryptIfNeeded } from '../security/vault'
 
@@ -77,6 +79,10 @@ export class Replayer {
   private pages: Map<string, Page>
   /** Pages this replay muted the file chooser on, released when the replay ends. */
   private suppressedPages = new Set<Page>()
+  /** Known project IDs, fetched at the top of replayToNode — lets executeCallFlow fold a
+   *  sub-flow's projectId into the default project when it points at a deleted one, same as
+   *  everywhere else (resolveProjectId). Each nested Replayer re-fetches its own on entry. */
+  private knownProjectIds = new Set<string>()
 
   constructor(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string, sharedPages?: Map<string, Page>) {
     this.page = page
@@ -107,6 +113,7 @@ export class Replayer {
     speed = 500,
   ): Promise<void> {
     this.sessionVars.clear()
+    this.knownProjectIds = new Set((await ProjectStorage.list()).map((p) => p.id))
     const cursorScript = getCursorHighlightScript()
     await this.page.addInitScript(cursorScript)
     await this.page.evaluate(cursorScript).catch(() => {})
@@ -171,7 +178,7 @@ export class Replayer {
     // Env-var references ({{envKey}}) only resolve when the sub-flow belongs to the active
     // project (v1 restriction: no cross-project env-var references).
     const subFlowEnvVars =
-      this.activeProjectId && (subFlow.projectId ?? DEFAULT_PROJECT_ID) === this.activeProjectId
+      this.activeProjectId && resolveProjectId(subFlow, this.knownProjectIds) === this.activeProjectId
         ? this.envVars
         : {}
     const resolveVars = (vars: import('../../shared/types').ProfileVariable[]): Record<string, string> =>
@@ -302,6 +309,10 @@ export class Replayer {
     const popupPromise = action.opensPage
       ? this.pageFor(action).context().waitForEvent('page', { timeout: 15_000 })
       : null
+    // If the switch below throws before popupPromise is awaited (line ~381), a later
+    // timeout rejection would otherwise be unhandled. This passive handler is a separate
+    // subscription — it doesn't consume the rejection for the real `await` below.
+    popupPromise?.catch(() => {})
 
     switch (action.type) {
       case 'goto':

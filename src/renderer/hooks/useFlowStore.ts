@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
 import { DEFAULT_PROJECT_ID, DEFAULT_DOMAIN, DOMAIN_ENV_KEY } from '@shared/types'
 import { flattenProjectEnvVars } from '@shared/variableResolver'
+import { resolveProjectId } from '@shared/projectResolution'
 
 export function useFlowManager() {
   const { setFlows, createFlow, setCurrentFlow } = useFlowStore()
@@ -24,7 +25,7 @@ export function useFlowManager() {
       // Every flow belongs to a project — flows with no (or an unknown) projectId
       // fall back to the reserved default project ("未分類").
       const store = useFlowStore.getState()
-      const pid = flow.projectId ?? DEFAULT_PROJECT_ID
+      const pid = resolveProjectId(flow, new Set(store.projects.map((p) => p.id)))
       const project = await window.electronAPI.loadProject(pid)
       store.setCurrentProject(project)
       // Preserve active env when staying in the same project; reset otherwise

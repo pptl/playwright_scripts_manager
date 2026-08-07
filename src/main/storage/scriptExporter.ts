@@ -3,13 +3,14 @@ import { join } from 'path'
 import type { Flow, FlowNode, ExportConfig, TestPath } from '../../shared/types'
 import {
   isCallFlowAction,
-  DEFAULT_PROJECT_ID,
   DOMAIN_ENV_KEY,
   SECRET_ENV_PREFIX,
 } from '../../shared/types'
 import { FlowStorage } from './flowStorage'
+import { ProjectStorage } from './projectStorage'
 import { getWorkspaceRoot } from './workspace'
 import { decryptIfNeeded } from '../security/vault'
+import { resolveProjectId } from '../../shared/projectResolution'
 import type { CodegenVarScope } from '../../shared/variableResolver'
 import {
   hasVariables,
@@ -22,6 +23,7 @@ import {
   SECRET_HELPER_CODE,
   SECRET_VAR_PREFIX,
   resolveValue,
+  toSingleQuoted,
 } from '../../shared/variableResolver'
 
 function exportsDir(): string {
@@ -89,14 +91,23 @@ type ExpandedStep = {
   secretProfileKeys: Set<string>
 }
 
+/** Known project IDs for the export currently in progress — populated once by
+ *  `ScriptExporter.build()` before the (synchronous) generateSpec/gateEnvVars recursion runs.
+ *  A module-level cache instead of a threaded parameter: `activeProjectId` alone already
+ *  runs through 6 nested function signatures (generateSpec → buildStepSequence →
+ *  getSubFlowPath → resolveProfile), and adding another positional parameter there is exactly
+ *  the C1 problem tracked separately — not something to grow while fixing this. */
+let currentKnownProjectIds: Set<string> = new Set()
+
 /** Project env vars are only visible to flows belonging to the active project
- *  (v1: no cross-project env-var references). */
+ *  (v1: no cross-project env-var references). A flow's `projectId` pointing at a project
+ *  that no longer exists folds into the reserved default project, same as everywhere else. */
 function gateEnvVars(
   flow: Flow,
   envVars: Record<string, string> | undefined,
   activeProjectId: string | undefined,
 ): Record<string, string> {
-  return activeProjectId && (flow.projectId ?? DEFAULT_PROJECT_ID) === activeProjectId
+  return activeProjectId && resolveProjectId(flow, currentKnownProjectIds) === activeProjectId
     ? (envVars ?? {})
     : {}
 }
@@ -137,6 +148,8 @@ export class ScriptExporter {
     flow: Flow,
     config: ExportConfig,
   ): Promise<{ specContent: string; secretEnv: Record<string, string> }> {
+    // Populate before generateSpec's synchronous recursion runs — see gateEnvVars.
+    currentKnownProjectIds = new Set((await ProjectStorage.list()).map((p) => p.id))
     const subFlowMap = await ScriptExporter.resolveSubFlows(flow)
     const paths = ScriptExporter.computePaths(flow)
     const nodeMap = new Map(flow.nodes.map((n) => [n.id, n]))
@@ -419,11 +432,11 @@ export class ScriptExporter {
               rawAction = `const ${alias}Promise = ${pageRef}.waitForEvent('popup');\n${rawAction}\n${assign}`
             }
             const action = rawAction.replace(/\n/g, '\n      ')
-            return `    await test.step('${node.action.description}', async () => {\n      ${action}\n    });`
+            return `    await test.step(${toSingleQuoted(node.action.description)}, async () => {\n      ${action}\n    });`
           })
           .join('\n\n')
 
-        return `  test('${testName}', async ({ page }) => {\n${hoistDecls}${stepCode}\n  });`
+        return `  test(${toSingleQuoted(testName)}, async ({ page }) => {\n${hoistDecls}${stepCode}\n  });`
       })
       .join('\n\n')
 
@@ -437,7 +450,7 @@ export class ScriptExporter {
       hasProfileVars ? `\n${emitProfileVarDecls(profileVars, secretProfileKeys)}` : '',
       secrets.size > 0 ? `\n${secrets.decls()}` : '',
       '',
-      `test.describe('${flow.name}', () => {`,
+      `test.describe(${toSingleQuoted(flow.name)}, () => {`,
       '',
       tests,
       '',
@@ -508,33 +521,33 @@ export class ScriptExporter {
 
     if (selector && /^\[name=/.test(selector)) {
       // Form input with a name attribute — always the most reliable locator
-      loc = `${scopeRef}.locator('${selector}')`
+      loc = `${scopeRef}.locator(${toSingleQuoted(selector)})`
     } else if (selector && /^\[data-id=/.test(selector)) {
       // Unique data-id attribute (e.g. MUI nav buttons that share the same aria-label)
-      loc = `${scopeRef}.locator('${selector}')`
+      loc = `${scopeRef}.locator(${toSingleQuoted(selector)})`
     } else if (selector && /^\[aria-label=/.test(selector) && locatorExpr && /^getByText\(/.test(locatorExpr)) {
       // Element has a unique aria-label: prefer it over getByText which can time out
       // on buttons whose textContent doesn't perfectly match (e.g. icon + text).
-      loc = `${scopeRef}.locator('${selector}')`
+      loc = `${scopeRef}.locator(${toSingleQuoted(selector)})`
     } else if (locatorExpr && /^getByText\(/.test(locatorExpr)) {
       // Attempt to upgrade getByText("X") → getByRole("tag", { name: "X", exact: true })
       // when the selector tells us the actual HTML element type.
       // Note: stored locatorExpr may already contain { exact: true } so match just the text portion.
       const textMatch = locatorExpr.match(/^getByText\("([^"]+)"/)
       if (textMatch && selector && /^button/.test(selector)) {
-        loc = `${scopeRef}.getByRole("button", { name: "${textMatch[1]}", exact: true })`
+        loc = `${scopeRef}.getByRole("button", { name: ${toSingleQuoted(textMatch[1])}, exact: true })`
       } else if (textMatch && selector && /^a[\s\[]/.test(selector)) {
-        loc = `${scopeRef}.getByRole("link", { name: "${textMatch[1]}", exact: true })`
+        loc = `${scopeRef}.getByRole("link", { name: ${toSingleQuoted(textMatch[1])}, exact: true })`
       } else if (textMatch) {
         // No role info — at least add exact:true to limit partial matches
-        loc = `${scopeRef}.getByText("${textMatch[1]}", { exact: true })`
+        loc = `${scopeRef}.getByText(${toSingleQuoted(textMatch[1])}, { exact: true })`
       } else {
         loc = `${scopeRef}.${locatorExpr}`
       }
     } else if (locatorExpr) {
       loc = `${scopeRef}.${locatorExpr}`
     } else {
-      loc = `${scopeRef}.locator('${selector}')`
+      loc = `${scopeRef}.locator(${toSingleQuoted(selector)})`
     }
 
     // Transform any {{...}} variable placeholders remaining in loc into JS code expressions
@@ -587,7 +600,7 @@ export class ScriptExporter {
             const parsed = new URL(gotoVal)
             if (parsed.origin === baseOrigin) {
               const rest = parsed.pathname + parsed.search + parsed.hash
-              return `${captureDecl}await ${pageRef}.goto('${domainOverride}${rest}');`
+              return `${captureDecl}await ${pageRef}.goto(${toSingleQuoted(domainOverride + rest)});`
             }
           } catch { /* not a URL, fall through */ }
         }
@@ -602,8 +615,8 @@ export class ScriptExporter {
       }
       case 'click': {
         const clickOpts: string[] = []
-        if (action.button && action.button !== 'left') clickOpts.push(`button: '${action.button}'`)
-        if (action.modifiers?.length) clickOpts.push(`modifiers: [${action.modifiers.map((m) => `'${m}'`).join(', ')}]`)
+        if (action.button && action.button !== 'left') clickOpts.push(`button: ${toSingleQuoted(action.button)}`)
+        if (action.modifiers?.length) clickOpts.push(`modifiers: [${action.modifiers.map((m) => toSingleQuoted(m)).join(', ')}]`)
         const optStr = clickOpts.length ? `{ ${clickOpts.join(', ')} }` : ''
         const method = (action.clickCount ?? 1) >= 2 ? 'dblclick' : 'click'
         return `await ${loc}.${method}(${optStr});`
@@ -691,7 +704,7 @@ export class ScriptExporter {
         const isSessionVar = !!action.value && /^\{\{(\w+)\}\}$/.test(action.value)
           && sessionVarsDefined.has(action.value.slice(2, -2))
         const assertLoc = isSessionVar && action.selector
-          ? `${scopeRef}.locator('${action.selector}').filter({ hasText: ${valueExpr} })`
+          ? `${scopeRef}.locator(${toSingleQuoted(action.selector)}).filter({ hasText: ${valueExpr} })`
           : loc
         return `${captureDecl}await expect(${assertLoc}).toContainText(${valueExpr});`
       }

@@ -195,8 +195,9 @@ function varToCodeRef(name: string, scope: CodegenVarScope): string | null {
   return null
 }
 
-/** Escape a raw string for embedding inside a single-quoted JS literal. */
-function toSingleQuoted(value: string): string {
+/** Escape a raw string for embedding inside a single-quoted JS literal.
+ *  Returns the full quoted literal (including the surrounding `'...'`). */
+export function toSingleQuoted(value: string): string {
   return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }
 

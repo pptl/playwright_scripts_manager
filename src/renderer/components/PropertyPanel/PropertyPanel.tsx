@@ -159,8 +159,7 @@ export function PropertyPanel() {
     if (!secret && effectiveValue !== value) setValue(effectiveValue)
     setStoredValue(storedForDisk)
     setValueDirty(false)
-    const updated = useFlowStore.getState().currentFlow
-    if (updated) await window.electronAPI.saveFlow(updated)
+    // updateNode persists itself (this isn't a position-only update).
   }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector, locatorExpr, value, code, profileMapping, secret, storedValue, valueDirty])
 
   /** Enter saves; spread onto the single-line inputs. */

@@ -63,12 +63,9 @@ export function usePlaywrightEvents() {
       const { currentFlow, addActionNode, recordingHeadId } = useFlowStore.getState()
       if (!currentFlow) return
 
-      // Use the explicit recording head (tracks the last added node during recording)
+      // Use the explicit recording head (tracks the last added node during recording).
+      // addActionNode persists itself.
       addActionNode(action, recordingHeadId)
-
-      // Auto-save
-      const updated = useFlowStore.getState().currentFlow
-      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
     })
 
     const unsubUpdated = window.electronAPI.onActionUpdated(({ actionId, updates }) => {
@@ -76,23 +73,20 @@ export function usePlaywrightEvents() {
       const { currentFlow, updateNode } = useFlowStore.getState()
       const node = currentFlow?.nodes.find((n) => n.id === actionId)
       if (!node) return
+      // updateNode persists itself (this isn't a position-only update).
       updateNode(actionId, { action: { ...node.action, ...updates } })
-      const updated = useFlowStore.getState().currentFlow
-      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
     })
 
     // Un-record an action the main process decided shouldn't be part of the flow
     // (the click that opened a file chooser). It is always the recording head, so
     // deleting it takes no children with it — but move the head back to its parent
-    // first so the action that follows attaches in the right place.
+    // first so the action that follows attaches in the right place. deleteNode persists itself.
     const unsubRemoved = window.electronAPI.onActionRemoved((actionId: string) => {
       const { currentFlow, deleteNode, setRecordingHead, recordingHeadId } = useFlowStore.getState()
       const node = currentFlow?.nodes.find((n) => n.id === actionId)
       if (!node) return
       if (recordingHeadId === actionId) setRecordingHead(node.parentId)
       deleteNode(actionId)
-      const updated = useFlowStore.getState().currentFlow
-      if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
     })
 
     const unsubNodeStart = window.electronAPI.onReplayNodeStart((nodeId: string) => {

@@ -180,9 +180,7 @@ export function Toolbar() {
   }
 
   const handleRelayout = () => {
-    relayoutAll()
-    const updated = useFlowStore.getState().currentFlow
-    if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
+    relayoutAll() // persists itself
   }
 
   /** Blocked-by-lock errors are worth a dialog rather than an alert — the user can act on them. */

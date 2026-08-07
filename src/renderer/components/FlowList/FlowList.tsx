@@ -5,6 +5,7 @@ import { useFlowManager } from '../../hooks/useFlowStore'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import type { Action } from '@shared/types'
 import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN } from '@shared/types'
+import { resolveProjectId } from '@shared/projectResolution'
 import { confirm } from '../../stores/confirmStore'
 
 export function FlowList() {
@@ -178,7 +179,7 @@ export function FlowList() {
   const knownProjectIds = new Set(projects.map((p) => p.id))
   const flowsByProject = new Map<string, typeof flows>()
   flows.forEach((flow) => {
-    const pid = flow.projectId && knownProjectIds.has(flow.projectId) ? flow.projectId : DEFAULT_PROJECT_ID
+    const pid = resolveProjectId(flow, knownProjectIds)
     const arr = flowsByProject.get(pid) ?? []
     arr.push(flow)
     flowsByProject.set(pid, arr)
@@ -572,6 +573,9 @@ export function FlowList() {
             const xMax = currentFlow.nodes.reduce((mx, n) => Math.max(mx, n.position.x), 0)
             const yMax = currentFlow.nodes.reduce((my, n) => Math.max(my, n.position.y), 0)
             // Add + position is one gesture — batch so a single Ctrl+Z reverses both.
+            // A trailing manual save is still required here: the position-only updateNode
+            // call intentionally skips auto-save (it assumes a drag debounce owns it, which
+            // is not the case for this one-time placement), so nothing else persists it.
             runAsOneHistoryStep(() => {
               addActionNode(callFlowAction, null)
               updateNode(callFlowAction.id, { position: { x: xMax + 300, y: yMax } })

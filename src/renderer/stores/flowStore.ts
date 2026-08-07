@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
 import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment } from '../../shared/types'
 import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN, DOMAIN_ENV_KEY, isCallFlowAction } from '../../shared/types'
+import { resolveProjectId } from '../../shared/projectResolution'
 import { computeGroupAwareLayout } from '../utils/groups'
 
 const NODE_VERTICAL_GAP = 80
@@ -224,6 +225,19 @@ function setSilently(partial: Partial<FlowStore>) {
   }
 }
 
+/** Single point of ownership for persisting a Flow to disk. Every store action that changes
+ *  a Flow — whether or not it's the open `currentFlow` — goes through this, so callers never
+ *  have to remember to save (and a save failure is always logged instead of vanishing).
+ *  Fire-and-forget from the caller's perspective: never awaited inside `runWithoutHistory` /
+ *  `runAsOneHistoryStep` callbacks, which must stay synchronous. */
+async function persistFlow(flow: Flow, touch = true): Promise<void> {
+  try {
+    await window.electronAPI.saveFlow(flow, touch)
+  } catch (err) {
+    console.error('[flowStore] Failed to save flow', flow.id, err)
+  }
+}
+
 export const useFlowStore = create<FlowStore>((set, get) => ({
   flows: [],
   currentFlow: null,
@@ -275,8 +289,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const migratedFlow = migrateCallFlowProfiles(flow)
     // Clear project context if the new flow belongs to a different project
     // (project loading happens async in useFlowStore.openFlow after setCurrentFlow)
-    const { currentProject } = get()
-    const changingProject = (flow.projectId ?? DEFAULT_PROJECT_ID) !== currentProject?.id
+    const { currentProject, projects } = get()
+    const changingProject =
+      resolveProjectId(flow, new Set(projects.map((p) => p.id))) !== currentProject?.id
     set({
       currentFlow: migratedFlow,
       selectedNodeId: null,
@@ -305,7 +320,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       selectedNodeId: null,
     })
     isTimeTraveling = false
-    window.electronAPI.saveFlow(previous).catch(console.error)
+    void persistFlow(previous)
   },
 
   redo: () => {
@@ -321,7 +336,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       selectedNodeId: null,
     })
     isTimeTraveling = false
-    window.electronAPI.saveFlow(next).catch(console.error)
+    void persistFlow(next)
   },
 
   runWithoutHistory: (fn) => {
@@ -357,7 +372,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     if (!flow) return
     const updatedFlow: Flow = { ...flow, name, updatedAt: new Date().toISOString() }
     setSilently({ currentFlow: updatedFlow })
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+    await persistFlow(updatedFlow)
   },
 
   addActionNode: (action, parentId = null, branchLabel) => {
@@ -400,6 +415,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
 
     set({ currentFlow: updatedFlow, recordingHeadId: node.id })
+    void persistFlow(updatedFlow)
     return node
   },
 
@@ -426,9 +442,15 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
 
     set({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
     return node
   },
 
+  // Position-only updates come from node dragging, which already saves itself via a 500ms
+  // debounce in FlowCanvas (touch:false — repositioning isn't a content change). Auto-saving
+  // here too would defeat that debounce and write on every pixel of a drag. Any other field
+  // change (PropertyPanel, capture-as-var toggle, session var delete, ...) saves immediately —
+  // this used to be the caller's job and was easy to forget.
   updateNode: (nodeId, updates) => {
     const flow = get().currentFlow
     if (!flow) return
@@ -438,6 +460,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       updatedAt: new Date().toISOString(),
     }
     set({ currentFlow: updatedFlow })
+    const positionOnly = Object.keys(updates).length > 0 && Object.keys(updates).every((k) => k === 'position')
+    if (!positionOnly) void persistFlow(updatedFlow)
   },
 
   deleteNode: (nodeId) => {
@@ -461,15 +485,14 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       }))
 
     const newRoot = updatedNodes.find((n) => n.parentId === null)
-    set({
-      currentFlow: {
-        ...flow,
-        nodes: updatedNodes,
-        rootNodeId: newRoot?.id ?? '',
-        updatedAt: new Date().toISOString(),
-      },
-      selectedNodeId: null,
-    })
+    const updatedFlow: Flow = {
+      ...flow,
+      nodes: updatedNodes,
+      rootNodeId: newRoot?.id ?? '',
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow, selectedNodeId: null })
+    void persistFlow(updatedFlow)
   },
 
   deleteNodesOnly: (nodeIds) => {
@@ -491,15 +514,14 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       })
 
     const newRoot = updatedNodes.find((n) => n.parentId === null)
-    set({
-      currentFlow: {
-        ...flow,
-        nodes: updatedNodes,
-        rootNodeId: newRoot?.id ?? '',
-        updatedAt: new Date().toISOString(),
-      },
-      selectedNodeId: null,
-    })
+    const updatedFlow: Flow = {
+      ...flow,
+      nodes: updatedNodes,
+      rootNodeId: newRoot?.id ?? '',
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow, selectedNodeId: null })
+    void persistFlow(updatedFlow)
   },
 
   selectNode: (nodeId) => set({ selectedNodeId: nodeId }),
@@ -542,6 +564,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       updatedAt: new Date().toISOString(),
     }
     set({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
     return callFlowNode
   },
 
@@ -570,6 +593,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
 
     const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
     set({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
     return callFlowNode
   },
 
@@ -579,34 +603,34 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   materializeLayout: (positions) => {
     const flow = get().currentFlow
     if (!flow || flow.positionsFinalized) return
-    setSilently({
-      currentFlow: {
-        ...flow,
-        nodes: flow.nodes.map((n) => {
-          const pos = positions.get(n.id)
-          return pos ? { ...n, position: pos } : n
-        }),
-        positionsFinalized: true,
-        updatedAt: new Date().toISOString(),
-      },
-    })
+    const updatedFlow: Flow = {
+      ...flow,
+      nodes: flow.nodes.map((n) => {
+        const pos = positions.get(n.id)
+        return pos ? { ...n, position: pos } : n
+      }),
+      positionsFinalized: true,
+      updatedAt: new Date().toISOString(),
+    }
+    setSilently({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
   },
 
   relayoutAll: () => {
     const flow = get().currentFlow
     if (!flow) return
     const positions = computeGroupAwareLayout(flow.nodes, flow.groups ?? [])
-    set({
-      currentFlow: {
-        ...flow,
-        nodes: flow.nodes.map((n) => {
-          const pos = positions.get(n.id)
-          return pos ? { ...n, position: pos } : n
-        }),
-        positionsFinalized: true,
-        updatedAt: new Date().toISOString(),
-      },
-    })
+    const updatedFlow: Flow = {
+      ...flow,
+      nodes: flow.nodes.map((n) => {
+        const pos = positions.get(n.id)
+        return pos ? { ...n, position: pos } : n
+      }),
+      positionsFinalized: true,
+      updatedAt: new Date().toISOString(),
+    }
+    set({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
   },
 
   connectNodes: (sourceId, targetId, branchLabel) => {
@@ -624,7 +648,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       if (n.id === targetId) return { ...n, parentId: sourceId, branchLabel }
       return n
     })
-    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
+    set({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
   },
 
   disconnectNodes: (parentId, childId) => {
@@ -635,7 +661,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       if (n.id === childId) return { ...n, parentId: null, branchLabel: undefined }
       return n
     })
-    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
+    set({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
   },
 
   disconnectNode: (nodeId) => {
@@ -653,7 +681,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       if (childIds.has(n.id)) return { ...n, parentId: null, branchLabel: undefined }
       return n
     })
-    set({ currentFlow: { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() } })
+    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
+    set({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
   },
 
   createGroup: (memberIds, name) => {
@@ -668,16 +698,14 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       const pos = positions.get(n.id)
       return pos ? { ...n, position: pos } : n
     })
-    set({
-      currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() },
-      selectedNodeId: null,
-    })
+    const updatedFlow: Flow = { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() }
+    set({ currentFlow: updatedFlow, selectedNodeId: null })
+    void persistFlow(updatedFlow)
     return groupId
   },
 
   // Collapse/expand is pure view state. It rewrites every node position (group-aware relayout),
   // which would otherwise land on the undo stack and let a few toggles evict real edits.
-  // Still persisted by the caller — collapsed state belongs on disk.
   toggleGroupCollapsed: (groupId) => {
     const flow = get().currentFlow
     if (!flow) return
@@ -687,9 +715,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       const pos = positions.get(n.id)
       return pos ? { ...n, position: pos } : n
     })
-    setSilently({
-      currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() },
-    })
+    const updatedFlow: Flow = { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() }
+    setSilently({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
   },
 
   ungroupGroup: (groupId) => {
@@ -704,7 +732,9 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       const pos = positions.get(n.id)
       return pos ? { ...n, position: pos } : n
     })
-    set({ currentFlow: { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() } })
+    const updatedFlow: Flow = { ...flow, nodes, groups, positionsFinalized: true, updatedAt: new Date().toISOString() }
+    set({ currentFlow: updatedFlow })
+    void persistFlow(updatedFlow)
   },
 
   setReplayingNode: (nodeId) => set({ replayingNodeId: nodeId }),
@@ -766,7 +796,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       updatedAt: new Date().toISOString(),
     }
     setSilently({ currentFlow: updatedFlow })
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+    await persistFlow(updatedFlow)
   },
 
   updateProfile: async (id, updates) => {
@@ -780,7 +810,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       updatedAt: new Date().toISOString(),
     }
     setSilently({ currentFlow: updatedFlow })
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+    await persistFlow(updatedFlow)
   },
 
   deleteProfile: async (id) => {
@@ -807,7 +837,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       currentFlow: updatedFlow,
       activeProfileId: activeProfileId === id ? (updatedProfiles[0]?.id ?? null) : activeProfileId,
     })
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+    await persistFlow(updatedFlow)
   },
 
   duplicateProfile: async (id) => {
@@ -850,7 +880,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       updatedAt: new Date().toISOString(),
     }
     setSilently({ currentFlow: updatedFlow })
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+    await persistFlow(updatedFlow)
   },
 
   commitProfileVars: async (profileId, rows, envId) => {
@@ -895,7 +925,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     }
     // Atomic whole-table write — exactly the kind of invisible bulk change Ctrl+Z must not touch.
     setSilently({ currentFlow: updatedFlow })
-    await window.electronAPI.saveFlow(updatedFlow).catch(console.error)
+    await persistFlow(updatedFlow)
   },
 
   setProjects: (projects) => set({ projects }),
@@ -1041,7 +1071,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     // Copy every flow belonging to the source project. Node/profile ids are kept verbatim
     // (so subFlowExitNodeId / subFlowProfileMapping stay valid); only flow ids change.
     const all = await window.electronAPI.listFlows()
-    const sourceFlows = all.filter((f) => f.projectId === projectId)
+    const sourceFlows = all.filter((f) => (f.projectId ?? DEFAULT_PROJECT_ID) === projectId)
     const idMap = new Map<string, string>()
     sourceFlows.forEach((f) => idMap.set(f.id, uuidv4()))
 
@@ -1063,7 +1093,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
           return node
         }),
       }
-      await window.electronAPI.saveFlow(copy)
+      await persistFlow(copy)
     }
 
     set({ projects: await window.electronAPI.listProjects() })
@@ -1074,7 +1104,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const flowData = await window.electronAPI.getFlow(flowId)
     if (!flowData) return
     const updatedFlow: Flow = { ...flowData, projectId: projectId ?? undefined }
-    await window.electronAPI.saveFlow(updatedFlow)
+    await persistFlow(updatedFlow)
     const { currentFlow } = get()
     if (currentFlow?.id === flowId) {
       setSilently({ currentFlow: updatedFlow })

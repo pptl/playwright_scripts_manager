@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@playwright/test": "1.60.0",
+    "playwright": "1.60.0",
     "playwright-core": "1.60.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",

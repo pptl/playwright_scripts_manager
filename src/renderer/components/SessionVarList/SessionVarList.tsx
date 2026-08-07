@@ -66,11 +66,10 @@ export function SessionVarList() {
     if (!ok) return
     // Session variables are config, not a canvas edit — keep this out of undo history even
     // though it goes through updateNode (the confirm dialog above is the safeguard).
+    // updateNode persists itself.
     runWithoutHistory(() => {
       updateNode(nodeId, { action: { ...node.action, captureAs: undefined } })
     })
-    const updated = useFlowStore.getState().currentFlow
-    if (updated) window.electronAPI.saveFlow(updated).catch(console.error)
   }
 
   const copyToClipboard = (placeholder: string, varName: string) => {

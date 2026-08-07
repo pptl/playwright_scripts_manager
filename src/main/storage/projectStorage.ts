@@ -45,13 +45,20 @@ export class ProjectStorage {
       createdAt: now,
       updatedAt: now,
     }
-    await fs.writeFile(ProjectStorage.filePath(DEFAULT_PROJECT_ID), JSON.stringify(project, null, 2), 'utf-8')
+    await ProjectStorage.writeAtomic(DEFAULT_PROJECT_ID, project)
   }
 
   static async save(project: Project): Promise<void> {
     await ProjectStorage.ensureDir()
     project.updatedAt = new Date().toISOString()
-    await fs.writeFile(ProjectStorage.filePath(project.id), JSON.stringify(project, null, 2), 'utf-8')
+    await ProjectStorage.writeAtomic(project.id, project)
+  }
+
+  private static async writeAtomic(projectId: string, project: Project): Promise<void> {
+    const filePath = ProjectStorage.filePath(projectId)
+    const tmpPath = `${filePath}.tmp`
+    await fs.writeFile(tmpPath, JSON.stringify(project, null, 2), 'utf-8')
+    await fs.rename(tmpPath, filePath)
   }
 
   static async load(projectId: string): Promise<Project | null> {
@@ -78,8 +85,8 @@ export class ProjectStorage {
         const raw = await fs.readFile(join(projectsDir(), file), 'utf-8')
         const project = JSON.parse(raw) as Project
         results.push({ id: project.id, name: project.name, updatedAt: project.updatedAt })
-      } catch {
-        // skip corrupted files
+      } catch (err) {
+        console.error(`[ProjectStorage] Skipping corrupted project file: ${file}`, err)
       }
     }
 

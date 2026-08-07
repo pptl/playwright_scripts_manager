@@ -26,7 +26,10 @@ export class FlowStorage {
   static async save(flow: Flow, opts?: { touch?: boolean }): Promise<void> {
     await FlowStorage.ensureDir()
     if (opts?.touch !== false) flow.updatedAt = new Date().toISOString()
-    await fs.writeFile(FlowStorage.filePath(flow.id), JSON.stringify(flow, null, 2), 'utf-8')
+    const filePath = FlowStorage.filePath(flow.id)
+    const tmpPath = `${filePath}.tmp`
+    await fs.writeFile(tmpPath, JSON.stringify(flow, null, 2), 'utf-8')
+    await fs.rename(tmpPath, filePath)
   }
 
   static async load(flowId: string): Promise<Flow | null> {
@@ -63,8 +66,8 @@ export class FlowStorage {
             usage.set(subId, (usage.get(subId) ?? 0) + 1)
           }
         }
-      } catch {
-        // skip corrupted files
+      } catch (err) {
+        console.error(`[FlowStorage] Skipping corrupted flow file: ${file}`, err)
       }
     }
 

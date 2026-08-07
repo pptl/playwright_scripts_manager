@@ -16,12 +16,6 @@ export type ActionType =
   | 'callFlow'
   | 'code'
 
-export interface Assertion {
-  type: 'text' | 'visible' | 'url' | 'count'
-  target?: string
-  expected: string
-}
-
 export interface Action {
   id: string
   type: ActionType
@@ -58,8 +52,6 @@ export interface Action {
   captureAs?: string
   description: string
   timestamp: number
-  screenshot?: string
-  assertion?: Assertion
   url: string
   isPageNavigation: boolean
   /** callFlow only: ID of the flow to call */
@@ -224,8 +216,6 @@ export interface Flow {
   projectId?: string
   /** Environment profiles — each holds a named set of key-value variables (e.g. domain, admin_name) */
   profiles?: FlowProfile[]
-  /** @deprecated migrated to profiles */
-  domains?: string[]
   nodes: FlowNode[]
   rootNodeId: string
   /** In-place collapsible visual groups over contiguous node ranges (canvas display only). */
@@ -247,10 +237,9 @@ export interface FlowListItem {
   refCount: number
 }
 
+/** The resolution context a spec is generated under. Specs always go to `<workspace>/exports`
+ *  and always wrap each step in `test.step` — neither is configurable. */
 export interface ExportConfig {
-  outputDir: string
-  helperFunctions: boolean
-  useTestStep: boolean
   /** Active profile's variables as a flat map — used for replay substitution and code generation */
   profileVars?: Record<string, string>
   /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
@@ -285,12 +274,9 @@ export const REPLAY_SPEED_MS: Record<ReplaySpeed, number> = {
 // IPC Channel definitions
 export const IPC_CHANNELS = {
   // Renderer → Main
-  BROWSER_LAUNCH: 'browser:launch',
-  BROWSER_CLOSE: 'browser:close',
   RECORDING_START: 'recording:start',
   RECORDING_STOP: 'recording:stop',
   REPLAY_TO_NODE: 'replay:toNode',
-  REPLAY_STOP: 'replay:stop',
   FLOW_SAVE: 'flow:save',
   FLOW_LOAD: 'flow:load',
   FLOW_LIST: 'flow:list',
@@ -307,12 +293,6 @@ export const IPC_CHANNELS = {
   PROJECT_LIST: 'project:list',
   PROJECT_DELETE: 'project:delete',
 
-  // Renderer → Main (assertion pick)
-  START_ASSERTION_PICK: 'assertion:pickStart',
-
-  // Renderer → Main (locator pick)
-  LOCATOR_PICK_RESOLVED: 'locator:pickResolved',
-
   // Renderer → Main (native file picker — returns paths imported into fixtures/)
   PICK_FILES: 'files:pick',
   // Rewrite hand-typed paths into workspace-relative ones before they are stored
@@ -327,7 +307,6 @@ export const IPC_CHANNELS = {
 
   // Renderer → Main (download the Playwright browsers)
   BROWSER_INSTALL: 'browser:install',
-  BROWSER_CHECK: 'browser:check',
 
   // Private data — the key never leaves the main process; the renderer only ever
   // holds ciphertext, plus whatever single value it explicitly asks to reveal.
@@ -342,8 +321,6 @@ export const IPC_CHANNELS = {
 
   // Main → Renderer
   WORKSPACE_RELOAD: 'workspace:reload',
-  LOCATOR_PICK_NEEDED: 'locator:pickNeeded',
-  ASSERTION_PICK_CANCELLED: 'assertion:pickCancelled',
   ACTION_CAPTURED: 'action:captured',
   ACTION_UPDATED: 'action:updated',
   ACTION_REMOVED: 'action:removed',
@@ -451,12 +428,9 @@ export interface ActionUpdatedPayload {
   updates: Partial<Action>
 }
 
+/** One Cell-vs-Row alternative offered by the in-browser locator picker
+ *  (see getLocatorPickerScript / CodegenCapture.showLocatorPicker). */
 export interface LocatorOption {
   label: string
   expr: string
-}
-
-export interface LocatorPickPayload {
-  action: Action
-  alternatives: LocatorOption[]
 }

@@ -95,7 +95,6 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     setError(null)
     // varSource is intentionally out of the deps: it changes identity on every store write,
     // and re-running then would wipe rows the user is still editing.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tableKey])
 
   const setCell = <K extends keyof EnvVarRow>(rid: string, key: K, v: EnvVarRow[K]) => {

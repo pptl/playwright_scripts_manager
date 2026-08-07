@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
 import { DOMAIN_ENV_KEY, SECRET_ENVELOPE_PREFIX, SECRET_MASK } from '@shared/types'
-import type { FlowProfile, ProfileVariable } from '@shared/types'
+import type { ProfileVariable } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
 import { useVault } from '../../hooks/useVault'
 
@@ -186,7 +186,6 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     setError(null)
     // varSource is intentionally out of the deps: it changes identity on every store write,
     // and re-running then would wipe rows the user is still editing.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tableKey])
 
   const setCell = <K extends keyof VarRow>(rid: string, key: K, v: VarRow[K]) => {

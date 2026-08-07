@@ -51,11 +51,6 @@ export function getWorkspaceRoot(): string {
   return workspaceRoot
 }
 
-/** Root that flows/, projects/, exports/ and fixtures/ all live under. */
-export function dataRoot(): string {
-  return getWorkspaceRoot()
-}
-
 export function getRecentWorkspaces(): string[] {
   return [...recent]
 }

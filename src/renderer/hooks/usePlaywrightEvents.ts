@@ -60,10 +60,8 @@ export function usePlaywrightEvents() {
 
   useEffect(() => {
     const unsubCaptured = window.electronAPI.onActionCaptured((action: Action) => {
-      const { currentFlow, addActionNode, recordingHeadId, setIsPickingAssertion } = useFlowStore.getState()
+      const { currentFlow, addActionNode, recordingHeadId } = useFlowStore.getState()
       if (!currentFlow) return
-
-      setIsPickingAssertion(false)
 
       // Use the explicit recording head (tracks the last added node during recording)
       addActionNode(action, recordingHeadId)
@@ -117,14 +115,6 @@ export function usePlaywrightEvents() {
       console.error('Replay error:', err)
     })
 
-    const unsubAssertCancelled = window.electronAPI.onAssertionPickCancelled(() => {
-      useFlowStore.getState().setIsPickingAssertion(false)
-    })
-
-    const unsubLocatorPick = window.electronAPI.onLocatorPickNeeded((payload) => {
-      useFlowStore.getState().setPendingLocatorPick(payload)
-    })
-
     // The workspace sits in the user's own repo, so a pull or a branch switch can
     // change these files while we hold them in memory — and the next autosave
     // would quietly write our stale copy back over them. Regaining focus is the
@@ -142,9 +132,8 @@ export function usePlaywrightEvents() {
       unsubNodeComplete()
       unsubFinished()
       unsubError()
-      unsubAssertCancelled()
-      unsubLocatorPick()
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Subscribe once for the app's lifetime; every handler reads fresh store state
+    // via getState(), so nothing here needs to be in the deps.
   }, [])
 }

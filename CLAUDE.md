@@ -62,7 +62,7 @@ Singletons `browserController`, `recorder`, `replayer` are module-level in `ipcH
 ### Key data types (`src/shared/types.ts`)
 
 - **`ActionType`** — 14 variants: `goto | click | fill | selectOption | check | uncheck | press | upload | wait | assertVisible | assertText | assertValue | callFlow | code`
-- **`Action`** — one browser interaction: `type`, `locatorExpr` (high-quality Playwright locator), `selector` (CSS fallback), `value`, `captureAs` (optional session variable name), `description`, `url`, `isPageNavigation`, optional `assertion`. Type-specific fields:
+- **`Action`** — one browser interaction: `type`, `locatorExpr` (high-quality Playwright locator), `selector` (CSS fallback), `value`, `captureAs` (optional session variable name), `description`, `url`, `isPageNavigation`. Type-specific fields:
   - **click** — `button?: 'left'|'right'|'middle'`, `modifiers?: string[]` (Playwright names), `clickCount?` (2 = replayed/exported as `dblclick`)
   - **selectOption** — `values?: string[]` for `<select multiple>` (takes precedence over `value`)
   - **upload** — `filePaths?: string[]` (authoritative over the comma-joined `value`)
@@ -81,16 +81,18 @@ Singletons `browserController`, `recorder`, `replayer` are module-level in `ipcH
 - **`FlowListItem`** — lightweight summary from `FLOW_LIST` with `refCount` (how many callFlow nodes across all other flows reference this flow as a sub-flow; >0 = it's a reusable sub-flow, 0 = top-level test case) and `projectId`
 - **`ReplaySpeed`** — `'fast' | 'normal' | 'slow'` mapped to 100 / 500 / 1000 ms (`REPLAY_SPEED_MS`)
 - **`RecordingStartPayload`** — `baseURL`, optional branch-recording fields (`branchFromNodeId`, `branchNodes`, `replaySpeed`), `profileVars?`, `activeProfileId?`, `activeEnvironmentId?`, `envVars?`, `activeProjectId?`
-- **`ExportConfig`** — `outputDir`, `helperFunctions`, `useTestStep`, `profileVars?` (active profile's flat key-value map), `activeProfileId?`, `activeEnvironmentId?`, `envVars?` (flattened project env vars for the active env), `activeProjectId?`
+- **`ExportConfig`** — the resolution context a spec is generated under; every field is optional. `profileVars?` (active profile's flat key-value map), `activeProfileId?`, `activeEnvironmentId?`, `envVars?` (flattened project env vars for the active env), `activeProjectId?`, `secretEnvKeys?`. Specs always go to `<workspace>/exports` and always wrap each step in `test.step` — neither is configurable.
 - **`ReplayToNodePayload`** — `nodes`, `targetNodeId`, `speed`, `baseURL?`, `profileVars?`, `activeProfileId?`, `activeEnvironmentId?`, `envVars?`, `activeProjectId?`
-- **`LocatorOption` / `LocatorPickPayload`** — Cell-vs-Row locator alternatives for repeated table/list items
+- **`LocatorOption`** — one Cell-vs-Row locator alternative for repeated table/list items
 - **`ActionUpdatedPayload`** — `{ actionId, updates: Partial<Action> }` — retroactively patches an already-captured action (used when a popup arrives after its triggering click was emitted)
 
 ### IPC channels (`src/shared/types.ts` → `IPC_CHANNELS`)
 
-**Renderer → Main (31):** `BROWSER_LAUNCH`, `BROWSER_CLOSE`, `RECORDING_START`, `RECORDING_STOP`, `REPLAY_TO_NODE`, `REPLAY_STOP`, `FLOW_SAVE` (accepts `touch?: boolean`), `FLOW_LOAD`, `FLOW_LIST`, `FLOW_DELETE`, `FLOW_GET` (one flow JSON by ID), `FLOW_CHECK_CYCLE` (validate adding a callFlow won't create a circular reference — recursively walks the sub-flow's callFlow graph), `EXPORT_SCRIPTS`, `RUN_TESTS`, `SHOW_REPORT` (bundled CLI `show-report`; kills any process on port 9323 first), `PROJECT_SAVE`, `PROJECT_LOAD`, `PROJECT_LIST`, `PROJECT_DELETE`, `START_ASSERTION_PICK`, `LOCATOR_PICK_RESOLVED`, `PICK_FILES` (native open dialog; copies picks into `fixtures/` and returns their stored paths), `NORMALIZE_PATHS` (rewrite absolute paths as workspace-relative), `WORKSPACE_GET`, `WORKSPACE_PICK` (native folder dialog → validate → scaffold → open), `WORKSPACE_SET` (open a remembered path), `WORKSPACE_FORGET`, `WORKSPACE_REVEAL` (`shell.openPath`), `BROWSER_CHECK`, `BROWSER_INSTALL` (`playwright install chromium`, output over `TEST_OUTPUT`)
+**Renderer → Main (32):** `RECORDING_START`, `RECORDING_STOP`, `REPLAY_TO_NODE`, `FLOW_SAVE` (accepts `touch?: boolean`), `FLOW_LOAD`, `FLOW_LIST`, `FLOW_DELETE`, `FLOW_GET` (one flow JSON by ID), `FLOW_CHECK_CYCLE` (validate adding a callFlow won't create a circular reference — recursively walks the sub-flow's callFlow graph), `EXPORT_SCRIPTS`, `RUN_TESTS`, `SHOW_REPORT` (bundled CLI `show-report`; kills any process on port 9323 first), `PROJECT_SAVE`, `PROJECT_LOAD`, `PROJECT_LIST`, `PROJECT_DELETE`, `PICK_FILES` (native open dialog; copies picks into `fixtures/` and returns their stored paths), `NORMALIZE_PATHS` (rewrite absolute paths as workspace-relative), `WORKSPACE_GET` (also reports `hasChromium` — there is no separate browser-check channel), `WORKSPACE_PICK` (native folder dialog → validate → scaffold → open), `WORKSPACE_SET` (open a remembered path), `WORKSPACE_FORGET`, `WORKSPACE_REVEAL` (`shell.openPath`), `BROWSER_INSTALL` (`playwright install chromium`, output over `TEST_OUTPUT`), `VAULT_STATUS`, `VAULT_SETUP`, `VAULT_UNLOCK`, `VAULT_LOCK`, `VAULT_CHANGE_PASSPHRASE`, `SECRET_ENCRYPT`, `SECRET_REVEAL`, `SECRETS_FILE_WRITE`
 
-**Main → Renderer (12):** `ACTION_CAPTURED`, `ACTION_UPDATED` (retro-patch fields of an already-emitted action — e.g. stamping `opensPage` when the popup arrives late), `ACTION_REMOVED` (un-record a node — the click that opened a file chooser), `REPLAY_NODE_START`, `REPLAY_NODE_COMPLETE`, `REPLAY_FINISHED`, `REPLAY_ERROR`, `TEST_OUTPUT`, `TEST_FINISHED`, `ASSERTION_PICK_CANCELLED`, `WORKSPACE_RELOAD` (window regained focus — the workspace may have changed on disk), `LOCATOR_PICK_NEEDED` (legacy — the locator picker now renders in-browser)
+There is **no browser lifecycle channel** (`BROWSER_LAUNCH` / `BROWSER_CLOSE`), **no replay-stop channel**, and **no assertion-pick or locator-pick channel**: the browser is launched implicitly by `RECORDING_START` / `REPLAY_TO_NODE`, replay cannot currently be cancelled (see A2 in the cleanup backlog), and both pickers now run entirely in-browser.
+
+**Main → Renderer (10):** `ACTION_CAPTURED`, `ACTION_UPDATED` (retro-patch fields of an already-emitted action — e.g. stamping `opensPage` when the popup arrives late), `ACTION_REMOVED` (un-record a node — the click that opened a file chooser), `REPLAY_NODE_START`, `REPLAY_NODE_COMPLETE`, `REPLAY_FINISHED`, `REPLAY_ERROR`, `TEST_OUTPUT`, `TEST_FINISHED`, `WORKSPACE_RELOAD` (window regained focus — the workspace may have changed on disk)
 
 ### Recording pipeline
 
@@ -135,7 +137,7 @@ The page only ever sees `File.name`, never a path — but the browser process kn
 
 ### In-browser locator picker (Cell vs Row)
 
-When a recorded click hits a repeated table/list item with `alternativeLocators`, `CodegenCapture.showLocatorPicker()` pauses recording and renders a "選擇 Locator 方式" modal **inside the recorded browser** (`getLocatorPickerScript`). On confirm, `__flowtest_locator_resolved(index)` finalizes the Action with the chosen locator. The renderer-side `LocatorPickerModal` component / `LOCATOR_PICK_NEEDED` channel / `pendingLocatorPick` store field are **legacy** (the picker is fully in-browser now).
+When a recorded click hits a repeated table/list item with `alternativeLocators`, `CodegenCapture.showLocatorPicker()` pauses recording and renders a "選擇 Locator 方式" modal **inside the recorded browser** (`getLocatorPickerScript`). On confirm, `__flowtest_locator_resolved(index)` finalizes the Action with the chosen locator. This path uses no IPC and no renderer modal — the former `LocatorPickerModal` / `LOCATOR_PICK_NEEDED` / `LOCATOR_PICK_RESOLVED` slice has been removed.
 
 ### Assertion-picking pipeline
 
@@ -144,11 +146,12 @@ Assertion picking is driven by an **in-browser dock** injected during recording 
 1. A fixed dock on the right edge of the recorded browser shows 👁 可見 / T 文字 / = 值 buttons (dock id `__ft_assert_toolbar`, so its clicks are blacklisted from recording)
 2. Clicking a button runs `window.__ft_startAssertPick(type)` — a transparent overlay highlights the element under the cursor and shows its locator in a tooltip
 3. On click, `__flowtest_assert_report` emits an assertion action (`assertVisible` / `assertText` / `assertValue`) via `ACTION_CAPTURED`; Escape cancels via `__flowtest_assert_cancel`
-4. The legacy `START_ASSERTION_PICK` IPC path still exists and re-triggers the same in-page overlay
+
+The dock is the only entry point — the old `START_ASSERTION_PICK` IPC path has been removed. `__flowtest_assert_cancel` is still registered as a no-op binding: the in-page Escape handler calls it, and the dock restores its own UI, so the Node side has nothing to do but must not be missing.
 
 ### Replay pipeline
 
-`Replayer.replayToNode()` walks `parentId` pointers from the target node up to the root (cycle-guarded) to build an ordered path, then executes each `Action` sequentially. A yellow cursor-highlight dot is injected (`getCursorHighlightScript`). Assertions support `text`, `visible`, `url`, `count` with a 10 s timeout. Each step fires `REPLAY_NODE_START` / `REPLAY_NODE_COMPLETE` to drive canvas status badges.
+`Replayer.replayToNode()` walks `parentId` pointers from the target node up to the root (cycle-guarded) to build an ordered path, then executes each `Action` sequentially. A yellow cursor-highlight dot is injected (`getCursorHighlightScript`). `assertVisible` / `assertText` / `assertValue` are ordinary action types executed by `executeAction` via Playwright's `expect` (`toBeVisible` / `toContainText` / `toHaveValue`, 10 s timeout) — semantics deliberately mirror `ScriptExporter.actionToCode` so replay and the exported spec agree. Each step fires `REPLAY_NODE_START` / `REPLAY_NODE_COMPLETE` to drive canvas status badges.
 
 Each action resolves its target through two hops: `pageFor(action)` picks the page by `pageAlias` (relaunching a closed one is not possible — a missing page is an error), then `scopeFor(action)` folds `framePath` into `.contentFrame()` hops. `getLocator()` evaluates `locatorExpr` against that scope with `new Function`, falling back to `scope.locator(selector)`. Clicks honour `button` / `modifiers` / `clickCount` (≥2 → `dblclick`); `selectOption` prefers `values[]`; `press` uses `keyboard.press()` when there is no locator; `code` nodes run through `AsyncFunction` with `(page, expect, vars)`.
 
@@ -164,7 +167,7 @@ When the user picks "從此節點分支錄製" from node N's context menu:
 
 ### Test execution pipeline
 
-1. User clicks "▶ 執行所有測試" → `RUN_TESTS` IPC (with `ExportConfig`, `useTestStep: true`)
+1. User clicks "▶ 執行所有測試" → `RUN_TESTS` IPC (with `ExportConfig`)
 2. Main runs `ScriptExporter.export()` to write `.spec.ts`, then runs the **bundled** Playwright CLI (`src/main/playwright/runner.ts`)
 3. stdout/stderr stream line-by-line via `TEST_OUTPUT` → `TestOutputModal` shows live output
 4. On exit, `TEST_FINISHED` fires. The HTML report is opened separately via `SHOW_REPORT` (`showReport()`), which kills any process on port 9323 first.
@@ -192,9 +195,9 @@ Kinds of `{{...}}` placeholders, resolved in priority order **session > profile 
 
 `resolveValue` / `resolveValueWithSession` resolve at runtime. For codegen: `valueToCodeExpr(value, profileVarKeys?)` → TS literal (profile keys become `${_ftProf_key}`); `sessionAwareValueToCodeExpr()` additionally treats session vars as bare identifiers; `locatorExprToCode()` rewrites `{{...}}` inside locator expression string arguments; `emitProfileVarDecls()` emits `const _ftProf_key = '...'`; `VARIABLE_HELPERS_CODE` injects `_ftRandomText` / `_ftRandomNumber` / `_ftRandomOneLetter` / `_ftRandomOneDigit` / `_ftTimestamp` when needed.
 
-#### Session variable hoisting in `useTestStep` mode
+#### Session variable hoisting
 
-With `useTestStep`, each action is wrapped in its own `test.step('…', async () => {…})` closure, so a `captureAs` declared with `const` in one closure is invisible to later closures. `generateSpec()` collects all `captureAs` names into `hoistedVars`, emits `let varName = ''` at the test-function scope, and passes `hoistedVars` to `actionToCode()` which then emits plain assignment (`varName = expr`) instead of `const`.
+Every action is wrapped in its own `test.step('…', async () => {…})` closure, so a `captureAs` declared with `const` in one closure is invisible to later closures. `generateSpec()` collects all `captureAs` names into `hoistedVars`, emits `let varName = ''` at the test-function scope, and passes `hoistedVars` to `actionToCode()` which then emits plain assignment (`varName = expr`) instead of `const`.
 
 #### `assertText` session-variable locator fix
 
@@ -228,6 +231,7 @@ A new flow starts with `profiles: []` (no profiles). `domain` is **not** a profi
 The workspace is deliberately git-tracked, which means every profile variable, project env var and recorded node value — passwords included — was being committed in plaintext. Marking a value **私密** (`secret: true`) stores it encrypted instead.
 
 - **`src/main/security/vault.ts`** — scrypt-derived key (N=32768, r=8, p=1) + AES-256-GCM. Ciphertext is a self-describing string, `enc:v1:<b64 iv>:<b64 ct+tag>` (`SECRET_ENVELOPE_PREFIX`), so it lives in the same `value: string` fields with no schema change. A **passphrase**, not a machine key: the workspace travels with the user's repo, so a machine-bound key would leave a teammate with undecryptable garbage. This is the ansible-vault model.
+- **Changing the passphrase is NOT atomic.** `recryptWorkspace` rewrites each flow/project to disk one at a time with no staging and no rollback, and only then commits the new metadata. A failure part-way therefore leaves the already-rewritten files under the NEW key while the verifier still expects the OLD one — those files are unrecoverable with either passphrase. The old passphrase does keep unlocking the vault, but it now decrypts only the untouched remainder. Fixing this needs staged writes plus an atomic swap (A7 in the cleanup backlog).
 - **Vault metadata** (`salt`, KDF params, `verifier`) goes in the committed `.flowtest.json` marker via a merge-write that preserves `version`. The verifier is an envelope over a fixed string; decrypting it back is how a passphrase is checked. The **key exists only in main-process memory** — `lock()` on workspace switch.
 - **The passphrase is cached in the OS keychain** — `safeStorage.encryptString` → `userData/settings.json` `vaultKeys[workspacePath]`, so it is a once-per-machine prompt. When `isEncryptionAvailable()` is false it simply isn't cached; it never falls back to plaintext.
 - **`secret` is a per-KEY attribute**, not per-value: profile keys are shared across every profile of a flow, so `commitProfileVars` applies the flag to all of them (otherwise one profile would store the key in the clear). `domain` can never be secret — it is baked into goto URLs as a literal.
@@ -250,7 +254,11 @@ Playwright has no secrets mechanism; the official pattern is `process.env` fed f
 
 ### Projects & Environments system
 
-Projects add a layer **above** flows for managing environment-specific variable values. A `Project` has named `environments` (e.g. `DEV` / `UAT` / `PRD`) plus project-level `envVars?: ProjectEnvVar[]`; a `Flow` joins a project via `projectId`. **Every flow belongs to a project**: a flow with no (or an unknown) `projectId` is treated as belonging to the reserved default project `未分類` (`DEFAULT_PROJECT_ID = '__default__'`, normalized via `?? DEFAULT_PROJECT_ID` everywhere), which cannot be deleted or renamed and is pinned to the bottom of `FlowList`.
+Projects add a layer **above** flows for managing environment-specific variable values. A `Project` has named `environments` (e.g. `DEV` / `UAT` / `PRD`) plus project-level `envVars?: ProjectEnvVar[]`; a `Flow` joins a project via `projectId`. **Every flow belongs to a project**: a flow with no `projectId` is treated as belonging to the reserved default project `未分類` (`DEFAULT_PROJECT_ID = '__default__'`), which cannot be deleted or renamed and is pinned to the bottom of `FlowList`.
+
+Two caveats the `?? DEFAULT_PROJECT_ID` idiom does **not** cover:
+- **Unknown ids are only folded in for display.** `?? DEFAULT_PROJECT_ID` catches `null`/`undefined` only. A `projectId` pointing at a deleted project is mapped to `未分類` solely by `FlowList.tsx`; everywhere else (`openFlow`, `setCurrentFlow`, `gateEnvVars`, `executeCallFlow`) it matches no project, so the flow opens with `currentProject === null` — blank environment selector, and domain substitution plus env vars silently inert. A shared `resolveProjectId(flow, knownProjects)` is the fix (A10 in the cleanup backlog).
+- **Deleting a project deletes its flows.** `deleteProject` cascade-deletes every flow whose `projectId` matches, then the project — it does not orphan them into `未分類`.
 
 - **Every project has ≥1 environment.** `createProject(name, envName='DEV', domain=DEFAULT_DOMAIN)` seeds one environment plus a `domain` env var. `未分類` is materialized on disk by `ProjectStorage.ensureDefault()` (called from `list()`/`load()`) with a `DEV` env and `domain = 'http://localhost:3000/'` — this gives its environment a **stable id**.
 - **`domain` is a reserved project env var** (`DOMAIN_ENV_KEY = 'domain'`, constants in `types.ts`): seeded into every project, **non-deletable and non-renamable** in `ProjectEnvVarModal` (rendered with a 🔒 lock). Its per-environment value drives goto-URL origin substitution in `Replayer` and `ScriptExporter` (trailing slash stripped).
@@ -274,7 +282,7 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 
 **N-level nesting:** each `Replayer` / `ScriptExporter` pass receives the *resolved sub-flow profile ID* as its own `activeProfileId`; nested callFlows resolve `subFlowProfileMapping[activeProfileId]` to chain to the next level. Resolution order: `subFlowProfileMapping[activeProfileId]` → legacy `subFlowProfileId` → first profile.
 
-**ScriptExporter** threads `activeProfileId`/`activeEnvironmentId` through `generateSpec` → `buildStepSequence` → `getSubFlowPath` recursively, calling `resolveSubFlowProfileId()` + `resolveProfileVars()` at each callFlow node. Sub-flow nodes are inlined with `inlineVars: true` — their profile var placeholders are baked into literal values at codegen time (so they don't reference the parent's `_ftProf_*`).
+**ScriptExporter** threads `activeProfileId`/`activeEnvironmentId` through `generateSpec` → `buildStepSequence` → `getSubFlowPath` recursively, calling `resolveSubFlowProfileId()` + `resolveProfile()` at each callFlow node. Sub-flow nodes are inlined with `inlineVars: true` — their profile var placeholders are baked into literal values at codegen time (so they don't reference the parent's `_ftProf_*`).
 
 **Migration:** legacy `callFlow` nodes with `subFlowProfileId` but no mapping are auto-migrated in memory on load (`migrateCallFlowProfiles()`). `addProfile`/`deleteProfile` keep all callFlow mappings in sync.
 
@@ -298,7 +306,9 @@ A `callFlow` action node embeds another flow inline. Two ways to create one:
 
 **Undo/redo covers the canvas node graph and nothing else.** `flowStore` keeps `past[]` / `future[]` of `Flow` snapshots (cap `HISTORY_LIMIT = 50`). A single `useFlowStore.subscribe` records the previous `currentFlow` whenever an edit replaces it with a new object of the same id — skipping when `isTimeTraveling`, `historySuppressed()`, a flow switch, or live recording/replay.
 
-**Covered:** add / delete node / delete subtree / delete-nodes-only, connect + disconnect edges, disconnect node, create + ungroup group, `relayoutAll`, insert/append callFlow, extract sub-flow, PropertyPanel commits.
+**Covered:** add / delete node / delete subtree / delete-nodes-only, connect + disconnect edges, disconnect node, create + ungroup group, `relayoutAll`, insert/append callFlow, PropertyPanel commits.
+
+**NOT covered — extract sub-flow.** `FlowCanvas.handleExtractConfirm` goes through `setCurrentFlow`, which resets `past`/`future`, so extracting is not undoable *and wipes the whole editing history*. Making it undoable is a one-line change in principle (end with a plain `set({ currentFlow })` like `insertCallFlowBefore` does), but it first needs a decision about the sub-flow file already written to disk: a Ctrl+Z would restore the parent graph and leave an orphan flow with `refCount: 0` in `FlowList`.
 
 **Deliberately NOT covered — off-canvas configuration.** A Ctrl+Z here would silently revert data the user cannot see (the commit actions are atomic, so a single press would restore a *whole* variable table). These are protected by delete confirmations instead:
 - **Session variables** (`captureAs`) — suppressed at both call sites, `SessionVarList` 🗑 *and* the canvas context menu, so the same variable behaves identically wherever it's touched.
@@ -324,7 +334,7 @@ Every **text / form field** edits component-local `useState` and reaches the sto
 - **Saving re-reads the store.** `PropertyPanel`'s save pulls the node fresh from `useFlowStore.getState()` before `updateNode`, so recorder-written fields (`opensPage`, `pageAlias`, `framePath`, `clickCount`…) are never clobbered by what the panel is holding.
 - **Row identity** — table rows carry `_rid` (stable client id; also the key of ProfileEditorModal's value-input caret map) plus `_origIndex` (ProfileEditorModal) / `_origKey` (ProjectEnvVarModal), which `commitProfileVars` / `commitProjectEnvVars` need to tell added rows from edited ones and to carry other environments' values across a rename. One 儲存 commits the whole table.
 - **Validation runs in the save handler** — empty key / duplicate key (both tables) and "`domain` must survive" (project env vars); failures set `error` and abort the write.
-- **`src/renderer/stores/confirmStore.ts` + `components/common/ConfirmDialog.tsx`** — `confirm()` raises an app-styled dialog from `<ConfirmHost />` (mounted once in `App.tsx`, `zIndex 4000` so it can appear above modals). Replaces `window.confirm` entirely. Danger dialogs put Enter on 取消.
+- **`src/renderer/stores/confirmStore.ts` + `components/common/ConfirmDialog.tsx`** — `confirm()` raises an app-styled dialog from `<ConfirmHost />` (mounted once in `App.tsx`, `zIndex 4000` so it can appear above modals). Replaces `window.confirm` entirely (zero remaining call sites). Five native `alert()` calls do remain and are not yet migrated — `FlowCanvas.tsx` (extraction / grouping validation failures) and `Toolbar.tsx` (export success and the two export failures). Danger dialogs put Enter on 取消.
 - **Destructive actions all confirm** — delete flow / project / environment / profile / profile variable / project env var / session variable, and duplicate project. **Deliberate exception: deleting a node (or node + subtree) does not confirm** — it's a high-frequency editing gesture and Ctrl+Z restores it. Ungroup likewise (destroys no node data, and is undoable).
 
 ### The workspace (`src/main/storage/workspace.ts`)
@@ -357,13 +367,12 @@ Every **text / form field** edits component-local `useState` and reaches the sto
 | File | Role |
 |------|------|
 | `src/main/index.ts` | Electron entry — creates BrowserWindow, registers IPC handlers, opens external links in default browser |
-| `src/main/ipc/ipcHandlers.ts` | Central orchestrator — all 31 Renderer→Main channel handlers; holds singleton BrowserController/Recorder/Replayer; `hasCallFlowCycle()` + `killProcessOnPort()` |
+| `src/main/ipc/ipcHandlers.ts` | Central orchestrator — all 32 Renderer→Main channel handlers; holds singleton BrowserController/Recorder (the Replayer is handler-local); `hasCallFlowCycle()` + `killProcessOnPort()` |
 | `src/main/playwright/browserController.ts` | Wraps playwright-core chromium: launch, context, page, auto-cleanup on disconnect |
 | `src/main/playwright/recorder.ts` | Thin wrapper around CodegenCapture; tracks recording state; pause/resume; assertion-pick entry |
 | `src/main/playwright/codegenCapture.ts` | Multi-page recorder: injects scripts (initScript + DOM capture + cursor + assertion dock, top-frame UI via `topFrameOnly`), exposes report/assert/locator-resolved functions, filters navigation, buffers input clicks + dblclick merge, assigns page aliases & `opensPage` (incl. `ACTION_UPDATED` retro-patch), builds iframe `framePath` chains, imports upload paths over CDP, drives in-browser locator picker |
-| `src/main/playwright/actionCapture.ts` | Single-page variant of CodegenCapture (supports stop/restart without re-injection; not active in main flow) |
 | `src/main/playwright/captureShared.ts` | Shared utilities: extracts InjectedScript from coreBundle.js, DOM event capture (blacklist, Shadow DOM-aware), locator builder, nav-suppression logic, assertion dock + pick overlay scripts, in-browser locator-picker script, cursor highlight, `buildAction` |
-| `src/main/playwright/replayer.ts` | Action/assertion execution; parentId-chain path traversal; fires REPLAY_NODE_* events; constructor `(page, baseURL, profileVars?, activeProfileId?, activeEnvironmentId?, envVars?, activeProjectId?, sharedPages?)`; `pageFor`/`scopeFor` resolve `pageAlias` + `framePath`; `substituteOrigin` swaps goto origin for the project env var `domain`; `buildCodeVars` backs `code` nodes; resolves subFlowProfileMapping + envValues for callFlow at any depth |
+| `src/main/playwright/replayer.ts` | Action execution (incl. the three assert types); parentId-chain path traversal; fires REPLAY_NODE_* events; constructor `(page, baseURL, profileVars?, activeProfileId?, activeEnvironmentId?, envVars?, activeProjectId?, sharedPages?)`; `pageFor`/`scopeFor` resolve `pageAlias` + `framePath`; `substituteOrigin` swaps goto origin for the project env var `domain`; `buildCodeVars` backs `code` nodes; resolves subFlowProfileMapping + envValues for callFlow at any depth |
 | `src/main/security/vault.ts` | **Private data**: scrypt + AES-256-GCM over an `enc:v1:iv:ct` envelope; `load`/`setup`/`unlock`/`lock`/`changePassphrase`, `encrypt`/`decrypt`/`decryptIfNeeded`/`decryptMap`/`isCiphertext`; vault meta merge-written into `.flowtest.json`, passphrase cached via `safeStorage` in userData |
 | `src/renderer/hooks/useVault.ts` | `ensureUsable` (opens setup/unlock as needed before writing a private value), `promptUnlock`, `lock`, state helpers |
 | `src/renderer/components/Vault/VaultModal.tsx` / `VaultHost.tsx` | One dialog for setup / unlock / change-passphrase; the host is mounted once in `App.tsx` so a blocked replay or export can raise it |
@@ -373,9 +382,9 @@ Every **text / form field** edits component-local `useState` and reaches the sto
 | `src/main/playwright/runner.ts` | Bundled Playwright CLI: `resolvePlaywrightCli()` (asar-unpacked path + version + `nodePath`), `runPlaywright()` (spawns `process.execPath` with `ELECTRON_RUN_AS_NODE` + `NODE_PATH` + pinned HTML report dir) |
 | `src/main/playwright/browserCheck.ts` | `hasChromium()` — existence scan of `ms-playwright/chromium*`, never a revision comparison; `isMissingBrowserError()` for reactive install prompts |
 | `src/main/storage/flowStorage.ts` | Flow CRUD; `list()` computes `refCount`; sorts by updatedAt; `save(flow, { touch })` |
-| `src/main/storage/fixtureStorage.ts` | Upload fixtures: `importFile()` (copy into `fixtures/`, content-hash suffix on name collision), `toAbsolute()`, `normalizeStoredPath()` (absolute → workspace-relative, copying in from outside); re-exports `dataRoot` from workspace.ts |
+| `src/main/storage/fixtureStorage.ts` | Upload fixtures: `importFile()` (copy into `fixtures/`, content-hash suffix on name collision), `toAbsolute()`, `normalizeStoredPath()` (absolute → workspace-relative, copying in from outside) |
 | `src/main/storage/projectStorage.ts` | Project CRUD under `projects/`; `ensureDefault()` materializes the reserved `未分類` project (DEV env + `domain`) with a stable env id; `delete()` protects `__default__` |
-| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` / `-helpers.ts` codegen; emits `_ftProf_*` decls; bakes each flow's active-env `domain` literal into matching gotos (`resolveFlowDomain`, per-step `domain`); threads activeProfileId/activeEnvironmentId/envVars/activeProjectId through recursive sub-flow expansion; hoists captureAs vars in useTestStep mode; `filter({ hasText })` for session-var assertText; emits `waitForEvent('popup')` for `opensPage`, `.contentFrame()` chains for `framePath`, `dblclick` for `clickCount>=2`, and a `const vars = {…}` preamble for `code` nodes |
+| `src/main/storage/scriptExporter.ts` | Path computation + `.spec.ts` codegen; emits `_ftProf_*` decls; bakes each flow's active-env `domain` literal into matching gotos (`resolveFlowDomain`, per-step `domain`); threads activeProfileId/activeEnvironmentId/envVars/activeProjectId through recursive sub-flow expansion; hoists captureAs + popup-alias vars out of the per-step `test.step` closures; `filter({ hasText })` for session-var assertText; emits `waitForEvent('popup')` for `opensPage`, `.contentFrame()` chains for `framePath`, `dblclick` for `clickCount>=2`, and a `const vars = {…}` preamble for `code` nodes |
 | `src/shared/types.ts` | All shared types + `IPC_CHANNELS`; `isCallFlowAction` guard; `REPLAY_SPEED_MS`; `DEFAULT_PROJECT_ID`/`DEFAULT_PROJECT_NAME`/`DOMAIN_ENV_KEY`/`DEFAULT_ENV_NAME`/`DEFAULT_DOMAIN` |
 | `src/shared/variableResolver.ts` | Variable system: 5 built-ins, `flattenProjectEnvVars`, `resolveValue(WithSession)`, `valueToCodeExpr`, `sessionAwareValueToCodeExpr`, `locatorExprToCode`, `emitProfileVarDecls` / `emitEnvVarDecls` (`_ftProf_` / `_ftEnv_` prefixes), `VARIABLE_HELPERS_CODE` |
 | `src/preload/index.ts` | contextBridge — exposes typed `window.electronAPI` (incl. project + workspace + browser-install + report + locator-pick wrappers) |
@@ -404,14 +413,12 @@ Every **text / form field** edits component-local `useState` and reaches the sto
 | `src/renderer/components/ProjectEnvVar/ProjectEnvVarList.tsx` | Sidebar: active project's env vars resolved for the active environment; click to copy `{{key}}` |
 | `src/renderer/components/AddNodeModal/AddNodeModal.tsx` | 加入節點 dialog — code editor (`page` / `expect` / `vars` in scope) with a click-to-copy list of every available variable grouped by origin |
 | `src/renderer/components/CallFlowModal/CallFlowModal.tsx` | 2–3 step modal to embed a sub-flow: select flow (cycle-checked) → exit node → profile mapping |
-| `src/renderer/components/LocatorPickerModal/LocatorPickerModal.tsx` | **Legacy** — Cell-vs-Row picker (now rendered in-browser by CodegenCapture) |
 | `src/renderer/components/VariableList/VariableList.tsx` | Sidebar: 5 built-in variables; click to copy |
 | `src/renderer/components/ProfileVarList/ProfileVarList.tsx` | Sidebar: active profile's variables (amber); click to copy `{{key}}` |
 | `src/renderer/components/SessionVarList/SessionVarList.tsx` | Sidebar: session variables from `captureAs` nodes; click to copy, trash to delete |
-| `src/renderer/hooks/usePlaywrightEvents.ts` | IPC event subscriptions: ACTION_CAPTURED, ACTION_UPDATED, ACTION_REMOVED, REPLAY_NODE_*, REPLAY_FINISHED/ERROR, ASSERTION_PICK_CANCELLED, LOCATOR_PICK_NEEDED, WORKSPACE_RELOAD; owns `reloadFromDisk()` |
+| `src/renderer/hooks/usePlaywrightEvents.ts` | IPC event subscriptions: ACTION_CAPTURED, ACTION_UPDATED, ACTION_REMOVED, REPLAY_NODE_*, REPLAY_FINISHED/ERROR, WORKSPACE_RELOAD; owns `reloadFromDisk()` |
 | `src/renderer/hooks/usePlaywright.ts` | IPC invocation wrappers: startRecording (navigates to the active env's `domain`, persists it as `flow.baseURL`), startBranchRecording, stopRecording, replayToNode (builds env-aware profileVars + envVars) |
 | `src/renderer/hooks/useUndoRedo.ts` | Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z keyboard shortcuts |
-| `src/renderer/hooks/useRecording.ts` | Branch-recording state helpers |
 | `src/renderer/hooks/useFlowStore.ts` | `useFlowManager`: refreshFlowList/refreshProjectList, openFlow (+ loads project), newFlow, deleteCurrentFlow |
 | `src/renderer/utils/treeLayout.ts` | Tree layout: `computeTreeLayout`, `computeAllRootsLayout`, sizing constants, `SizeOf` |
 | `src/renderer/utils/groups.ts` | Group geometry + `computeGroupAwareLayout` |
@@ -420,3 +427,4 @@ Every **text / form field** edits component-local `useState` and reaches the sto
 | `electron.vite.config.ts` | Build config for all three bundles + path aliases |
 | `playwright.config.ts` | Runner config **template** — `scaffold()` writes an equivalent (plus `.flowtest/` output dirs) into each workspace, which is what runs get pointed at via `--config`. The copy in this repo only applies when the repo root is itself opened as a workspace. |
 | `package.json#build` | Installer config — the sole electron-builder source (`read-config-file` returns `package.json.build` when present and never reads `electron-builder.yml`, so a separate yml would be dead config). Ships + `asarUnpack`s `@playwright/test` / `playwright` / `playwright-core`. |
+| `docs/archive/prd-flowtest.md` | **Historical only** — the pre-implementation PRD. Superseded by this file and contradicted by it in several places; do not implement from it. |

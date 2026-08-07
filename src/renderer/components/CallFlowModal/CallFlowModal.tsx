@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import type { Action, Flow, FlowNode } from '@shared/types'
 import { SECRET_MASK } from '@shared/types'
@@ -51,7 +51,8 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
 
   useEffect(() => {
     if (preselectedFlowId) handleSelectFlow(preselectedFlowId)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    // Mount-only: the preselection is an initial value, not something to re-apply.
+  }, [])
 
   const handleSelectFlow = async (flowId: string) => {
     setCycleError(null)

@@ -1,3 +1,16 @@
+> **已歸檔 — 歷史設計文件，已被實作取代。**
+>
+> 這份 PRD 寫於實作之前，內容已有多處被實作推翻，例如：
+> - 文中的 `Assertion` / `Action.assertion` 模型已移除 —— 斷言現在是一級的
+>   `assertVisible` / `assertText` / `assertValue` action type。
+> - `ExportConfig` 已不再有 `outputDir` / `helperFunctions` / `useTestStep`。
+> - 單頁錄製器 `ActionCapture`、`LocatorPickerModal` 皆已刪除。
+>
+> **現行架構請看 [CLAUDE.md](../../CLAUDE.md)，不要照這份文件實作。**
+> 保留它只是為了記錄最初的產品意圖。
+
+---
+
 # PRD：FlowTest — 視覺化 Playwright 錄製與執行工具
 
 ## 1. 產品概述

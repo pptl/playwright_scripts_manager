@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment, LocatorPickPayload } from '../../shared/types'
+import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, Project, ProjectEnvironment } from '../../shared/types'
 import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN, DOMAIN_ENV_KEY, isCallFlowAction } from '../../shared/types'
 import { computeGroupAwareLayout } from '../utils/groups'
 
@@ -120,10 +120,6 @@ interface FlowStore {
   setIsRecording: (v: boolean) => void
   setIsReplaying: (v: boolean) => void
   setReplaySpeed: (ms: number) => void
-  isPickingAssertion: boolean
-  setIsPickingAssertion: (v: boolean) => void
-  pendingLocatorPick: LocatorPickPayload | null
-  setPendingLocatorPick: (payload: LocatorPickPayload | null) => void
 
   // Environment profiles
   /** ID of the currently active profile; null = no active profile (no substitution) */
@@ -191,7 +187,8 @@ interface FlowStore {
 
 /** Migrate legacy callFlow actions that have subFlowProfileId but no subFlowProfileMapping.
  *  Creates a mapping where every current parent profile maps to the same subFlowProfileId.
- *  Applied in-memory only (no auto-save), consistent with migrateDomainsToProfiles. */
+ *  Applied in-memory only (no auto-save). Kept because subFlowProfileId is still the
+ *  runtime fallback in Replayer/ScriptExporter, so legacy nodes must reach the mapping UI. */
 function migrateCallFlowProfiles(flow: Flow): Flow {
   const profiles = flow.profiles ?? []
   const needsMigration = flow.nodes.some(
@@ -214,18 +211,6 @@ function migrateCallFlowProfiles(flow: Flow): Flow {
   return { ...flow, nodes: updatedNodes }
 }
 
-/** Migrate legacy domains[] field to profiles[] in memory (no auto-save). */
-function migrateDomainsToProfiles(flow: Flow): FlowProfile[] {
-  if (flow.profiles && flow.profiles.length > 0) return flow.profiles
-  if (flow.domains && flow.domains.length > 0) {
-    return flow.domains.map((origin, i) => ({
-      id: uuidv4(),
-      name: i === 0 ? '錄製' : origin,
-      vars: [{ key: 'domain', value: origin }],
-    }))
-  }
-  return []
-}
 
 /** Apply a state change without recording an undo entry. Used by actions that are pure
  *  view state (group collapse), automatic bookkeeping (one-time layout materialization),
@@ -251,8 +236,6 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   replaySpeed: 500,
   past: [],
   future: [],
-  isPickingAssertion: false,
-  pendingLocatorPick: null,
   activeProfileId: null,
   projects: [],
   currentProject: null,
@@ -285,11 +268,11 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       })
       return
     }
-    // Migrate old flows that have domains[] but no profiles[]
-    const profiles = migrateDomainsToProfiles(flow)
-    const withDomainsMigrated = profiles !== flow.profiles ? { ...flow, profiles } : flow
-    // Migrate callFlow nodes with static subFlowProfileId to per-profile mapping
-    const migratedFlow = migrateCallFlowProfiles(withDomainsMigrated)
+    const profiles = flow.profiles ?? []
+    // Migrate callFlow nodes with static subFlowProfileId to per-profile mapping.
+    // Pass `flow` through untouched — spreading a defaulted `profiles: []` onto a flow
+    // that legitimately has none would materialize the empty array and get autosaved.
+    const migratedFlow = migrateCallFlowProfiles(flow)
     // Clear project context if the new flow belongs to a different project
     // (project loading happens async in useFlowStore.openFlow after setCurrentFlow)
     const { currentProject } = get()
@@ -734,8 +717,6 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setIsRecording: (v) => set({ isRecording: v }),
   setIsReplaying: (v) => set({ isReplaying: v }),
   setReplaySpeed: (ms) => set({ replaySpeed: ms }),
-  setIsPickingAssertion: (v) => set({ isPickingAssertion: v }),
-  setPendingLocatorPick: (payload) => set({ pendingLocatorPick: payload }),
 
   setActiveProfile: (id) => set({ activeProfileId: id }),
 
@@ -809,7 +790,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     // Remove the deleted profile ID from all callFlow node mappings
     const updatedNodes = flow.nodes.map((n) => {
       if (n.action.type === 'callFlow' && n.action.subFlowProfileMapping && id in n.action.subFlowProfileMapping) {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        // `_removed` exists only to omit that key from `rest` — it is never read.
         const { [id]: _removed, ...rest } = n.action.subFlowProfileMapping
         return { ...n, action: { ...n.action, subFlowProfileMapping: rest } }
       }

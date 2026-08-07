@@ -1,13 +1,17 @@
 .DS_Store
 node_modules/
+*.local
+
+# Build output (electron-vite emits to out/)
+out/
 dist-electron/
 release/
-*.local
+
+# Playwright / FlowTest run artifacts.
+# The repo root has been used as a workspace, and its playwright.config.ts points
+# testDir at ./exports — so generated specs and run output land here. .flowtest/
+# also holds secrets.env, which is PLAINTEXT and must never be committed.
+.flowtest/
+exports/
 test-results/
 playwright-report/
-exports/*
-!exports/.gitkeep
-flows/*
-!flows/.gitkeep
-projects/*
-!projects/.gitkeep

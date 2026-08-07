@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { BUILT_IN_VARIABLES } from '@shared/variableResolver'
 
 export function VariableList() {

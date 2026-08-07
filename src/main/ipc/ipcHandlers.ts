@@ -9,7 +9,6 @@ import type {
   FlowSavePayload,
   FlowLoadPayload,
   RecordingStartPayload,
-  ActionType,
   ProjectSavePayload,
   ProjectLoadPayload,
   WorkspaceInfo,
@@ -42,7 +41,6 @@ import {
 
 let browserController: BrowserController | null = null
 let recorder: Recorder | null = null
-let replayer: Replayer | null = null
 
 export function registerIpcHandlers(win: BrowserWindow): void {
   /** Copy files into fixtures/, returning the data-root-relative paths stored on Actions. */
@@ -65,19 +63,6 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.NORMALIZE_PATHS, async (_e, paths: string[]) =>
     await Promise.all(paths.map((p) => FixtureStorage.normalizeStoredPath(p))),
   )
-
-  // ── Browser ──────────────────────────────────────────────
-  ipcMain.handle(IPC_CHANNELS.BROWSER_LAUNCH, async () => {
-    browserController = new BrowserController()
-    await browserController.launch()
-  })
-
-  ipcMain.handle(IPC_CHANNELS.BROWSER_CLOSE, async () => {
-    await browserController?.close()
-    browserController = null
-    recorder = null
-    replayer = null
-  })
 
   // ── Recording ────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.RECORDING_START, async (_e, payload: RecordingStartPayload) => {
@@ -138,18 +123,6 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     recorder = null
   })
 
-  ipcMain.handle(IPC_CHANNELS.START_ASSERTION_PICK, async (_e, assertionType: ActionType) => {
-    if (!recorder) return
-    await recorder.startAssertionPick(
-      assertionType as 'assertVisible' | 'assertText' | 'assertValue',
-      () => win.webContents.send(IPC_CHANNELS.ASSERTION_PICK_CANCELLED),
-    )
-  })
-
-  ipcMain.handle(IPC_CHANNELS.LOCATOR_PICK_RESOLVED, () => {
-    recorder?.resume()
-  })
-
   // ── Replay ───────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.REPLAY_TO_NODE, async (_e, payload: ReplayToNodePayload) => {
     try {
@@ -160,7 +133,9 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       }
       const page = browserController.getPage()
       const { profileVars, envVars } = decryptConfig(payload)
-      replayer = new Replayer(page, payload.baseURL, profileVars, payload.activeProfileId, payload.activeEnvironmentId, envVars, payload.activeProjectId)
+      // Handler-local: nothing outside this call needs it, and holding it module-level
+      // would retain the finished replay's Page and session vars until the next run.
+      const replayer = new Replayer(page, payload.baseURL, profileVars, payload.activeProfileId, payload.activeEnvironmentId, envVars, payload.activeProjectId)
 
       await replayer.replayToNode(
         payload.nodes,
@@ -176,9 +151,6 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     }
   })
 
-  ipcMain.handle(IPC_CHANNELS.REPLAY_STOP, async () => {
-    replayer = null
-  })
 
   // ── Storage ──────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.FLOW_SAVE, async (_e, payload: FlowSavePayload) => {
@@ -299,8 +271,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   })
 
   // ── Browsers ─────────────────────────────────────────────
-  ipcMain.handle(IPC_CHANNELS.BROWSER_CHECK, async () => await hasChromium())
-
+  // No separate "is Chromium installed?" channel — WORKSPACE_GET already reports it.
   ipcMain.handle(IPC_CHANNELS.BROWSER_INSTALL, async () => {
     const cli = resolvePlaywrightCli()
     if (!cli) {

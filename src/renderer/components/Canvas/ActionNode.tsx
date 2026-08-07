@@ -1,4 +1,4 @@
-import React, { memo } from 'react'
+import { memo } from 'react'
 import { Handle, Position, NodeProps } from 'reactflow'
 import type { FlowNode } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
@@ -98,20 +98,6 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
         >
           {action.type}
         </span>
-        {action.assertion && (
-          <span
-            title="Has assertion"
-            style={{
-              position: 'absolute',
-              top: 4,
-              right: 6,
-              fontSize: 10,
-              color: '#22c55e',
-            }}
-          >
-            ✓
-          </span>
-        )}
       </div>
 
       <div

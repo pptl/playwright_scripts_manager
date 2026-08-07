@@ -6,14 +6,12 @@ import {
   type ActionCallback,
   type RawEvent,
   type LastInteraction,
-  type AssertPickType,
   type AssertPickResult,
   getBrowserInitScript,
   getDOMCaptureScript,
   getCursorHighlightScript,
   buildAction,
   shouldSuppressNav,
-  getAssertionPickScript,
   getAssertionToolbarScript,
   getLocatorPickerScript,
   generateAssertDescription,
@@ -51,7 +49,6 @@ export class CodegenCapture {
   private active = false
   private paused = false
   private lastInteraction: LastInteraction | null = null
-  private assertCancelCb: (() => void) | null = null
   /** One-slot action buffer. Input clicks wait for a possible fill (no timer);
    *  plain left clicks wait DBLCLICK_MERGE_MS for a possible dblclick. */
   private pendingAction: { action: Action; isInputClick: boolean; timer: ReturnType<typeof setTimeout> | null } | null = null
@@ -117,10 +114,9 @@ export class CodegenCapture {
       }
       this.emitAction(action)
     })
-    await this.context.exposeBinding('__flowtest_assert_cancel', () => {
-      // Dock restores its own UI in-page; nothing to do on the Node side.
-      this.assertCancelCb?.()
-    })
+    // The dock restores its own UI in-page (getAssertionToolbarScript's finish()), so cancel
+    // needs nothing here — but the binding must exist or the in-page call resolves to undefined.
+    await this.context.exposeBinding('__flowtest_assert_cancel', () => {})
 
     // Resolves the in-browser "選擇 Locator 方式" picker (Cell vs Row).
     await this.context.exposeBinding('__flowtest_locator_resolved', (_source, index: number) => {
@@ -472,17 +468,9 @@ export class CodegenCapture {
     page.evaluate(getLocatorPickerScript(alternatives)).catch(() => {})
   }
 
-  // Backward-compat entry point. The assertion dock now drives picking in-page;
-  // this re-triggers the same in-page overlay for the legacy IPC path.
-  async startAssertionPick(assertionType: AssertPickType, onCancel: () => void): Promise<void> {
-    const page = this.context.pages()[0]
-    if (!page) return
-    this.assertCancelCb = onCancel
-    await page.evaluate(getAssertionPickScript(assertionType)).catch(() => {})
-  }
 }
 
-/** Mirrors LocatorPickerModal's deriveDescription: `點擊第 N 列 (row)`. */
+/** Node description for a Row-by-nth-position pick: `點擊第 N 列 (row)`. */
 function deriveRowDescription(expr: string): string {
   const m = expr.match(/\.nth\((\d+)\)/)
   const rowNum = m ? parseInt(m[1], 10) + 1 : 1

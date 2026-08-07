@@ -144,9 +144,6 @@ export function Toolbar() {
 
   /** Everything replay / export / run needs, assembled the same way each time. */
   const exportConfig = (): ExportConfig => ({
-    outputDir: '',
-    helperFunctions: false,
-    useTestStep: true,
     profileVars: getProfileVars(),
     activeProfileId: activeProfileId ?? undefined,
     activeEnvironmentId: activeEnvironmentId ?? undefined,

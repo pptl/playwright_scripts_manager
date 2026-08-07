@@ -28,6 +28,27 @@ function getExpect(): unknown {
   return _expectFn
 }
 
+/** How long an assertion waits for the page to settle before failing. */
+const ASSERT_TIMEOUT_MS = 10_000
+
+/** Playwright's `expect`, narrowed to the locator matchers the assert action types need.
+ *  Kept in sync with ScriptExporter.actionToCode so replay and the exported spec agree. */
+type LocatorExpect = (locator: Locator) => {
+  toBeVisible(options?: { timeout?: number }): Promise<void>
+  toContainText(expected: string, options?: { timeout?: number }): Promise<void>
+  toHaveValue(expected: string, options?: { timeout?: number }): Promise<void>
+}
+
+/** getExpect() returns undefined when @playwright/test can't be resolved. Assertions are the
+ *  only replay path that hard-depends on it, so fail loudly rather than as a TypeError. */
+function requireExpect(): LocatorExpect {
+  const fn = getExpect()
+  if (typeof fn !== 'function') {
+    throw new Error('無法載入 @playwright/test 的 expect，斷言節點無法執行')
+  }
+  return fn as LocatorExpect
+}
+
 type NodeStartCallback = (nodeId: string) => void
 type NodeCompleteCallback = (nodeId: string, success: boolean, error?: string) => void
 
@@ -100,9 +121,6 @@ export class Replayer {
             await this.executeCallFlow(node.action, onNodeStart, onNodeComplete, speed)
           } else {
             await this.executeAction(node.action)
-            if (node.action.assertion) {
-              await this.executeAssertion(node.action)
-            }
           }
           onNodeComplete(node.id, true)
         } catch (err) {
@@ -204,7 +222,7 @@ export class Replayer {
     let scope: Page | FrameLocator = this.pageFor(action)
     for (const frameExpr of action.framePath ?? []) {
       const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.profileVars, this.envVars)
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      // Deliberate dynamic eval: framePath entries are locator expressions, not data.
       const fn = new Function('s', `return s.${resolved}`)
       scope = (fn(scope) as Locator).contentFrame()
     }
@@ -221,7 +239,7 @@ export class Replayer {
       try {
         // Resolve {{...}} variables before evaluating the locator expression
         const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars, this.envVars)
-        // eslint-disable-next-line @typescript-eslint/no-implied-eval
+        // Deliberate dynamic eval: locatorExpr is Playwright code, not user data.
         const fn = new Function('page', `return page.${resolved}`)
         return fn(scope) as Locator
       } catch {
@@ -341,6 +359,15 @@ export class Replayer {
       case 'wait':
         await this.getLocator(action).waitFor({ state: 'visible' })
         break
+      case 'assertVisible':
+        await requireExpect()(this.getLocator(action)).toBeVisible({ timeout: ASSERT_TIMEOUT_MS })
+        break
+      case 'assertText':
+        await requireExpect()(this.getLocator(action)).toContainText(val ?? '', { timeout: ASSERT_TIMEOUT_MS })
+        break
+      case 'assertValue':
+        await requireExpect()(this.getLocator(action)).toHaveValue(val ?? '', { timeout: ASSERT_TIMEOUT_MS })
+        break
       case 'code': {
         const fn = new AsyncFunction('page', 'expect', 'vars', action.code ?? '')
         await fn(this.pageFor(action), getExpect(), this.buildCodeVars())
@@ -372,64 +399,6 @@ export class Replayer {
       if (!(name in vars)) vars[name] = () => resolveValue(`{{${name}}}`)
     }
     return vars
-  }
-
-  private async executeAssertion(action: Action): Promise<void> {
-    const assertion = action.assertion
-    if (!assertion) return
-    const TIMEOUT = 10_000
-    const page = this.pageFor(action)
-    // Element assertions resolve inside the action's frame scope; URL stays page-level.
-    const scope = this.scopeFor(action)
-
-    switch (assertion.type) {
-      case 'text': {
-        await scope.locator(assertion.target!).waitFor({ state: 'visible', timeout: TIMEOUT })
-        const text = await scope.locator(assertion.target!).textContent({ timeout: TIMEOUT })
-        if (!text?.includes(assertion.expected)) {
-          throw new Error(
-            `Assertion failed: expected text "${assertion.expected}" in "${assertion.target}", got "${text}"`,
-          )
-        }
-        break
-      }
-      case 'visible': {
-        const visible = await scope
-          .locator(assertion.target!)
-          .isVisible()
-        if (!visible) {
-          throw new Error(`Assertion failed: "${assertion.target}" is not visible`)
-        }
-        break
-      }
-      case 'url': {
-        await page.waitForURL(new RegExp(assertion.expected), { timeout: TIMEOUT })
-        break
-      }
-      case 'count': {
-        const expected = parseInt(assertion.expected, 10)
-        if (action.framePath?.length) {
-          // FrameLocator has no waitForFunction — poll count() until match or timeout
-          const deadline = Date.now() + TIMEOUT
-          for (;;) {
-            const count = await scope.locator(assertion.target!).count()
-            if (count === expected) break
-            if (Date.now() > deadline) {
-              throw new Error(`Assertion failed: expected ${expected} of "${assertion.target}", got ${count}`)
-            }
-            await new Promise((res) => setTimeout(res, 200))
-          }
-          break
-        }
-        await page.waitForFunction(
-          ({ sel, cnt }: { sel: string; cnt: number }) =>
-            document.querySelectorAll(sel).length === cnt,
-          { sel: assertion.target!, cnt: expected },
-          { timeout: TIMEOUT },
-        )
-        break
-      }
-    }
   }
 
   private findPath(nodes: FlowNode[], targetId: string): FlowNode[] {

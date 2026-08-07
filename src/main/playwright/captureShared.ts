@@ -119,7 +119,7 @@ function extractSource3(): string {
   return vm.runInNewContext(`'${escaped}'`) as string
 }
 
-// Build once at module load; shared across CodegenCapture and ActionCapture.
+// Build once at module load and reused by every CodegenCapture.
 let _initScript: string | null = null
 
 export function getBrowserInitScript(): string {
@@ -163,7 +163,6 @@ try{
 }
 
 // Returns the DOM-side event capture script to pass to page.addInitScript().
-// Identical logic is used by both CodegenCapture and ActionCapture.
 //
 // Event filtering mirrors Playwright's RecordActionTool / JsonRecordActionTool:
 //   Click  — blacklist (only skip SELECT/OPTION/date/range/html/body), not whitelist
@@ -626,13 +625,6 @@ export function generateAssertDescription(data: AssertPickResult): string {
     case 'assertText':    return `驗證「${label}」文字包含「${data.value ?? ''}」`
     case 'assertValue':   return `驗證「${label}」值為「${data.value ?? ''}」`
   }
-}
-
-// Backward-compat entry point for the Main-process `startAssertionPick` path.
-// The overlay logic now lives in `window.__ft_startAssertPick`, defined by
-// getAssertionToolbarScript() (always injected during recording). This just invokes it.
-export function getAssertionPickScript(assertionType: AssertPickType): string {
-  return `(function(){ try { if (window.__ft_startAssertPick) window.__ft_startAssertPick(${JSON.stringify(assertionType)}); } catch(e){} })();`
 }
 
 // ── In-page assertion toolbar dock ──────────────────────────────────────────────

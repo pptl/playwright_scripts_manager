@@ -1,12 +1,10 @@
 import { promises as fs } from 'fs'
 import { createHash } from 'crypto'
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'path'
-import { dataRoot } from './workspace'
-
-export { dataRoot }
+import { getWorkspaceRoot } from './workspace'
 
 function fixturesDir(): string {
-  return join(dataRoot(), 'fixtures')
+  return join(getWorkspaceRoot(), 'fixtures')
 }
 
 /** Directory name as it appears in stored (relative) fixture paths. */
@@ -53,7 +51,7 @@ export class FixtureStorage {
    * once packaged, so this must never be left to the cwd.
    */
   static toAbsolute(stored: string): string {
-    return isAbsolute(stored) ? stored : resolve(dataRoot(), stored)
+    return isAbsolute(stored) ? stored : resolve(getWorkspaceRoot(), stored)
   }
 
   /**
@@ -72,7 +70,7 @@ export class FixtureStorage {
     const value = input.trim()
     if (!value || !isAbsolute(value)) return value
 
-    const rel = relative(dataRoot(), value)
+    const rel = relative(getWorkspaceRoot(), value)
     // Inside the workspace: no '..' escape and not a different drive.
     if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
       return rel.split(sep).join('/')

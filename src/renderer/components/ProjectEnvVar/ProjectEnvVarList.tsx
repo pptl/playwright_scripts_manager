@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 import { SecretValue } from '../common/SecretValue'
 

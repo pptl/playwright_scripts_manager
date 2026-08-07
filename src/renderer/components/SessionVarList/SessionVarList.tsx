@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
 import { isCallFlowAction } from '@shared/types'
 import type { Flow } from '@shared/types'

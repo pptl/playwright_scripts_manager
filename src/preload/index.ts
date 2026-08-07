@@ -2,7 +2,6 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from '../shared/types'
 import type {
   Action,
-  ActionType,
   Flow,
   FlowNode,
   ExportConfig,
@@ -10,16 +9,11 @@ import type {
   RecordingStartPayload,
   TestFinishedPayload,
   Project,
-  LocatorPickPayload,
   ActionUpdatedPayload,
 } from '../shared/types'
 
 // Expose a type-safe API to the renderer via window.electronAPI
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Browser
-  launchBrowser: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_LAUNCH),
-  closeBrowser: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CLOSE),
-
   // Recording
   startRecording: (payload: RecordingStartPayload) =>
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_START, payload),
@@ -28,7 +22,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Replay
   replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId }),
-  stopReplay: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_STOP),
 
   // Storage
   saveFlow: (flow: Flow, touch?: boolean) =>
@@ -46,13 +39,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, config }),
   showReport: () => ipcRenderer.invoke(IPC_CHANNELS.SHOW_REPORT),
 
-  // Assertion pick
-  startAssertionPick: (assertionType: ActionType) =>
-    ipcRenderer.invoke(IPC_CHANNELS.START_ASSERTION_PICK, assertionType),
-
-  // Locator pick
-  resolveLocatorPick: () => ipcRenderer.invoke(IPC_CHANNELS.LOCATOR_PICK_RESOLVED),
-
   // Native file picker — copies the picks into fixtures/ and returns their stored paths
   pickFiles: (multiple?: boolean) => ipcRenderer.invoke(IPC_CHANNELS.PICK_FILES, { multiple }),
   normalizePaths: (paths: string[]) => ipcRenderer.invoke(IPC_CHANNELS.NORMALIZE_PATHS, paths),
@@ -69,8 +55,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   forgetWorkspace: (dir: string) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_FORGET, dir),
   revealWorkspace: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_REVEAL),
 
-  // Browsers
-  checkBrowser: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_CHECK),
+  // Browsers — "is Chromium installed?" comes back on WorkspaceInfo, not its own channel.
   installBrowser: () => ipcRenderer.invoke(IPC_CHANNELS.BROWSER_INSTALL),
 
   // Private data — the vault key stays in the main process; the renderer holds only
@@ -138,16 +123,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_: Electron.IpcRendererEvent, payload: TestFinishedPayload) => cb(payload)
     ipcRenderer.on(IPC_CHANNELS.TEST_FINISHED, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.TEST_FINISHED, handler)
-  },
-  onAssertionPickCancelled: (cb: () => void) => {
-    const handler = () => cb()
-    ipcRenderer.on(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.ASSERTION_PICK_CANCELLED, handler)
-  },
-  onLocatorPickNeeded: (cb: (payload: LocatorPickPayload) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: LocatorPickPayload) => cb(payload)
-    ipcRenderer.on(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.LOCATOR_PICK_NEEDED, handler)
   },
   onWorkspaceReload: (cb: () => void) => {
     const handler = () => cb()

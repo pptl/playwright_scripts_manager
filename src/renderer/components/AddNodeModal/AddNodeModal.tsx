@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '@renderer/stores/flowStore'
 import { BUILT_IN_VARIABLES } from '@shared/variableResolver'

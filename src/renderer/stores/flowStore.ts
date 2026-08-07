@@ -648,7 +648,21 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       if (n.id === targetId) return { ...n, parentId: sourceId, branchLabel }
       return n
     })
-    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, updatedAt: new Date().toISOString() }
+    // If the node just given a parent was the flow's recorded root, the tree above
+    // `sourceId` is now the true root — walk up to find it (source may itself be
+    // mid-chain, e.g. reconnecting a detached branch elsewhere in the graph).
+    let rootNodeId = flow.rootNodeId
+    if (targetId === flow.rootNodeId) {
+      const nodeMap = new Map(updatedNodes.map((n) => [n.id, n]))
+      const seen = new Set<string>()
+      let cur = nodeMap.get(sourceId)
+      while (cur?.parentId && !seen.has(cur.id)) {
+        seen.add(cur.id)
+        cur = nodeMap.get(cur.parentId)
+      }
+      rootNodeId = cur?.id ?? rootNodeId
+    }
+    const updatedFlow: Flow = { ...flow, nodes: updatedNodes, rootNodeId, updatedAt: new Date().toISOString() }
     set({ currentFlow: updatedFlow })
     void persistFlow(updatedFlow)
   },

@@ -317,7 +317,20 @@ export class ScriptExporter {
       }
     }
 
-    const root = nodeMap.get(flow.rootNodeId) ?? flow.nodes.find((n) => n.parentId === null)
+    // `rootNodeId` is a cached pointer to the graph's true root (the node with
+    // parentId === null). It can go stale — e.g. connectNodes attaching a new parent
+    // in front of the current root doesn't update it — so walk up the parentId chain
+    // from it to the true root, mirroring Replayer.replayToNode's traversal, instead of
+    // trusting the cached pointer blindly.
+    let root = nodeMap.get(flow.rootNodeId)
+    if (root?.parentId) {
+      const seen = new Set<string>()
+      while (root?.parentId && !seen.has(root.id)) {
+        seen.add(root.id)
+        root = nodeMap.get(root.parentId)
+      }
+    }
+    root = root ?? flow.nodes.find((n) => n.parentId === null)
     if (root) walk(root, [], [])
 
     return paths

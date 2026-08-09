@@ -237,9 +237,19 @@ export interface FlowListItem {
   refCount: number
 }
 
-/** The resolution context a spec is generated under. Specs always go to `<workspace>/exports`
- *  and always wrap each step in `test.step` — neither is configurable. */
-export interface ExportConfig {
+/**
+ * The context every `{{...}}` placeholder is resolved under — shared verbatim by replay,
+ * branch recording, export and test runs, which is why it travels as one object rather than
+ * as five positional parameters through each layer.
+ *
+ * Assembled in exactly one place on the renderer side (`buildResolutionContext` in
+ * `renderer/utils/varMaps.ts`) and decrypted in exactly one place on the main side
+ * (`decryptContext` in `ipcHandlers.ts`).
+ *
+ * Note on export specifically: specs always go to `<workspace>/exports` and always wrap each
+ * step in `test.step` — neither is configurable, so neither appears here.
+ */
+export interface ResolutionContext {
   /** Active profile's variables as a flat map — used for replay substitution and code generation */
   profileVars?: Record<string, string>
   /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
@@ -253,7 +263,7 @@ export interface ExportConfig {
   activeProjectId?: string
   /** Which of `envVars`' keys are private. Profile-var secrecy is read off the Flow objects
    *  the exporter already loads; project env vars only ever arrive as a flat map, so their
-   *  secrecy has to be carried alongside. */
+   *  secrecy has to be carried alongside. Only code generation reads this. */
   secretEnvKeys?: string[]
 }
 
@@ -355,16 +365,7 @@ export interface ReplayToNodePayload {
   speed: number
   /** Flow's baseURL — used to derive base origin for goto URL substitution */
   baseURL?: string
-  /** Active profile's variables — used for variable resolution and goto origin substitution */
-  profileVars?: Record<string, string>
-  /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
-  activeProfileId?: string
-  /** Active project environment ID — used to resolve envValues overrides in sub-flow profiles */
-  activeEnvironmentId?: string
-  /** Active project's environment variables, flattened for the active environment (key -> value) */
-  envVars?: Record<string, string>
-  /** ID of the active project — env-var references only resolve for (sub-)flows in this project */
-  activeProjectId?: string
+  ctx?: ResolutionContext
 }
 
 export interface ReplayNodeCompletePayload {
@@ -375,7 +376,7 @@ export interface ReplayNodeCompletePayload {
 
 export interface ExportScriptsPayload {
   flow: Flow
-  config: ExportConfig
+  ctx: ResolutionContext
 }
 
 export interface FlowSavePayload {
@@ -401,16 +402,8 @@ export interface RecordingStartPayload {
   branchNodes?: FlowNode[]
   /** Speed ms per step in silent replay. Default 200. */
   replaySpeed?: number
-  /** Active profile variables for silent replay variable substitution */
-  profileVars?: Record<string, string>
-  /** ID of the currently active profile — used to resolve subFlowProfileMapping in nested sub-flows */
-  activeProfileId?: string
-  /** Active project environment ID — used to resolve envValues overrides in sub-flow profiles */
-  activeEnvironmentId?: string
-  /** Active project's environment variables, flattened for the active environment (key -> value) */
-  envVars?: Record<string, string>
-  /** ID of the active project — env-var references only resolve for (sub-)flows in this project */
-  activeProjectId?: string
+  /** Only the branch-recording silent replay reads this; a plain recording needs no context. */
+  ctx?: ResolutionContext
 }
 
 export interface ProjectSavePayload {

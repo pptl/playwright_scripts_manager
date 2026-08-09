@@ -1,9 +1,9 @@
 import { Page, Locator, FrameLocator } from 'playwright-core'
 import { createRequire } from 'module'
 import { existsSync } from 'fs'
-import type { Action, FlowNode } from '../../shared/types'
+import type { Action, FlowNode, ResolutionContext } from '../../shared/types'
 import { isCallFlowAction, DOMAIN_ENV_KEY } from '../../shared/types'
-import { resolveValueWithSession, resolveValue } from '../../shared/variableResolver'
+import { resolveValueWithSession, resolveValue, pickProfile, resolveProfileVars } from '../../shared/variableResolver'
 import { resolveProjectId } from '../../shared/projectResolution'
 import { getCursorHighlightScript } from './captureShared'
 import { FlowStorage } from '../storage/flowStorage'
@@ -68,13 +68,12 @@ export class Replayer {
   private page: Page
   private sessionVars = new Map<string, string>()
   private baseOrigin: string
-  private profileVars: Record<string, string>
-  private activeProfileId?: string
-  private activeEnvironmentId?: string
-  /** Active project's environment variables (flattened for the active environment). */
-  private envVars: Record<string, string>
-  /** Active project ID — env-var references only resolve for sub-flows in this project. */
-  private activeProjectId?: string
+  /** The resolution context this replay runs under, already decrypted by the IPC boundary.
+   *  `profileVars` / `envVars` are normalized to non-undefined by the constructor. */
+  private ctx: ResolutionContext & {
+    profileVars: Record<string, string>
+    envVars: Record<string, string>
+  }
   /** pageAlias → Page for popups opened during replay (shared with nested Replayers). */
   private pages: Map<string, Page>
   /** Pages this replay muted the file chooser on, released when the replay ends. */
@@ -84,13 +83,9 @@ export class Replayer {
    *  everywhere else (resolveProjectId). Each nested Replayer re-fetches its own on entry. */
   private knownProjectIds = new Set<string>()
 
-  constructor(page: Page, baseURL = '', profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string, sharedPages?: Map<string, Page>) {
+  constructor(page: Page, baseURL = '', ctx: ResolutionContext = {}, sharedPages?: Map<string, Page>) {
     this.page = page
-    this.profileVars = profileVars ?? {}
-    this.activeProfileId = activeProfileId
-    this.activeEnvironmentId = activeEnvironmentId
-    this.envVars = envVars ?? {}
-    this.activeProjectId = activeProjectId
+    this.ctx = { ...ctx, profileVars: ctx.profileVars ?? {}, envVars: ctx.envVars ?? {} }
     this.pages = sharedPages ?? new Map()
     this.baseOrigin = (() => { try { return new URL(baseURL).origin } catch { return '' } })()
   }
@@ -170,45 +165,36 @@ export class Replayer {
     if (!subFlow) throw new Error(`子流程 "${action.subFlowId}" 不存在`)
 
     // Resolve sub-flow profile: mapping takes precedence over legacy subFlowProfileId
-    let resolvedSubProfileId: string | null | undefined = action.subFlowProfileId ?? null
-    if (action.subFlowProfileMapping && this.activeProfileId && this.activeProfileId in action.subFlowProfileMapping) {
-      resolvedSubProfileId = action.subFlowProfileMapping[this.activeProfileId]
+    const { activeProfileId, activeEnvironmentId, activeProjectId } = this.ctx
+    let mappedSubProfileId: string | null | undefined = action.subFlowProfileId ?? null
+    if (action.subFlowProfileMapping && activeProfileId && activeProfileId in action.subFlowProfileMapping) {
+      mappedSubProfileId = action.subFlowProfileMapping[activeProfileId]
     }
 
     // Env-var references ({{envKey}}) only resolve when the sub-flow belongs to the active
     // project (v1 restriction: no cross-project env-var references).
     const subFlowEnvVars =
-      this.activeProjectId && resolveProjectId(subFlow, this.knownProjectIds) === this.activeProjectId
-        ? this.envVars
+      activeProjectId && resolveProjectId(subFlow, this.knownProjectIds) === activeProjectId
+        ? this.ctx.envVars
         : {}
-    const resolveVars = (vars: import('../../shared/types').ProfileVariable[]): Record<string, string> =>
-      Object.fromEntries(
-        vars.map((v) => {
-          const raw = (this.activeEnvironmentId && v.envValues?.[this.activeEnvironmentId]) ?? v.value
-          // Decrypt BEFORE resolution — resolveValue would otherwise splice ciphertext into
-          // a larger string, which can never be unwrapped again.
-          return [v.key, resolveValue(decryptIfNeeded(raw), undefined, subFlowEnvVars)]
-        }),
-      )
 
-    let subProfileVars: Record<string, string> = {}
-    if (resolvedSubProfileId) {
-      const profile = subFlow.profiles?.find((p) => p.id === resolvedSubProfileId)
-      if (profile) {
-        subProfileVars = resolveVars(profile.vars)
-      }
-    } else if (!resolvedSubProfileId && subFlow.profiles && subFlow.profiles.length > 0) {
-      // Fall back to first profile when mapping resolves to null
-      const firstProfile = subFlow.profiles[0]
-      subProfileVars = resolveVars(firstProfile.vars)
-      resolvedSubProfileId = firstProfile.id
-    }
+    // Falls back to the sub-flow's first profile when the mapping resolves to null or names a
+    // profile that no longer exists — same rule as ScriptExporter and the renderer.
+    const subProfile = pickProfile(subFlow.profiles, mappedSubProfileId)
+    const subProfileVars = subProfile
+      ? resolveProfileVars(subProfile.vars, activeEnvironmentId, subFlowEnvVars, decryptIfNeeded)
+      : {}
 
     // Pass the resolved sub-flow profile ID as the nested Replayer's activeProfileId so it
-    // can resolve its own sub-flow mappings — this enables correct N-level nesting
+    // can resolve its own sub-flow mappings — this enables correct N-level nesting.
     // Pass the same-project-gated env vars so the nested flow's domain substitution only
     // applies when the sub-flow belongs to the active project (v1: no cross-project domain).
-    const nested = new Replayer(this.page, subFlow.baseURL, subProfileVars, resolvedSubProfileId ?? undefined, this.activeEnvironmentId, subFlowEnvVars, this.activeProjectId, this.pages)
+    const nested = new Replayer(this.page, subFlow.baseURL, {
+      ...this.ctx,
+      profileVars: subProfileVars,
+      activeProfileId: subProfile?.id,
+      envVars: subFlowEnvVars,
+    }, this.pages)
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId!,
@@ -228,7 +214,7 @@ export class Replayer {
   private scopeFor(action: Action): Page | FrameLocator {
     let scope: Page | FrameLocator = this.pageFor(action)
     for (const frameExpr of action.framePath ?? []) {
-      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.profileVars, this.envVars)
+      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.ctx.profileVars, this.ctx.envVars)
       // Deliberate dynamic eval: framePath entries are locator expressions, not data.
       const fn = new Function('s', `return s.${resolved}`)
       scope = (fn(scope) as Locator).contentFrame()
@@ -245,7 +231,7 @@ export class Replayer {
     if (action.locatorExpr) {
       try {
         // Resolve {{...}} variables before evaluating the locator expression
-        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.profileVars, this.envVars)
+        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.ctx.profileVars, this.ctx.envVars)
         // Deliberate dynamic eval: locatorExpr is Playwright code, not user data.
         const fn = new Function('page', `return page.${resolved}`)
         return fn(scope) as Locator
@@ -282,7 +268,7 @@ export class Replayer {
   private substituteOrigin(url: string): string {
     // The domain override is a project environment variable ({{domain}}) resolved for the
     // active environment. Strip any trailing slash so it concatenates cleanly with pathname.
-    const domainOverride = (this.envVars[DOMAIN_ENV_KEY] ?? '').replace(/\/+$/, '')
+    const domainOverride = (this.ctx.envVars[DOMAIN_ENV_KEY] ?? '').replace(/\/+$/, '')
     if (!domainOverride || !this.baseOrigin) return url
     try {
       const parsed = new URL(url)
@@ -301,7 +287,7 @@ export class Replayer {
       ? (action.secret ? decryptIfNeeded(action.value) : action.value)
       : undefined
     const val = rawValue != null
-      ? resolveValueWithSession(rawValue, this.sessionVars, this.profileVars, this.envVars)
+      ? resolveValueWithSession(rawValue, this.sessionVars, this.ctx.profileVars, this.ctx.envVars)
       : undefined
 
     // If this action opens a popup, start waiting for the page event BEFORE executing
@@ -332,7 +318,7 @@ export class Replayer {
       case 'selectOption':
         if (action.values?.length) {
           await this.getLocator(action).selectOption(
-            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.profileVars, this.envVars)),
+            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.ctx.profileVars, this.ctx.envVars)),
           )
         } else {
           await this.getLocator(action).selectOption(val ?? '')
@@ -357,7 +343,7 @@ export class Replayer {
         // Paths are relative to the data root (fixtures/…) or absolute — the main
         // process cwd isn't the data root once packaged, so resolve explicitly.
         const raw = action.filePaths?.length
-          ? action.filePaths.map((p) => resolveValueWithSession(p, this.sessionVars, this.profileVars, this.envVars))
+          ? action.filePaths.map((p) => resolveValueWithSession(p, this.sessionVars, this.ctx.profileVars, this.ctx.envVars))
           : (val ?? '').split(',')
         const files = raw.map((s) => s.trim()).filter(Boolean).map((s) => FixtureStorage.toAbsolute(s))
         if (!files.length) throw new Error('上傳節點沒有檔案路徑 — 請在屬性面板選擇檔案')
@@ -404,7 +390,7 @@ export class Replayer {
    *  Priority (highest last so it wins): env vars < profile vars < session vars.
    *  Built-in random/timestamp variables are exposed as functions (fresh value per call). */
   private buildCodeVars(): Record<string, unknown> {
-    const vars: Record<string, unknown> = { ...this.envVars, ...this.profileVars }
+    const vars: Record<string, unknown> = { ...this.ctx.envVars, ...this.ctx.profileVars }
     for (const [k, v] of this.sessionVars) vars[k] = v
     for (const name of ['randomText', 'randomNumber', 'randomOneText', 'randomOneNumber', 'timestamp']) {
       if (!(name in vars)) vars[name] = () => resolveValue(`{{${name}}}`)

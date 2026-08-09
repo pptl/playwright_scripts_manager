@@ -4,24 +4,38 @@ import type {
   Action,
   Flow,
   FlowNode,
-  ExportConfig,
+  ResolutionContext,
   ReplayNodeCompletePayload,
   RecordingStartPayload,
   TestFinishedPayload,
   Project,
   ActionUpdatedPayload,
 } from '../shared/types'
+import type { ElectronAPI } from '../shared/electronAPI'
 
-// Expose a type-safe API to the renderer via window.electronAPI
-contextBridge.exposeInMainWorld('electronAPI', {
+/**
+ * One Main → Renderer subscription wrapper: registers the listener and returns its unsubscribe.
+ * Every `onX` below is this shape and nothing else — only the channel and payload type differ.
+ */
+function subscribe<T>(channel: string) {
+  return (cb: (payload: T) => void): (() => void) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: T): void => cb(payload)
+    ipcRenderer.on(channel, handler)
+    return () => ipcRenderer.removeListener(channel, handler)
+  }
+}
+
+// The API exposed to the renderer as window.electronAPI. `satisfies` pins it to the shared
+// declaration, so a signature can no longer drift out of sync with the renderer's view of it.
+const api = {
   // Recording
   startRecording: (payload: RecordingStartPayload) =>
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_START, payload),
   stopRecording: () => ipcRenderer.invoke(IPC_CHANNELS.RECORDING_STOP),
 
   // Replay
-  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, profileVars?: Record<string, string>, activeProfileId?: string, activeEnvironmentId?: string, envVars?: Record<string, string>, activeProjectId?: string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, profileVars, activeProfileId, activeEnvironmentId, envVars, activeProjectId }),
+  replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, ctx?: ResolutionContext) =>
+    ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, ctx }),
 
   // Storage
   saveFlow: (flow: Flow, touch?: boolean) =>
@@ -31,12 +45,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteFlow: (flowId: string) => ipcRenderer.invoke(IPC_CHANNELS.FLOW_DELETE, flowId),
 
   // Export
-  exportScripts: (flow: Flow, config: ExportConfig) =>
-    ipcRenderer.invoke(IPC_CHANNELS.EXPORT_SCRIPTS, { flow, config }),
+  exportScripts: (flow: Flow, ctx: ResolutionContext) =>
+    ipcRenderer.invoke(IPC_CHANNELS.EXPORT_SCRIPTS, { flow, ctx }),
 
   // Run tests
-  runTests: (flow: Flow, config: ExportConfig) =>
-    ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, config }),
+  runTests: (flow: Flow, ctx: ResolutionContext) =>
+    ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, ctx }),
   showReport: () => ipcRenderer.invoke(IPC_CHANNELS.SHOW_REPORT),
 
   // Native file picker — copies the picks into fixtures/ and returns their stored paths
@@ -68,8 +82,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke(IPC_CHANNELS.VAULT_CHANGE_PASSPHRASE, { oldPassphrase, newPassphrase }),
   encryptSecret: (plain: string) => ipcRenderer.invoke(IPC_CHANNELS.SECRET_ENCRYPT, plain),
   revealSecret: (envelope: string) => ipcRenderer.invoke(IPC_CHANNELS.SECRET_REVEAL, envelope),
-  writeSecretsFile: (flow: Flow, config: ExportConfig) =>
-    ipcRenderer.invoke(IPC_CHANNELS.SECRETS_FILE_WRITE, { flow, config }),
+  writeSecretsFile: (flow: Flow, ctx: ResolutionContext) =>
+    ipcRenderer.invoke(IPC_CHANNELS.SECRETS_FILE_WRITE, { flow, ctx }),
 
   // Projects
   saveProject: (project: Project) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, { project }),
@@ -78,55 +92,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteProject: (projectId: string) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_DELETE, projectId),
 
   // Event listeners (Main → Renderer)
-  onActionCaptured: (cb: (action: Action) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, action: Action) => cb(action)
-    ipcRenderer.on(IPC_CHANNELS.ACTION_CAPTURED, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTION_CAPTURED, handler)
-  },
-  onActionUpdated: (cb: (payload: ActionUpdatedPayload) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: ActionUpdatedPayload) => cb(payload)
-    ipcRenderer.on(IPC_CHANNELS.ACTION_UPDATED, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTION_UPDATED, handler)
-  },
-  onActionRemoved: (cb: (actionId: string) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, actionId: string) => cb(actionId)
-    ipcRenderer.on(IPC_CHANNELS.ACTION_REMOVED, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.ACTION_REMOVED, handler)
-  },
-  onReplayNodeStart: (cb: (nodeId: string) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, nodeId: string) => cb(nodeId)
-    ipcRenderer.on(IPC_CHANNELS.REPLAY_NODE_START, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.REPLAY_NODE_START, handler)
-  },
-  onReplayNodeComplete: (cb: (payload: ReplayNodeCompletePayload) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: ReplayNodeCompletePayload) =>
-      cb(payload)
-    ipcRenderer.on(IPC_CHANNELS.REPLAY_NODE_COMPLETE, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.REPLAY_NODE_COMPLETE, handler)
-  },
-  onReplayFinished: (cb: () => void) => {
-    const handler = () => cb()
-    ipcRenderer.on(IPC_CHANNELS.REPLAY_FINISHED, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.REPLAY_FINISHED, handler)
-  },
-  onReplayError: (cb: (error: string) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, error: string) => cb(error)
-    ipcRenderer.on(IPC_CHANNELS.REPLAY_ERROR, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.REPLAY_ERROR, handler)
-  },
-  onTestOutput: (cb: (line: string) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, line: string) => cb(line)
-    ipcRenderer.on(IPC_CHANNELS.TEST_OUTPUT, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.TEST_OUTPUT, handler)
-  },
-  onTestFinished: (cb: (payload: TestFinishedPayload) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: TestFinishedPayload) => cb(payload)
-    ipcRenderer.on(IPC_CHANNELS.TEST_FINISHED, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.TEST_FINISHED, handler)
-  },
-  onWorkspaceReload: (cb: () => void) => {
-    const handler = () => cb()
-    ipcRenderer.on(IPC_CHANNELS.WORKSPACE_RELOAD, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.WORKSPACE_RELOAD, handler)
-  },
-})
+  onActionCaptured: subscribe<Action>(IPC_CHANNELS.ACTION_CAPTURED),
+  onActionUpdated: subscribe<ActionUpdatedPayload>(IPC_CHANNELS.ACTION_UPDATED),
+  onActionRemoved: subscribe<string>(IPC_CHANNELS.ACTION_REMOVED),
+  onReplayNodeStart: subscribe<string>(IPC_CHANNELS.REPLAY_NODE_START),
+  onReplayNodeComplete: subscribe<ReplayNodeCompletePayload>(IPC_CHANNELS.REPLAY_NODE_COMPLETE),
+  onReplayFinished: subscribe<void>(IPC_CHANNELS.REPLAY_FINISHED),
+  onReplayError: subscribe<string>(IPC_CHANNELS.REPLAY_ERROR),
+  onTestOutput: subscribe<string>(IPC_CHANNELS.TEST_OUTPUT),
+  onTestFinished: subscribe<TestFinishedPayload>(IPC_CHANNELS.TEST_FINISHED),
+  onWorkspaceReload: subscribe<void>(IPC_CHANNELS.WORKSPACE_RELOAD),
+} satisfies ElectronAPI
+
+contextBridge.exposeInMainWorld('electronAPI', api)

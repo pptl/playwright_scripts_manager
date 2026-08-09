@@ -2,7 +2,7 @@ import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
 import type { Flow } from '@shared/types'
 import { DOMAIN_ENV_KEY } from '@shared/types'
-import { buildProfileVars as buildVars, getEnvVars, getSecretEnvKeys } from '../utils/varMaps'
+import { buildResolutionContext, getEnvVars } from '../utils/varMaps'
 import { useWorkspaceStore } from '../stores/workspaceStore'
 
 /**
@@ -15,21 +15,6 @@ function blockedByLock(reason: string): boolean {
   if (!vault || vault.state !== 'locked') return false
   openVaultDialog('unlock', reason)
   return true
-}
-
-function buildProfileVars(
-  flow: Flow | null,
-  activeProfileId: string | null,
-  activeEnvironmentId: string | null,
-  envVars: Record<string, string>,
-  secretEnvKeys: string[],
-): Record<string, string> | undefined {
-  return buildVars(
-    flow?.profiles?.find((p) => p.id === activeProfileId),
-    activeEnvironmentId,
-    envVars,
-    secretEnvKeys,
-  )
 }
 
 /**
@@ -71,20 +56,13 @@ export function usePlaywright() {
       useFlowStore.getState().setRecordingHead(fromNodeId)
       setIsRecording(true)
 
-      const envVars = getEnvVars(currentProject, activeEnvironmentId)
-      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars, getSecretEnvKeys(currentProject))
-
       try {
         await window.electronAPI.startRecording({
           baseURL: currentFlow.baseURL,
           branchFromNodeId: fromNodeId,
           branchNodes: currentFlow.nodes,
           replaySpeed: 200,
-          profileVars,
-          activeProfileId: activeProfileId ?? undefined,
-          activeEnvironmentId: activeEnvironmentId ?? undefined,
-          envVars,
-          activeProjectId: currentProject?.id,
+          ctx: buildResolutionContext(currentFlow, activeProfileId, activeEnvironmentId, currentProject),
         })
       } catch (err) {
         setIsRecording(false)
@@ -116,20 +94,13 @@ export function usePlaywright() {
       clearReplayStatus()
       setIsReplaying(true)
 
-      const envVars = getEnvVars(currentProject, activeEnvironmentId)
-      const profileVars = buildProfileVars(currentFlow, activeProfileId, activeEnvironmentId, envVars, getSecretEnvKeys(currentProject))
-
       try {
         await window.electronAPI.replayToNode(
           currentFlow.nodes,
           targetNodeId,
           speed,
           currentFlow.baseURL,
-          profileVars,
-          activeProfileId ?? undefined,
-          activeEnvironmentId ?? undefined,
-          envVars,
-          currentProject?.id,
+          buildResolutionContext(currentFlow, activeProfileId, activeEnvironmentId, currentProject),
         )
       } catch (err) {
         console.error('Replay IPC error:', err)

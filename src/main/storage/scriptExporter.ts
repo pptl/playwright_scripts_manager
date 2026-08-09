@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import type { Flow, FlowNode, ExportConfig, TestPath } from '../../shared/types'
+import type { Flow, FlowNode, ResolutionContext, TestPath } from '../../shared/types'
 import {
   isCallFlowAction,
   DOMAIN_ENV_KEY,
@@ -22,7 +22,9 @@ import {
   VARIABLE_HELPERS_CODE,
   SECRET_HELPER_CODE,
   SECRET_VAR_PREFIX,
+  pickProfile,
   resolveValue,
+  resolveProfileVars,
   toSingleQuoted,
 } from '../../shared/variableResolver'
 
@@ -75,58 +77,82 @@ class SecretRegistry {
   }
 }
 
-/** One inlined step in a generated test path, carrying the flow-level context needed to emit it. */
-type ExpandedStep = {
-  node: FlowNode
+/**
+ * Everything that stays constant for one whole export run.
+ *
+ * Split out from FlowScope because the recursion carries two genuinely different things, and
+ * flattening both into one positional parameter list is what grew getSubFlowPath and
+ * buildStepSequence to twelve arguments each.
+ */
+type ExportEnv = {
+  /** The raw, *ungated* resolution context. Each flow re-gates it through gateEnvVars. */
+  ctx: ResolutionContext & {
+    profileVars: Record<string, string>
+    envVars: Record<string, string>
+  }
+  /** Fetched once by `build()` before the synchronous generateSpec recursion runs. Lets
+   *  gateEnvVars fold a flow whose projectId names a deleted project into the reserved
+   *  default project, the same as everywhere else (resolveProjectId). */
+  knownProjectIds: Set<string>
+  subFlowMap: Map<string, Flow>
+  /** Which of `ctx.envVars`' keys are private. */
+  secretEnvKeys: Set<string>
+}
+
+/** The per-flow values re-derived on every recursion into a sub-flow. A node is always
+ *  emitted against the scope of the flow it came from, not of the flow being exported. */
+type FlowScope = {
+  /** The profile active *for this flow* — what its own callFlow nodes key their mapping on. */
+  activeProfileId?: string
   profileVars: Record<string, string>
-  /** Project env vars visible to this node, already gated by active project (see gateEnvVars). */
+  /** Project env vars visible to this flow, already gated by active project (see gateEnvVars). */
   envVars: Record<string, string>
   baseOrigin: string
-  inlineVars: boolean
-  /** The `domain` env-var value (trailing-slash stripped) for the flow this node came from,
-   *  or '' when the flow isn't in the active project. Drives goto-URL origin substitution. */
+  /** The `domain` env-var value (trailing-slash stripped) for this flow, or '' when the flow
+   *  isn't in the active project. Drives goto-URL origin substitution. */
   domain: string
-  /** Which of this step's profileVars keys are private. Read off the step's own Flow, so a
+  /** Which of this scope's profileVars keys are private. Read off the scope's own Flow, so a
    *  sub-flow's secrecy is independent of the parent's. */
   secretProfileKeys: Set<string>
 }
 
-/** Known project IDs for the export currently in progress — populated once by
- *  `ScriptExporter.build()` before the (synchronous) generateSpec/gateEnvVars recursion runs.
- *  A module-level cache instead of a threaded parameter: `activeProjectId` alone already
- *  runs through 6 nested function signatures (generateSpec → buildStepSequence →
- *  getSubFlowPath → resolveProfile), and adding another positional parameter there is exactly
- *  the C1 problem tracked separately — not something to grow while fixing this. */
-let currentKnownProjectIds: Set<string> = new Set()
+/** One inlined step in a generated test path, plus the flow scope needed to emit it. */
+type ExpandedStep = {
+  node: FlowNode
+  /** Sub-flow nodes bake their profile vars into literals rather than referencing _ftProf_*. */
+  inlineVars: boolean
+  scope: FlowScope
+}
+
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin
+  } catch {
+    return ''
+  }
+}
 
 /** Project env vars are only visible to flows belonging to the active project
  *  (v1: no cross-project env-var references). A flow's `projectId` pointing at a project
  *  that no longer exists folds into the reserved default project, same as everywhere else. */
-function gateEnvVars(
-  flow: Flow,
-  envVars: Record<string, string> | undefined,
-  activeProjectId: string | undefined,
-): Record<string, string> {
-  return activeProjectId && resolveProjectId(flow, currentKnownProjectIds) === activeProjectId
-    ? (envVars ?? {})
+function gateEnvVars(flow: Flow, env: ExportEnv): Record<string, string> {
+  const { activeProjectId } = env.ctx
+  return activeProjectId && resolveProjectId(flow, env.knownProjectIds) === activeProjectId
+    ? env.ctx.envVars
     : {}
 }
 
 /** Resolve a flow's `domain` env-var value, gated to the active project. Trailing slash stripped. */
-function resolveFlowDomain(
-  flow: Flow,
-  envVars: Record<string, string> | undefined,
-  activeProjectId: string | undefined,
-): string {
-  return (gateEnvVars(flow, envVars, activeProjectId)[DOMAIN_ENV_KEY] ?? '').replace(/\/+$/, '')
+function resolveFlowDomain(flow: Flow, env: ExportEnv): string {
+  return (gateEnvVars(flow, env)[DOMAIN_ENV_KEY] ?? '').replace(/\/+$/, '')
 }
 
 export class ScriptExporter {
-  static async export(flow: Flow, config: ExportConfig): Promise<string> {
+  static async export(flow: Flow, ctx: ResolutionContext): Promise<string> {
     const outputDir = exportsDir()
     await fs.mkdir(outputDir, { recursive: true })
 
-    const { specContent } = await ScriptExporter.build(flow, config)
+    const { specContent } = await ScriptExporter.build(flow, ctx)
 
     const specPath = join(outputDir, `${flow.id}.spec.ts`)
     await fs.writeFile(specPath, specContent, 'utf-8')
@@ -140,22 +166,26 @@ export class ScriptExporter {
    * Produced by running the same code generation and reading the registry, so the names
    * are guaranteed to line up with whatever the spec actually references.
    */
-  static async collectSecretEnv(flow: Flow, config: ExportConfig): Promise<Record<string, string>> {
-    return (await ScriptExporter.build(flow, config)).secretEnv
+  static async collectSecretEnv(flow: Flow, ctx: ResolutionContext): Promise<Record<string, string>> {
+    return (await ScriptExporter.build(flow, ctx)).secretEnv
   }
 
   private static async build(
     flow: Flow,
-    config: ExportConfig,
+    ctx: ResolutionContext,
   ): Promise<{ specContent: string; secretEnv: Record<string, string> }> {
-    // Populate before generateSpec's synchronous recursion runs — see gateEnvVars.
-    currentKnownProjectIds = new Set((await ProjectStorage.list()).map((p) => p.id))
-    const subFlowMap = await ScriptExporter.resolveSubFlows(flow)
+    // Assembled before generateSpec's synchronous recursion runs — see gateEnvVars.
+    const env: ExportEnv = {
+      ctx: { ...ctx, profileVars: ctx.profileVars ?? {}, envVars: ctx.envVars ?? {} },
+      knownProjectIds: new Set((await ProjectStorage.list()).map((p) => p.id)),
+      subFlowMap: await ScriptExporter.resolveSubFlows(flow),
+      secretEnvKeys: new Set(ctx.secretEnvKeys ?? []),
+    }
     const paths = ScriptExporter.computePaths(flow)
     const nodeMap = new Map(flow.nodes.map((n) => [n.id, n]))
 
     const secrets = new SecretRegistry()
-    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, config, subFlowMap, config.activeProfileId, secrets)
+    const specContent = ScriptExporter.generateSpec(flow, paths, nodeMap, env, secrets)
 
     return { specContent, secretEnv: secrets.env() }
   }
@@ -184,28 +214,35 @@ export class ScriptExporter {
     )
   }
 
-  private static resolveProfile(
+  /**
+   * Derive a (sub-)flow's own scope: resolve its profile, gate its env vars, compute its base
+   * origin and domain. Replaces the five-line block that was duplicated at both callFlow
+   * expansion sites.
+   *
+   * `activeProfileId` deliberately echoes the *requested* id rather than the id of the profile
+   * `pickProfile` settled on. It is only ever used to key the flow's own callFlow
+   * `subFlowProfileMapping` lookups, and substituting a fallback id there would start
+   * resolving mappings that the un-refactored code never resolved.
+   */
+  private static flowScopeFor(
     flow: Flow,
     profileId: string | null | undefined,
-    activeEnvironmentId?: string,
-    envVars?: Record<string, string>,
-    activeProjectId?: string,
-  ): { vars: Record<string, string>; secretKeys: Set<string> } {
-    const secretKeys = ScriptExporter.secretProfileKeys(flow)
-    const profile = profileId
-      ? (flow.profiles ?? []).find((p) => p.id === profileId)
-      : (flow.profiles ?? [])[0]
-    if (!profile) return { vars: {}, secretKeys }
-    const flowEnvVars = gateEnvVars(flow, envVars, activeProjectId)
-    const vars = Object.fromEntries(
-      profile.vars.map((v) => {
-        const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
-        // Decrypt BEFORE resolution — resolveValue would otherwise splice ciphertext into
-        // a larger string, which can never be unwrapped again.
-        return [v.key, resolveValue(decryptIfNeeded(raw), undefined, flowEnvVars)]
-      }),
-    )
-    return { vars, secretKeys }
+    env: ExportEnv,
+  ): FlowScope {
+    const flowEnvVars = gateEnvVars(flow, env)
+    const profile = pickProfile(flow.profiles, profileId)
+    return {
+      activeProfileId: profileId ?? undefined,
+      // Decrypt BEFORE resolution — resolveValue would otherwise splice ciphertext into a
+      // larger string, which can never be unwrapped again.
+      profileVars: profile
+        ? resolveProfileVars(profile.vars, env.ctx.activeEnvironmentId, flowEnvVars, decryptIfNeeded)
+        : {},
+      envVars: flowEnvVars,
+      baseOrigin: originOf(flow.baseURL),
+      domain: resolveFlowDomain(flow, env),
+      secretProfileKeys: ScriptExporter.secretProfileKeys(flow),
+    }
   }
 
   /** Resolve which sub-flow profile ID to use given the parent's active profile.
@@ -223,16 +260,8 @@ export class ScriptExporter {
   private static getSubFlowPath(
     subFlow: Flow,
     exitNodeId: string,
-    subFlowMap: Map<string, Flow>,
-    subProfileVars: Record<string, string>,
-    subEnvVars: Record<string, string>,
-    subBaseOrigin: string,
-    subDomain: string,
-    activeProfileId?: string,
-    activeEnvironmentId?: string,
-    envVars?: Record<string, string>,
-    activeProjectId?: string,
-    subSecretKeys: Set<string> = new Set(),
+    env: ExportEnv,
+    scope: FlowScope,
   ): ExpandedStep[] {
     const nodeMap = new Map(subFlow.nodes.map((n) => [n.id, n]))
     const path: ExpandedStep[] = []
@@ -241,17 +270,13 @@ export class ScriptExporter {
     while (cur && !visited.has(cur.id)) {
       visited.add(cur.id)
       if (isCallFlowAction(cur.action)) {
-        const nested = subFlowMap.get(cur.action.subFlowId)
+        const nested = env.subFlowMap.get(cur.action.subFlowId)
         if (nested) {
-          const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, activeProfileId)
-          const nestedProfile = ScriptExporter.resolveProfile(nested, nestedProfileId, activeEnvironmentId, envVars, activeProjectId)
-          const nestedEnvVars = gateEnvVars(nested, envVars, activeProjectId)
-          const nestedBaseOrigin = (() => { try { return new URL(nested.baseURL).origin } catch { return '' } })()
-          const nestedDomain = resolveFlowDomain(nested, envVars, activeProjectId)
-          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, subFlowMap, nestedProfile.vars, nestedEnvVars, nestedBaseOrigin, nestedDomain, nestedProfileId ?? undefined, activeEnvironmentId, envVars, activeProjectId, nestedProfile.secretKeys))
+          const nestedProfileId = ScriptExporter.resolveSubFlowProfileId(cur.action, scope.activeProfileId)
+          path.unshift(...ScriptExporter.getSubFlowPath(nested, cur.action.subFlowExitNodeId, env, ScriptExporter.flowScopeFor(nested, nestedProfileId, env)))
         }
       } else {
-        path.unshift({ node: cur, profileVars: subProfileVars, envVars: subEnvVars, baseOrigin: subBaseOrigin, inlineVars: true, domain: subDomain, secretProfileKeys: subSecretKeys })
+        path.unshift({ node: cur, inlineVars: true, scope })
       }
       cur = cur.parentId ? nodeMap.get(cur.parentId) : undefined
     }
@@ -261,33 +286,21 @@ export class ScriptExporter {
   private static buildStepSequence(
     nodeIds: string[],
     nodeMap: Map<string, FlowNode>,
-    subFlowMap: Map<string, Flow>,
-    defaultProfileVars: Record<string, string> = {},
-    defaultEnvVars: Record<string, string> = {},
-    defaultBaseOrigin: string = '',
-    defaultDomain: string = '',
-    activeProfileId?: string,
-    activeEnvironmentId?: string,
-    envVars?: Record<string, string>,
-    activeProjectId?: string,
-    defaultSecretKeys: Set<string> = new Set(),
+    env: ExportEnv,
+    scope: FlowScope,
   ): ExpandedStep[] {
     const result: ExpandedStep[] = []
     for (const id of nodeIds) {
       const node = nodeMap.get(id)
       if (!node) continue
       if (isCallFlowAction(node.action)) {
-        const subFlow = subFlowMap.get(node.action.subFlowId)
+        const subFlow = env.subFlowMap.get(node.action.subFlowId)
         if (subFlow) {
-          const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, activeProfileId)
-          const subProfile = ScriptExporter.resolveProfile(subFlow, subProfileId, activeEnvironmentId, envVars, activeProjectId)
-          const subEnvVars = gateEnvVars(subFlow, envVars, activeProjectId)
-          const subBaseOrigin = (() => { try { return new URL(subFlow.baseURL).origin } catch { return '' } })()
-          const subDomain = resolveFlowDomain(subFlow, envVars, activeProjectId)
-          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, subFlowMap, subProfile.vars, subEnvVars, subBaseOrigin, subDomain, subProfileId ?? undefined, activeEnvironmentId, envVars, activeProjectId, subProfile.secretKeys))
+          const subProfileId = ScriptExporter.resolveSubFlowProfileId(node.action, scope.activeProfileId)
+          result.push(...ScriptExporter.getSubFlowPath(subFlow, node.action.subFlowExitNodeId, env, ScriptExporter.flowScopeFor(subFlow, subProfileId, env)))
         }
       } else {
-        result.push({ node, profileVars: defaultProfileVars, envVars: defaultEnvVars, baseOrigin: defaultBaseOrigin, inlineVars: false, domain: defaultDomain, secretProfileKeys: defaultSecretKeys })
+        result.push({ node, inlineVars: false, scope })
       }
     }
     return result
@@ -340,23 +353,21 @@ export class ScriptExporter {
     flow: Flow,
     paths: TestPath[],
     nodeMap: Map<string, FlowNode>,
-    config: ExportConfig,
-    subFlowMap: Map<string, Flow> = new Map(),
-    activeProfileId?: string,
+    env: ExportEnv,
     secrets: SecretRegistry = new SecretRegistry(),
   ): string {
-    const profileVars = config.profileVars ?? {}
+    const profileVars = env.ctx.profileVars
     const profileVarKeys = new Set(Object.keys(profileVars))
 
     // Private values are declared as `_ftSec_*` (a process.env lookup) instead, so they
     // are excluded from the plaintext `_ftProf_*` / `_ftEnv_*` blocks.
     const secretProfileKeys = ScriptExporter.secretProfileKeys(flow)
-    const secretEnvKeys = new Set(config.secretEnvKeys ?? [])
+    const secretEnvKeys = env.secretEnvKeys
     const hasProfileVars = [...profileVarKeys].some((k) => !secretProfileKeys.has(k))
 
     // Project env vars are emitted once at file scope as `_ftEnv_*` consts. They are
     // project-global, so sub-flow nodes reference the same consts (no per-flow inlining).
-    const allEnvVars = config.envVars ?? {}
+    const allEnvVars = env.ctx.envVars
     const hasEnvVars = Object.keys(allEnvVars).some((k) => !secretEnvKeys.has(k))
 
     /**
@@ -386,11 +397,17 @@ export class ScriptExporter {
       return { isSecret, resolve }
     }
 
-    const baseOrigin = (() => {
-      try { return new URL(flow.baseURL).origin } catch { return '' }
-    })()
-    const flowDomain = resolveFlowDomain(flow, config.envVars, config.activeProjectId)
-    const flowEnvVars = gateEnvVars(flow, config.envVars, config.activeProjectId)
+    // The exported flow's own scope. Unlike a sub-flow's, its profileVars arrive pre-resolved
+    // from the renderer rather than being read back off the Flow, so it isn't built by
+    // flowScopeFor.
+    const rootScope: FlowScope = {
+      activeProfileId: env.ctx.activeProfileId,
+      profileVars,
+      envVars: gateEnvVars(flow, env),
+      baseOrigin: originOf(flow.baseURL),
+      domain: resolveFlowDomain(flow, env),
+      secretProfileKeys,
+    }
 
     const usesVariables = flow.nodes.some((n) =>
       (n.action.value && hasVariables(n.action.value)) ||
@@ -404,7 +421,7 @@ export class ScriptExporter {
     const tests = paths
       .map((path, idx) => {
         const testName = path.name || `測試路徑 ${idx + 1}`
-        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, subFlowMap, profileVars, flowEnvVars, baseOrigin, flowDomain, activeProfileId, config.activeEnvironmentId, config.envVars, config.activeProjectId, secretProfileKeys)
+        const steps = ScriptExporter.buildStepSequence(path.nodeIds, nodeMap, env, rootScope)
         const sessionVarsDefined = new Set<string>()
 
         // Each step is wrapped in its own test.step async closure, so a
@@ -431,9 +448,10 @@ export class ScriptExporter {
           (hoistedPages.size > 0 ? [...hoistedPages].map((p) => `    let ${p}: Page`).join('\n') + '\n' : '')
 
         const stepCode = steps
-          .map(({ node, profileVars: stepProfileVars, envVars: stepEnvVars, baseOrigin: stepBaseOrigin, inlineVars, domain: stepDomain, secretProfileKeys: stepSecretKeys }) => {
-            const secretScope = secretScopeFor(stepProfileVars, stepSecretKeys, stepEnvVars)
-            let rawAction = ScriptExporter.actionToCode(node, sessionVarsDefined, stepBaseOrigin, stepProfileVars, inlineVars, hoistedVars, stepDomain, stepEnvVars, secretScope, secrets)
+          .map((step) => {
+            const { node, scope } = step
+            const secretScope = secretScopeFor(scope.profileVars, scope.secretProfileKeys, scope.envVars)
+            let rawAction = ScriptExporter.actionToCode(step, sessionVarsDefined, { hoistedVars, secretVars: secretScope, secrets })
 
             // Popup-opening action: wrap in the official waitForEvent('popup') pattern
             if (node.action.opensPage) {
@@ -474,22 +492,23 @@ export class ScriptExporter {
   }
 
   private static actionToCode(
-    node: FlowNode,
+    step: ExpandedStep,
     sessionVarsDefined: Set<string>,
-    baseOrigin = '',
-    profileVars: Record<string, string> = {},
-    inlineVars = false,
-    hoistedVars: Set<string> = new Set(),
-    domainOverride = '',
-    envVars: Record<string, string> = {},
-    /** Private keys visible to this step: `isSecret` is a side-effect-free predicate,
-     *  `resolve` registers the value and returns its `_ftSec_*` identifier. */
-    secretVars: {
-      isSecret: (key: string) => boolean
-      resolve: (key: string) => string | undefined
-    } = { isSecret: () => false, resolve: () => undefined },
-    secrets: SecretRegistry = new SecretRegistry(),
+    opts: {
+      hoistedVars: Set<string>
+      /** Private keys visible to this step: `isSecret` is a side-effect-free predicate,
+       *  `resolve` registers the value and returns its `_ftSec_*` identifier. */
+      secretVars: {
+        isSecret: (key: string) => boolean
+        resolve: (key: string) => string | undefined
+      }
+      secrets: SecretRegistry
+    },
   ): string {
+    // Not destructured as `scope`: the codegen variable scope below already owns that name.
+    const { node, inlineVars } = step
+    const { hoistedVars, secretVars, secrets } = opts
+    const { profileVars, envVars, baseOrigin, domain: domainOverride } = step.scope
     const { action } = node
     // Popup actions target their page alias ('page1', 'page2'…); absent = the initial 'page'.
     const pageRef = action.pageAlias || 'page'

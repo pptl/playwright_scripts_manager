@@ -11,6 +11,7 @@ import type {
   RecordingStartPayload,
   ProjectSavePayload,
   ProjectLoadPayload,
+  ResolutionContext,
   WorkspaceInfo,
 } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
@@ -79,8 +80,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
     // Branch recording: silently replay to the branch point first
     if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const { profileVars, envVars } = decryptConfig(payload)
-      const silentReplayer = new Replayer(page, payload.baseURL, profileVars, payload.activeProfileId, payload.activeEnvironmentId, envVars, payload.activeProjectId)
+      const silentReplayer = new Replayer(page, payload.baseURL, decryptContext(payload.ctx))
       try {
         await silentReplayer.replayToNode(
           payload.branchNodes,
@@ -132,10 +132,9 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         await browserController.launch({ maximized: true })
       }
       const page = browserController.getPage()
-      const { profileVars, envVars } = decryptConfig(payload)
       // Handler-local: nothing outside this call needs it, and holding it module-level
       // would retain the finished replay's Page and session vars until the next run.
-      const replayer = new Replayer(page, payload.baseURL, profileVars, payload.activeProfileId, payload.activeEnvironmentId, envVars, payload.activeProjectId)
+      const replayer = new Replayer(page, payload.baseURL, decryptContext(payload.ctx))
 
       await replayer.replayToNode(
         payload.nodes,
@@ -200,7 +199,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   // ── Export ───────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.EXPORT_SCRIPTS, async (_e, payload: ExportScriptsPayload) => {
     assertUnlocked()
-    return await ScriptExporter.export(payload.flow, decryptConfig(payload.config))
+    return await ScriptExporter.export(payload.flow, decryptContext(payload.ctx))
   })
 
   // ── Run Tests ────────────────────────────────────────────
@@ -220,7 +219,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     // 1. Export script
     let specPath: string
     let secretEnv: Record<string, string> = {}
-    const config = decryptConfig(payload.config)
+    const config = decryptContext(payload.ctx)
     try {
       assertUnlocked()
       specPath = await ScriptExporter.export(payload.flow, config)
@@ -382,7 +381,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
   // Write the gitignored env file an external `npx playwright test` reads.
   ipcMain.handle(IPC_CHANNELS.SECRETS_FILE_WRITE, async (_e, payload: ExportScriptsPayload) => {
-    const env = await ScriptExporter.collectSecretEnv(payload.flow, decryptConfig(payload.config))
+    const env = await ScriptExporter.collectSecretEnv(payload.flow, decryptContext(payload.ctx))
     const path = join(getWorkspaceRoot(), SECRETS_FILE)
     const body = Object.entries(env)
       .map(([k, v]) => `${k}=${v.replace(/\r?\n/g, '\\n')}`)
@@ -411,13 +410,11 @@ function assertUnlocked(): void {
  * opaque string and is unwrapped here, at the boundary — and always BEFORE resolveValue
  * runs, since resolution would splice ciphertext into a larger string irrecoverably.
  */
-function decryptConfig<T extends { profileVars?: Record<string, string>; envVars?: Record<string, string> }>(
-  config: T,
-): T {
+function decryptContext(ctx: ResolutionContext = {}): ResolutionContext {
   return {
-    ...config,
-    profileVars: vault.decryptMap(config.profileVars),
-    envVars: vault.decryptMap(config.envVars),
+    ...ctx,
+    profileVars: vault.decryptMap(ctx.profileVars),
+    envVars: vault.decryptMap(ctx.envVars),
   }
 }
 

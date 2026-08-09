@@ -6,11 +6,11 @@ import { useWorkspace } from '../../hooks/useWorkspace'
 import { TestOutputModal } from './TestOutputModal'
 import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
 import { ProjectEnvVarModal } from '../ProjectEnvVar/ProjectEnvVarModal'
-import type { ExportConfig, TestFinishedPayload } from '../../../shared/types'
+import type { ResolutionContext, TestFinishedPayload } from '../../../shared/types'
 import { DEFAULT_PROJECT_ID } from '../../../shared/types'
 import { useVault } from '../../hooks/useVault'
 import { useConfirmStore } from '../../stores/confirmStore'
-import { buildProfileVars, getEnvVars as envVarsFor, getSecretEnvKeys } from '../../utils/varMaps'
+import { buildResolutionContext, getSecretEnvKeys } from '../../utils/varMaps'
 
 const btn = (label: string, onClick: () => void, disabled = false, danger = false) => (
   <button
@@ -137,20 +137,9 @@ export function Toolbar() {
   const activeProfileName = activeProfile?.name ?? '— 無配置 —'
   const isOverriding = activeProfile !== null && activeProfile !== profiles[0]
 
-  const getEnvVars = (): Record<string, string> => envVarsFor(currentProject, activeEnvironmentId)
-
-  const getProfileVars = (): Record<string, string> | undefined =>
-    buildProfileVars(activeProfile, activeEnvironmentId, getEnvVars(), getSecretEnvKeys(currentProject))
-
   /** Everything replay / export / run needs, assembled the same way each time. */
-  const exportConfig = (): ExportConfig => ({
-    profileVars: getProfileVars(),
-    activeProfileId: activeProfileId ?? undefined,
-    activeEnvironmentId: activeEnvironmentId ?? undefined,
-    envVars: getEnvVars(),
-    activeProjectId: currentProject?.id,
-    secretEnvKeys: getSecretEnvKeys(currentProject),
-  })
+  const exportConfig = (): ResolutionContext =>
+    buildResolutionContext(currentFlow, activeProfileId, activeEnvironmentId, currentProject)
 
   useEffect(() => {
     const offOutput = window.electronAPI.onTestOutput((line) => {

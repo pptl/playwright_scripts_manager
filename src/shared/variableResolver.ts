@@ -1,3 +1,5 @@
+import type { FlowProfile, ProfileVariable } from './types'
+
 export interface VariableDefinition {
   name: string
   placeholder: string
@@ -86,6 +88,48 @@ export function flattenProjectEnvVars(
   if (!envVars || !activeEnvironmentId) return {}
   return Object.fromEntries(
     envVars.map((v) => [v.key, v.values[activeEnvironmentId] ?? '']),
+  )
+}
+
+/**
+ * Pick a flow's profile: the one with `profileId` if it exists, otherwise the first.
+ *
+ * The four call sites (renderer varMaps, ScriptExporter.resolveProfile,
+ * Replayer.executeCallFlow, and by extension Toolbar) share one fallback rule from here —
+ * previously usePlaywright resolved by exact id with no fallback, so a stale profile id made
+ * replay run with no variables while export happily used the first profile.
+ */
+export function pickProfile(
+  profiles: FlowProfile[] | undefined,
+  profileId: string | null | undefined,
+): FlowProfile | undefined {
+  const list = profiles ?? []
+  return (profileId ? list.find((p) => p.id === profileId) : undefined) ?? list[0]
+}
+
+/**
+ * Resolve a profile's variables into a flat map: `envValues[activeEnvId] ?? value`, decrypted,
+ * then with `{{...}}` placeholders resolved against `envVars`.
+ *
+ * `decrypt` is injected rather than imported because `src/main/security/vault.ts` pulls in
+ * electron's `safeStorage` and cannot live in `src/shared/`. The renderer passes nothing (it
+ * has no key, so ciphertext travels on as an opaque string); the main process passes
+ * `vault.decryptIfNeeded`.
+ *
+ * The order matters and must not be swapped: resolving first would splice ciphertext into a
+ * larger string, which no later decrypt could ever unwrap.
+ */
+export function resolveProfileVars(
+  vars: ProfileVariable[],
+  activeEnvironmentId: string | null | undefined,
+  envVars: Record<string, string>,
+  decrypt: (value: string) => string = (v) => v,
+): Record<string, string> {
+  return Object.fromEntries(
+    vars.map((v) => {
+      const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
+      return [v.key, resolveValue(decrypt(raw), undefined, envVars)]
+    }),
   )
 }
 

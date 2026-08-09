@@ -20,6 +20,7 @@ import {
   emitProfileVarDecls,
   emitEnvVarDecls,
   VARIABLE_HELPERS_CODE,
+  BUILT_IN_VARIABLES,
   SECRET_HELPER_CODE,
   SECRET_VAR_PREFIX,
   pickProfile,
@@ -641,7 +642,7 @@ export class ScriptExporter {
           // Private keys are held back so they stay `_ftSec_*` references.
           const visible = (vars: Record<string, string>): Record<string, string> =>
             Object.fromEntries(Object.entries(vars).filter(([k]) => !isSecretKey(k)))
-          gotoVal = resolveValue(gotoVal, visible(profileVars), visible(envVars))
+          gotoVal = resolveValue(gotoVal, { profileVars: visible(profileVars), envVars: visible(envVars) })
         }
         return `${captureDecl}await ${pageRef}.goto(${va(gotoVal)});`
       }
@@ -709,16 +710,11 @@ export class ScriptExporter {
           used.add(name)
           entries.push(`${JSON.stringify(name)}: ${name}`)
         }
-        const builtins: Array<[string, string]> = [
-          ['randomText', '_ftRandomText'],
-          ['randomNumber', '_ftRandomNumber'],
-          ['randomOneText', '_ftRandomOneLetter'],
-          ['randomOneNumber', '_ftRandomOneDigit'],
-          ['timestamp', '_ftTimestamp'],
-        ]
-        for (const [name, fn] of builtins) {
-          if (used.has(name)) continue
-          entries.push(`${name}: ${fn}`)
+        // The helper identifier uncalled, so `vars.randomText()` gives a fresh value per call
+        // (Replayer.buildCodeVars hands over the generator itself for the same reason).
+        for (const v of BUILT_IN_VARIABLES) {
+          if (used.has(v.name)) continue
+          entries.push(`${v.name}: ${v.helperFn}`)
         }
         const varsDecl = `const vars = { ${entries.join(', ')} };`
         return `${varsDecl}\n${action.code ?? ''}`

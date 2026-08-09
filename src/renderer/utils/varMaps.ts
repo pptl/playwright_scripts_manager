@@ -32,8 +32,8 @@ export function getSecretEnvKeys(project: Project | null | undefined): string[] 
  * References to *private* env vars are deliberately left unresolved. Substituting them
  * here would splice ciphertext into the middle of a larger string, which no later
  * decrypt could recover; leaving the placeholder lets the main process resolve it after
- * decryption instead (Replayer.resolveValueWithSession / ScriptExporter.resolveProfile
- * both do a multi-pass resolve over already-decrypted maps).
+ * decryption instead (Replayer.resolve / ScriptExporter.flowScopeFor both reach
+ * resolveValue's multi-pass loop over already-decrypted maps).
  */
 function buildProfileVars(
   flow: Flow | null | undefined,

@@ -3,7 +3,7 @@ import { createRequire } from 'module'
 import { existsSync } from 'fs'
 import type { Action, FlowNode, ResolutionContext } from '../../shared/types'
 import { isCallFlowAction, DOMAIN_ENV_KEY } from '../../shared/types'
-import { resolveValueWithSession, resolveValue, pickProfile, resolveProfileVars } from '../../shared/variableResolver'
+import { resolveValue, pickProfile, resolveProfileVars, BUILT_IN_VARIABLES } from '../../shared/variableResolver'
 import { resolveProjectId } from '../../shared/projectResolution'
 import { getCursorHighlightScript } from './captureShared'
 import { FlowStorage } from '../storage/flowStorage'
@@ -155,6 +155,17 @@ export class Replayer {
     return this.sessionVars
   }
 
+  /** Resolve {{...}} placeholders against this replay's tiers. Every value the replayer
+   *  touches — locator expressions, iframe chains, action values, upload paths — goes
+   *  through exactly these three tiers, so they are named in one place. */
+  private resolve(value: string): string {
+    return resolveValue(value, {
+      sessionVars: this.sessionVars,
+      profileVars: this.ctx.profileVars,
+      envVars: this.ctx.envVars,
+    })
+  }
+
   private async executeCallFlow(
     action: Action,
     onNodeStart: NodeStartCallback,
@@ -214,7 +225,7 @@ export class Replayer {
   private scopeFor(action: Action): Page | FrameLocator {
     let scope: Page | FrameLocator = this.pageFor(action)
     for (const frameExpr of action.framePath ?? []) {
-      const resolved = resolveValueWithSession(frameExpr, this.sessionVars, this.ctx.profileVars, this.ctx.envVars)
+      const resolved = this.resolve(frameExpr)
       // Deliberate dynamic eval: framePath entries are locator expressions, not data.
       const fn = new Function('s', `return s.${resolved}`)
       scope = (fn(scope) as Locator).contentFrame()
@@ -231,7 +242,7 @@ export class Replayer {
     if (action.locatorExpr) {
       try {
         // Resolve {{...}} variables before evaluating the locator expression
-        const resolved = resolveValueWithSession(action.locatorExpr, this.sessionVars, this.ctx.profileVars, this.ctx.envVars)
+        const resolved = this.resolve(action.locatorExpr)
         // Deliberate dynamic eval: locatorExpr is Playwright code, not user data.
         const fn = new Function('page', `return page.${resolved}`)
         return fn(scope) as Locator
@@ -286,9 +297,7 @@ export class Replayer {
     const rawValue = action.value != null
       ? (action.secret ? decryptIfNeeded(action.value) : action.value)
       : undefined
-    const val = rawValue != null
-      ? resolveValueWithSession(rawValue, this.sessionVars, this.ctx.profileVars, this.ctx.envVars)
-      : undefined
+    const val = rawValue != null ? this.resolve(rawValue) : undefined
 
     // If this action opens a popup, start waiting for the page event BEFORE executing
     // (mirrors the exported waitForEvent('popup') pattern).
@@ -317,9 +326,7 @@ export class Replayer {
         break
       case 'selectOption':
         if (action.values?.length) {
-          await this.getLocator(action).selectOption(
-            action.values.map((v) => resolveValueWithSession(v, this.sessionVars, this.ctx.profileVars, this.ctx.envVars)),
-          )
+          await this.getLocator(action).selectOption(action.values.map((v) => this.resolve(v)))
         } else {
           await this.getLocator(action).selectOption(val ?? '')
         }
@@ -343,7 +350,7 @@ export class Replayer {
         // Paths are relative to the data root (fixtures/…) or absolute — the main
         // process cwd isn't the data root once packaged, so resolve explicitly.
         const raw = action.filePaths?.length
-          ? action.filePaths.map((p) => resolveValueWithSession(p, this.sessionVars, this.ctx.profileVars, this.ctx.envVars))
+          ? action.filePaths.map((p) => this.resolve(p))
           : (val ?? '').split(',')
         const files = raw.map((s) => s.trim()).filter(Boolean).map((s) => FixtureStorage.toAbsolute(s))
         if (!files.length) throw new Error('上傳節點沒有檔案路徑 — 請在屬性面板選擇檔案')
@@ -392,8 +399,10 @@ export class Replayer {
   private buildCodeVars(): Record<string, unknown> {
     const vars: Record<string, unknown> = { ...this.ctx.envVars, ...this.ctx.profileVars }
     for (const [k, v] of this.sessionVars) vars[k] = v
-    for (const name of ['randomText', 'randomNumber', 'randomOneText', 'randomOneNumber', 'timestamp']) {
-      if (!(name in vars)) vars[name] = () => resolveValue(`{{${name}}}`)
+    // The generator itself, so each `vars.randomText()` call yields a fresh value —
+    // parity with the exported spec, whose `vars` literal holds the uncalled `_ft*` helper.
+    for (const v of BUILT_IN_VARIABLES) {
+      if (!(v.name in vars)) vars[v.name] = v.generate
     }
     return vars
   }

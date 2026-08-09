@@ -76,7 +76,7 @@ export function ProfileVarList() {
             // A private value is ciphertext here; resolving it would be meaningless, and it
             // must stay masked until the user explicitly reveals it.
             const referencesEnvVar = !v.secret && hasVariables(rawValue)
-            const resolvedValue = v.secret ? rawValue : resolveValue(rawValue, undefined, envVars)
+            const resolvedValue = v.secret ? rawValue : resolveValue(rawValue, { envVars })
             return (
               <div
                 key={v.key}

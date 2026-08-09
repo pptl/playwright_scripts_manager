@@ -5,40 +5,22 @@ export interface VariableDefinition {
   placeholder: string
   description: string
   example: string
+  /** Runtime value, fresh on every call. Used by replay and by the renderer's previews. */
+  generate: () => string
+  /** The identifier this variable is emitted as in a generated spec, e.g. `_ftRandomText`.
+   *  Referenced *called* by `varToCodeRef` and *uncalled* by a code node's `vars` literal. */
+  helperFn: string
+  /**
+   * Source of `helperFn`, injected into any spec that uses built-ins. Must be self-contained
+   * (no cross-helper references) since the block is assembled by joining these.
+   *
+   * Deliberately hand-written rather than derived from `generate.toString()`: the bundler
+   * rewrites function bodies, and the emitted source is TypeScript (see `_ftTimestamp`'s
+   * typed inner `p`). Keeping both spellings in one entry is what makes a drift between
+   * them visible — it is the only guarantee this registry can offer.
+   */
+  helperSource: string
 }
-
-export const BUILT_IN_VARIABLES: VariableDefinition[] = [
-  {
-    name: 'randomText',
-    placeholder: '{{randomText}}',
-    description: '隨機 8 個字元字串',
-    example: 'wpmeorrt',
-  },
-  {
-    name: 'randomNumber',
-    placeholder: '{{randomNumber}}',
-    description: '隨機 8 位數字',
-    example: '47291836',
-  },
-  {
-    name: 'randomOneText',
-    placeholder: '{{randomOneText}}',
-    description: '一個 A~Z 的隨機字母',
-    example: 'G',
-  },
-  {
-    name: 'randomOneNumber',
-    placeholder: '{{randomOneNumber}}',
-    description: '一個 0~9 的隨機數字',
-    example: '4',
-  },
-  {
-    name: 'timestamp',
-    placeholder: '{{timestamp}}',
-    description: '目前時間戳記 (yyyyMMddHHmmssSSS)',
-    example: '20260616143022123',
-  },
-]
 
 function pad(n: number, width = 2): string {
   return String(n).padStart(width, '0')
@@ -74,6 +56,78 @@ function generateTimestamp(): string {
     `${pad(d.getMilliseconds(), 3)}`
   )
 }
+
+/**
+ * The built-in variables, defined once.
+ *
+ * Every consumer — runtime resolution, codegen references, the emitted helper block, the
+ * `vars` object of a code node, and the renderer's sidebar — reads this table, so adding a
+ * built-in is a single entry rather than the seven hand-aligned sites it used to be.
+ */
+const BUILT_INS: Array<Omit<VariableDefinition, 'placeholder'>> = [
+  {
+    name: 'randomText',
+    description: '隨機 8 個字元字串',
+    example: 'wpmeorrt',
+    generate: generateRandomText,
+    helperFn: '_ftRandomText',
+    helperSource: `function _ftRandomText(len = 8) {
+  return Math.random().toString(36).substring(2, 2 + len).padEnd(len, '0');
+}`,
+  },
+  {
+    name: 'randomNumber',
+    description: '隨機 8 位數字',
+    example: '47291836',
+    generate: generateRandomNumber,
+    helperFn: '_ftRandomNumber',
+    helperSource: `function _ftRandomNumber(len = 8) {
+  const min = Math.pow(10, len - 1);
+  const max = Math.pow(10, len) - 1;
+  return String(Math.floor(Math.random() * (max - min + 1)) + min);
+}`,
+  },
+  {
+    name: 'randomOneText',
+    description: '一個 A~Z 的隨機字母',
+    example: 'G',
+    generate: generateRandomOneLetter,
+    helperFn: '_ftRandomOneLetter',
+    helperSource: `function _ftRandomOneLetter() {
+  return String.fromCharCode(65 + Math.floor(Math.random() * 26));
+}`,
+  },
+  {
+    name: 'randomOneNumber',
+    description: '一個 0~9 的隨機數字',
+    example: '4',
+    generate: generateRandomOneDigit,
+    helperFn: '_ftRandomOneDigit',
+    helperSource: `function _ftRandomOneDigit() {
+  return String(Math.floor(Math.random() * 10));
+}`,
+  },
+  {
+    name: 'timestamp',
+    description: '目前時間戳記 (yyyyMMddHHmmssSSS)',
+    example: '20260616143022123',
+    generate: generateTimestamp,
+    helperFn: '_ftTimestamp',
+    helperSource: `function _ftTimestamp() {
+  const d = new Date();
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  return \`\${d.getFullYear()}\${p(d.getMonth() + 1)}\${p(d.getDate())}\${p(d.getHours())}\${p(d.getMinutes())}\${p(d.getSeconds())}\${p(d.getMilliseconds(), 3)}\`;
+}`,
+  },
+]
+
+/** `placeholder` is derived from `name` so the two can never drift apart. */
+export const BUILT_IN_VARIABLES: VariableDefinition[] = BUILT_INS.map((v) => ({
+  ...v,
+  placeholder: `{{${v.name}}}`,
+}))
+
+const BUILT_IN_BY_NAME = new Map(BUILT_IN_VARIABLES.map((v) => [v.name, v]))
 
 /** Max passes when resolving nested placeholders (e.g. a profile value that references
  *  an environment variable). Also guards against circular references. */
@@ -128,60 +182,38 @@ export function resolveProfileVars(
   return Object.fromEntries(
     vars.map((v) => {
       const raw = (activeEnvironmentId && v.envValues?.[activeEnvironmentId]) ?? v.value
-      return [v.key, resolveValue(decrypt(raw), undefined, envVars)]
+      return [v.key, resolveValue(decrypt(raw), { envVars })]
     }),
   )
 }
 
-/** Resolve all {{...}} placeholders in a value string at runtime (used by Replayer).
- *  Iterates so that a profile value expanding into {{envKey}} gets fully resolved.
- *  Priority per pass: profile vars > env vars > built-ins. */
-export function resolveValue(
-  value: string,
-  profileVars?: Record<string, string>,
-  envVars?: Record<string, string>,
-): string {
-  let out = value
-  for (let i = 0; i < MAX_RESOLVE_PASSES && /\{\{\w+\}\}/.test(out); i++) {
-    const prev = out
-    out = out.replace(/\{\{(\w+)\}\}/g, (match, name) => {
-      if (profileVars && name in profileVars) return profileVars[name]
-      if (envVars && name in envVars) return envVars[name]
-      if (name === 'randomText') return generateRandomText()
-      if (name === 'randomNumber') return generateRandomNumber()
-      if (name === 'randomOneText') return generateRandomOneLetter()
-      if (name === 'randomOneNumber') return generateRandomOneDigit()
-      if (name === 'timestamp') return generateTimestamp()
-      return match
-    })
-    if (out === prev) break
-  }
-  return out
+/** The variable tiers a value is resolved against. Every field is optional — an absent tier
+ *  is simply skipped, so `resolveValue(v)` resolves built-ins only. */
+export interface RuntimeVarScope {
+  sessionVars?: Map<string, string>
+  profileVars?: Record<string, string>
+  envVars?: Record<string, string>
 }
 
 /**
- * Like resolveValue but also checks session variables first.
- * Priority: session vars > profile vars > env vars > built-ins.
+ * Resolve all {{...}} placeholders in a value string at runtime (used by Replayer).
+ * Iterates so that a profile value expanding into {{envKey}} gets fully resolved.
+ * Priority per pass: session vars > profile vars > env vars > built-ins.
+ *
+ * The tiers arrive as one object rather than as positional parameters: session vars rank
+ * highest but would have to sit last, and most call sites want neither the first nor the
+ * second tier. Same reasoning as `ResolutionContext`.
  */
-export function resolveValueWithSession(
-  value: string,
-  sessionVars: Map<string, string>,
-  profileVars?: Record<string, string>,
-  envVars?: Record<string, string>,
-): string {
+export function resolveValue(value: string, vars: RuntimeVarScope = {}): string {
+  const { sessionVars, profileVars, envVars } = vars
   let out = value
   for (let i = 0; i < MAX_RESOLVE_PASSES && /\{\{\w+\}\}/.test(out); i++) {
     const prev = out
     out = out.replace(/\{\{(\w+)\}\}/g, (match, name) => {
-      if (sessionVars.has(name)) return sessionVars.get(name)!
+      if (sessionVars?.has(name)) return sessionVars.get(name)!
       if (profileVars && name in profileVars) return profileVars[name]
       if (envVars && name in envVars) return envVars[name]
-      if (name === 'randomText') return generateRandomText()
-      if (name === 'randomNumber') return generateRandomNumber()
-      if (name === 'randomOneText') return generateRandomOneLetter()
-      if (name === 'randomOneNumber') return generateRandomOneDigit()
-      if (name === 'timestamp') return generateTimestamp()
-      return match
+      return BUILT_IN_BY_NAME.get(name)?.generate() ?? match
     })
     if (out === prev) break
   }
@@ -199,7 +231,7 @@ export const ENV_VAR_PREFIX = '_ftEnv_'
 
 /**
  * Which variable names are in scope during code generation, by tier.
- * Mirrors the runtime priority of resolveValueWithSession:
+ * Mirrors the runtime priority of resolveValue:
  * session > profile > project env > built-in.
  */
 export interface CodegenVarScope {
@@ -231,11 +263,10 @@ function varToCodeRef(name: string, scope: CodegenVarScope): string | null {
   if (scope.sessionVars?.has(name)) return name
   if (scope.profileVars?.has(name)) return `${PROFILE_VAR_PREFIX}${name}`
   if (scope.envVars?.has(name)) return `${ENV_VAR_PREFIX}${name}`
-  if (name === 'randomText') return '_ftRandomText()'
-  if (name === 'randomNumber') return '_ftRandomNumber()'
-  if (name === 'randomOneText') return '_ftRandomOneLetter()'
-  if (name === 'randomOneNumber') return '_ftRandomOneDigit()'
-  if (name === 'timestamp') return '_ftTimestamp()'
+  const builtIn = BUILT_IN_BY_NAME.get(name)
+  // Called here — the placeholder stands for a value. A code node's `vars` literal
+  // references the same helper *uncalled*, so each `vars.x()` yields a fresh value.
+  if (builtIn) return `${builtIn.helperFn}()`
   return null
 }
 
@@ -405,24 +436,11 @@ function _ftSecret(name: string): string {
 }
 `
 
-/** Helper functions block to inject into generated spec files when built-in variables are used. */
-export const VARIABLE_HELPERS_CODE = `
-function _ftRandomText(len = 8) {
-  return Math.random().toString(36).substring(2, 2 + len).padEnd(len, '0');
-}
-function _ftRandomNumber(len = 8) {
-  const min = Math.pow(10, len - 1);
-  return String(Math.floor(Math.random() * (Math.pow(10, len) - min)) + min);
-}
-function _ftRandomOneLetter() {
-  return String.fromCharCode(65 + Math.floor(Math.random() * 26));
-}
-function _ftRandomOneDigit() {
-  return String(Math.floor(Math.random() * 10));
-}
-function _ftTimestamp() {
-  const d = new Date();
-  const p = (n: number, w = 2) => String(n).padStart(w, '0');
-  return \`\${d.getFullYear()}\${p(d.getMonth() + 1)}\${p(d.getDate())}\${p(d.getHours())}\${p(d.getMinutes())}\${p(d.getSeconds())}\${p(d.getMilliseconds(), 3)}\`;
-}
-`
+/**
+ * Helper functions block to inject into generated spec files when built-in variables are used.
+ *
+ * Always emitted whole rather than per-used-variable: a `code` node's `vars` literal
+ * references every helper by identifier, so a selective block would compile fine here and
+ * die with a ReferenceError inside the generated spec.
+ */
+export const VARIABLE_HELPERS_CODE = `\n${BUILT_IN_VARIABLES.map((v) => v.helperSource).join('\n')}\n`

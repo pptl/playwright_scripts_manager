@@ -1,12 +1,20 @@
 import { useEffect, useRef } from 'react'
 import { useConfirmStore, type ConfirmAction } from '../../stores/confirmStore'
+import { token, zIndex, radius } from '../../styles/tokens'
+import { Button, type ButtonTone } from './Button'
 
 /**
  * Renders confirm requests raised via `confirm()`.
  * Mounted exactly once, at the end of App.tsx.
  *
- * zIndex 4000 sits above the 2000-level modals (ProfileEditorModal, ProjectEnvVarModal)
- * and the 3000-level dialogs (FlowList, GroupNameModal) so it can be raised from inside them.
+ * `zIndex.confirm` is the top of the scale — above the panel modals
+ * (ProfileEditorModal, ProjectEnvVarModal) and the compact dialogs
+ * (FlowList, GroupNameModal), so it can be raised from inside any of them.
+ *
+ * This deliberately does NOT use the shared <Modal>: Enter has to resolve to the
+ * request's own `defaultActionId` (which is 取消 on danger dialogs), and the
+ * focus handling is queue-aware. <Modal> was modelled on this component, not the
+ * other way round.
  */
 export function ConfirmHost() {
   const queue = useConfirmStore((s) => s.queue)
@@ -46,58 +54,55 @@ export function ConfirmHost() {
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0,0,0,0.6)',
+        background: token.backdrop,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        zIndex: 4000,
+        zIndex: zIndex.confirm,
       }}
       onMouseDown={() => answer(null)}
     >
       <div
         onMouseDown={(e) => e.stopPropagation()}
         style={{
-          background: '#1e293b',
-          border: '1px solid #334155',
-          borderRadius: 12,
+          background: token.bgPanel,
+          border: `1px solid ${token.border}`,
+          borderRadius: radius.lg,
           padding: 24,
           minWidth: 340,
           maxWidth: 460,
         }}
       >
-        <h2 style={{ fontSize: 16, color: '#e2e8f0', margin: '0 0 6px' }}>{front.title}</h2>
+        <h2 style={{ fontSize: 16, color: token.text, margin: '0 0 6px' }}>{front.title}</h2>
         {front.message && (
-          <div style={{ fontSize: 13, color: '#cbd5e1', marginBottom: front.detail ? 6 : 16, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 13, color: token.textBody, marginBottom: front.detail ? 6 : 16, lineHeight: 1.6 }}>
             {front.message}
           </div>
         )}
         {front.detail && (
-          <div style={{ fontSize: 12, color: '#64748b', marginBottom: 16, lineHeight: 1.6 }}>{front.detail}</div>
+          <div style={{ fontSize: 12, color: token.textMuted, marginBottom: 16, lineHeight: 1.6 }}>{front.detail}</div>
         )}
         {!front.message && !front.detail && <div style={{ marginBottom: 16 }} />}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           {actions.map((a) => (
-            <button
+            <Button
               key={a.id}
               ref={a.id === front.defaultActionId ? defaultBtnRef : undefined}
               onClick={() => answer(a.id)}
-              style={{
-                padding: '6px 16px',
-                borderRadius: 6,
-                fontSize: 12,
-                cursor: 'pointer',
-                ...(a.tone === 'danger'
-                  ? { border: 'none', background: '#dc2626', color: '#fff' }
-                  : a.tone === 'primary'
-                    ? { border: 'none', background: '#6366f1', color: '#fff' }
-                    : { border: '1px solid #475569', background: 'transparent', color: '#94a3b8' }),
-              }}
+              tone={CONFIRM_TONE[a.tone ?? 'ghost']}
             >
               {a.label}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
     </div>
   )
+}
+
+/** confirmStore's tone vocabulary predates Button's; `primary` here has always been indigo. */
+const CONFIRM_TONE: Record<NonNullable<ConfirmAction['tone']>, ButtonTone> = {
+  primary: 'primaryAlt',
+  danger: 'danger',
+  ghost: 'ghost',
 }

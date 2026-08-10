@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
+import { useProjectStore } from '../../stores/projectStore'
 import { SecretValue } from '../common/SecretValue'
 
 /** Sidebar list of the current project's environment variables, showing each
  *  key with its value for the active environment. Click a row to copy {{key}}. */
 export function ProjectEnvVarList() {
-  const { currentFlow, currentProject, activeEnvironmentId } = useFlowStore()
+  const currentFlow = useFlowStore((s) => s.currentFlow)
+  const { currentProject, activeEnvironmentId } = useProjectStore()
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
   if (!currentFlow?.projectId || currentFlow.projectId !== currentProject?.id) return null

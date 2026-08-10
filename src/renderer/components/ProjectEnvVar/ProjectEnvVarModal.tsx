@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
-import { useFlowStore } from '../../stores/flowStore'
+import { useProjectStore } from '../../stores/projectStore'
 import { DOMAIN_ENV_KEY, SECRET_ENVELOPE_PREFIX } from '@shared/types'
 import type { ProjectEnvVar } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
 import { useVault } from '../../hooks/useVault'
+import { Modal } from '../common/Modal'
+import { Button } from '../common/Button'
+import { token, radius } from '../../styles/tokens'
 
 const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
 
@@ -60,7 +63,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     duplicateEnvironment,
     deleteEnvironment,
     commitProjectEnvVars,
-  } = useFlowStore()
+  } = useProjectStore()
 
   const { ensureUsable } = useVault()
 
@@ -174,7 +177,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     )
     // Re-load from the store: rows added here still carry `_origKey: null`, so a second
     // 儲存 would append them all over again.
-    setRows(toEditRows(useFlowStore.getState().currentProject?.envVars ?? [], selectedEnv.id))
+    setRows(toEditRows(useProjectStore.getState().currentProject?.envVars ?? [], selectedEnv.id))
   }
 
   /** Enter saves the whole table; spread onto the cell inputs. */
@@ -237,9 +240,9 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
   const gridCols = '1fr 1fr 28px 32px'
   const envBtnStyle: React.CSSProperties = {
     background: 'transparent',
-    border: '1px solid #334155',
+    border: `1px solid ${token.border}`,
     borderRadius: 4,
-    color: '#cbd5e1',
+    color: token.textBody,
     fontSize: 12,
     padding: '2px 8px',
     cursor: 'pointer',
@@ -247,67 +250,70 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
   }
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.65)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 2000,
-      }}
-    >
-      <div
-        style={{
-          background: '#1e293b',
-          border: '1px solid #334155',
-          borderRadius: 12,
-          width: 640,
-          maxHeight: '80vh',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '14px 20px',
-            borderBottom: '1px solid #334155',
-            flexShrink: 0,
-          }}
-        >
-          <div>
-            <span style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0' }}>專案環境變數</span>
-            <span style={{ fontSize: 12, color: '#64748b', marginLeft: 10 }}>
-              {currentProject?.name ?? ''}（配置可用 {'{{key}}'} 引用）
-            </span>
-          </div>
-          <button
-            onClick={onClose}
-            style={{ background: 'transparent', border: 'none', color: '#64748b', fontSize: 18, cursor: 'pointer' }}
-          >
-            ✕
-          </button>
+    <Modal
+      variant="panel"
+      width={640}
+      onClose={onClose}
+      // Same reasoning as ProfileEditorModal: a stray backdrop click would silently
+      // discard the whole in-progress table, and there is no dirty tracking by design.
+      closeOnBackdrop={false}
+      closeOnEscape={false}
+      // The env switcher is pinned and only the table scrolls, so the body has to be
+      // a flex column — Modal's default body is a plain scroll box.
+      bodyStyle={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+      title={
+        <div>
+          <span style={{ fontSize: 15, fontWeight: 700, color: token.text }}>專案環境變數</span>
+          <span style={{ fontSize: 12, color: token.textMuted, marginLeft: 10 }}>
+            {currentProject?.name ?? ''}（配置可用 {'{{key}}'} 引用）
+          </span>
         </div>
+      }
+      footer={
+        <>
+          {environments.length > 0 && (
+            <button
+              onClick={addRow}
+              className="ft-btn"
+              style={{
+                padding: '6px 14px',
+                borderRadius: radius.sm,
+                border: `1px dashed ${token.border}`,
+                background: 'transparent',
+                color: token.accent,
+                fontSize: 12,
+                cursor: 'pointer',
+              }}
+            >
+              ＋ 新增變數
+            </button>
+          )}
+          <div style={{ flex: 1 }} />
+          {error && <span style={{ fontSize: 11, color: token.dangerFg, whiteSpace: 'nowrap' }}>{error}</span>}
+          <Button tone="primary" onClick={() => void handleSave()}>
+            儲存
+          </Button>
+          <Button size="md" onClick={onClose}>
+            關閉
+          </Button>
+        </>
+      }
+    >
+      <>
 
         {/* Env switcher */}
         {environments.length > 0 && (
           <div
             style={{
               padding: '6px 16px',
-              borderBottom: '1px solid #334155',
+              borderBottom: `1px solid ${token.border}`,
               display: 'flex',
               alignItems: 'center',
               gap: 8,
               flexShrink: 0,
             }}
           >
-            <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>環境:</span>
+            <span style={{ fontSize: 11, color: token.textMuted, whiteSpace: 'nowrap' }}>環境:</span>
             {addingEnv ? (
               <>
                 <input
@@ -319,9 +325,9 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     if (e.key === 'Escape') { setAddingEnv(false); setNewEnvName('') }
                   }}
                   placeholder="環境名稱，例如 DEV / UAT / PRD"
-                  style={{ ...cellInputStyle, width: 200, border: '1px solid #3b82f6' }}
+                  style={{ ...cellInputStyle, width: 200, border: `1px solid ${token.accent}` }}
                 />
-                <button onClick={commitAddEnv} title="確認" style={{ ...envBtnStyle, borderColor: '#3b82f6', color: '#93c5fd' }}>✓</button>
+                <button onClick={commitAddEnv} title="確認" style={{ ...envBtnStyle, borderColor: token.accent, color: token.accentFg }}>✓</button>
                 <button onClick={() => { setAddingEnv(false); setNewEnvName('') }} title="取消" style={envBtnStyle}>✕</button>
               </>
             ) : renamingEnv ? (
@@ -334,9 +340,9 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     if (e.key === 'Enter') commitRenameEnv()
                     if (e.key === 'Escape') setRenamingEnv(false)
                   }}
-                  style={{ ...cellInputStyle, width: 160, border: '1px solid #3b82f6' }}
+                  style={{ ...cellInputStyle, width: 160, border: `1px solid ${token.accent}` }}
                 />
-                <button onClick={commitRenameEnv} title="確認" style={{ ...envBtnStyle, borderColor: '#3b82f6', color: '#93c5fd' }}>✓</button>
+                <button onClick={commitRenameEnv} title="確認" style={{ ...envBtnStyle, borderColor: token.accent, color: token.accentFg }}>✓</button>
                 <button onClick={() => setRenamingEnv(false)} title="取消" style={envBtnStyle}>✕</button>
               </>
             ) : (
@@ -346,10 +352,10 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                   // The value column is per-environment — switching reloads the table.
                   onChange={(e) => setActiveEnvironment(e.target.value || null)}
                   style={{
-                    background: '#0f172a',
-                    border: '1px solid #334155',
+                    background: token.bgPage,
+                    border: `1px solid ${token.border}`,
                     borderRadius: 4,
-                    color: '#e2e8f0',
+                    color: token.text,
                     fontSize: 12,
                     padding: '2px 6px',
                     cursor: 'pointer',
@@ -369,8 +375,8 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                   title={environments.length <= 1 ? '至少需保留一個環境' : '刪除此環境'}
                   style={{
                     ...envBtnStyle,
-                    color: environments.length <= 1 ? '#475569' : '#f87171',
-                    borderColor: environments.length <= 1 ? '#334155' : '#7f1d1d',
+                    color: environments.length <= 1 ? token.borderStrong : token.dangerFg,
+                    borderColor: environments.length <= 1 ? token.border : token.dangerDark,
                     cursor: environments.length <= 1 ? 'not-allowed' : 'pointer',
                   }}
                 >
@@ -379,7 +385,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                 <button
                   onClick={() => { setNewEnvName(''); setAddingEnv(true) }}
                   title="新增環境"
-                  style={{ ...envBtnStyle, borderColor: '#3b82f6', color: '#93c5fd' }}
+                  style={{ ...envBtnStyle, borderColor: token.accent, color: token.accentFg }}
                 >
                   ＋ 新增
                 </button>
@@ -391,7 +397,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
         {/* Body */}
         <div style={{ overflowY: 'auto', flex: 1, padding: '8px 0' }}>
           {environments.length === 0 ? (
-            <div style={{ padding: 24, color: '#f59e0b', fontSize: 13 }}>
+            <div style={{ padding: 24, color: token.warning, fontSize: 13 }}>
               此專案尚無環境。請先在工具列的 🌐 環境選單新增環境（如 DEV / UAT / PRD），才能填寫各環境的值。
             </div>
           ) : (
@@ -403,14 +409,14 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                   gridTemplateColumns: gridCols,
                   gap: 8,
                   padding: '4px 16px 8px',
-                  borderBottom: '1px solid #0f172a',
+                  borderBottom: `1px solid ${token.bgPage}`,
                 }}
               >
-                <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>變數名稱</span>
-                <span style={{ fontSize: 11, color: '#4ade80', fontWeight: 600 }}>
+                <span style={{ fontSize: 11, color: token.textMuted, fontWeight: 600 }}>變數名稱</span>
+                <span style={{ fontSize: 11, color: token.successFg, fontWeight: 600 }}>
                   值{selectedEnv ? ` (${selectedEnv.name})` : ''}
                 </span>
-                <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textAlign: 'center' }} title="私密資料：加密後才寫入檔案">
+                <span style={{ fontSize: 11, color: token.textMuted, fontWeight: 600, textAlign: 'center' }} title="私密資料：加密後才寫入檔案">
                   🔐
                 </span>
                 <span />
@@ -437,7 +443,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     onChange={(e) => setCell(row._rid, 'key', e.target.value)}
                     onKeyDown={cellKeyDown}
                     placeholder="key"
-                    style={isDomain ? { ...cellInputStyle, color: '#94a3b8', cursor: 'not-allowed' } : cellInputStyle}
+                    style={isDomain ? { ...cellInputStyle, color: token.textSecondary, cursor: 'not-allowed' } : cellInputStyle}
                     title={isDomain ? 'domain 為保留變數，無法改名或刪除' : '變數名稱（配置以 {{key}} 引用）'}
                   />
                   <input
@@ -448,12 +454,12 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     // A private row loads masked with no plaintext in the renderer at all,
                     // so say so rather than showing a misleading empty field.
                     placeholder={row.secret && !row._dirty ? '（已加密，輸入以覆寫）' : '(空)'}
-                    style={{ ...cellInputStyle, borderColor: row.secret ? '#a16207' : '#166534' }}
+                    style={{ ...cellInputStyle, borderColor: row.secret ? SECRET_FIELD_BORDER : token.successDark }}
                   />
                   {isDomain ? (
                     <span
                       title="domain 會被寫入 goto 網址，無法設為私密"
-                      style={{ textAlign: 'center', color: '#475569', fontSize: 11 }}
+                      style={{ textAlign: 'center', color: token.borderStrong, fontSize: 11 }}
                     >
                       —
                     </span>
@@ -475,7 +481,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                     </button>
                   )}
                   {isDomain ? (
-                    <span title="domain 為保留變數，無法刪除" style={{ textAlign: 'center', color: '#475569', fontSize: 13 }}>🔒</span>
+                    <span title="domain 為保留變數，無法刪除" style={{ textAlign: 'center', color: token.borderStrong, fontSize: 13 }}>🔒</span>
                   ) : (
                     <button
                       onClick={() => handleDeleteVar(row._rid)}
@@ -484,7 +490,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                         background: 'transparent',
                         border: 'none',
                         cursor: 'pointer',
-                        color: '#f87171',
+                        color: token.dangerFg,
                         fontSize: 16,
                         padding: '2px',
                         borderRadius: 3,
@@ -502,76 +508,30 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
               })}
 
               {rows.length === 0 && (
-                <div style={{ padding: '16px', color: '#64748b', fontSize: 12 }}>
+                <div style={{ padding: '16px', color: token.textMuted, fontSize: 12 }}>
                   尚無環境變數。點擊下方「新增變數」。
                 </div>
               )}
             </>
           )}
         </div>
-
-        {/* Add + footer */}
-        <div style={{ padding: 12, borderTop: '1px solid #334155', flexShrink: 0, display: 'flex', gap: 8, alignItems: 'center' }}>
-          {environments.length > 0 && (
-            <button
-              onClick={addRow}
-              style={{
-                padding: '6px 14px',
-                borderRadius: 4,
-                border: '1px dashed #334155',
-                background: 'transparent',
-                color: '#3b82f6',
-                fontSize: 12,
-                cursor: 'pointer',
-              }}
-            >
-              ＋ 新增變數
-            </button>
-          )}
-          <div style={{ flex: 1 }} />
-          {error && (
-            <span style={{ fontSize: 11, color: '#f87171', whiteSpace: 'nowrap' }}>{error}</span>
-          )}
-          <button
-            onClick={() => void handleSave()}
-            style={{
-              padding: '6px 16px',
-              borderRadius: 4,
-              border: 'none',
-              fontSize: 12,
-              fontWeight: 600,
-              background: '#3b82f6',
-              color: '#fff',
-              cursor: 'pointer',
-            }}
-          >
-            儲存
-          </button>
-          <button onClick={onClose} style={closeBtnStyle}>關閉</button>
-        </div>
-      </div>
-    </div>
+      </>
+    </Modal>
   )
 }
 
+/** Amber border marking a private field. A local one-off, matching the same
+ *  affordance in ProfileEditorModal — the two tables define it independently. */
+const SECRET_FIELD_BORDER = '#a16207'
+
 const cellInputStyle: React.CSSProperties = {
   padding: '4px 8px',
-  background: '#0f172a',
-  border: '1px solid #1e293b',
-  borderRadius: 4,
-  color: '#e2e8f0',
+  background: token.bgPage,
+  border: `1px solid ${token.borderSubtle}`,
+  borderRadius: radius.sm,
+  color: token.text,
   fontSize: 12,
   outline: 'none',
   width: '100%',
   transition: 'border-color 0.15s',
-}
-
-const closeBtnStyle: React.CSSProperties = {
-  padding: '7px 20px',
-  borderRadius: 6,
-  border: '1px solid #475569',
-  background: 'transparent',
-  color: '#94a3b8',
-  cursor: 'pointer',
-  fontSize: 13,
 }

@@ -1,7 +1,8 @@
 import { useCallback } from 'react'
 import { useWorkspaceStore } from '../stores/workspaceStore'
 import { useFlowStore } from '../stores/flowStore'
-import { useFlowManager } from './useFlowStore'
+import { useProjectStore } from '../stores/projectStore'
+import { useFlowManager } from './useFlowManager'
 import { useConfirmStore } from '../stores/confirmStore'
 
 /** Single-button notice — nothing to decide, just something to acknowledge. */
@@ -21,20 +22,21 @@ function notify(title: string, message: string): Promise<string | null> {
  */
 export function useWorkspace() {
   const { info, loading, installing, vault, setInfo, forget, installBrowser } = useWorkspaceStore()
-  const { refreshFlowList, refreshProjectList } = useFlowManager()
+  const { refreshFlowList } = useFlowManager()
 
   const resetForNewWorkspace = useCallback(async () => {
-    // setCurrentFlow(null) also clears selection, project, active environment and
-    // the undo history in one go.
+    // Both stores must be cleared: setCurrentFlow(null) covers selection and undo history,
+    // but the project context now lives in projectStore and would otherwise survive the
+    // switch and show the previous workspace's environments.
     useFlowStore.getState().setCurrentFlow(null)
     useFlowStore.getState().setFlows([])
-    useFlowStore.getState().setProjects([])
+    useProjectStore.getState().reset()
     // The main process already dropped the old key; pick up the new workspace's state
     // (which may auto-unlock from the remembered passphrase).
     await useWorkspaceStore.getState().refreshVault()
     await refreshFlowList()
-    await refreshProjectList()
-  }, [refreshFlowList, refreshProjectList])
+    await useProjectStore.getState().refreshProjects()
+  }, [refreshFlowList])
 
   /** Guard against swapping the folder out from under a live browser session. */
   const busy = useCallback(async (): Promise<boolean> => {

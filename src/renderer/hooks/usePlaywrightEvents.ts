@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useFlowStore } from '../stores/flowStore'
+import { useProjectStore } from '../stores/projectStore'
 import { useWorkspaceStore } from '../stores/workspaceStore'
 import type { Action } from '@shared/types'
 
@@ -17,19 +18,20 @@ async function reloadFromDisk(): Promise<void> {
   if (store.isRecording || store.isReplaying) return
 
   store.setFlows(await window.electronAPI.listFlows())
-  store.setProjects(await window.electronAPI.listProjects())
+  await useProjectStore.getState().refreshProjects()
 
   // The open project's environments / env vars can have changed too.
-  const openProject = store.currentProject
+  const openProject = useProjectStore.getState().currentProject
   if (openProject) {
     const project = await window.electronAPI.loadProject(openProject.id)
     if (project && project.updatedAt > openProject.updatedAt) {
-      const s = useFlowStore.getState()
-      s.setCurrentProject(project)
+      const { activeEnvironmentId, setProjectContext } = useProjectStore.getState()
       // Drop an active environment the incoming version no longer defines.
-      if (!project.environments.some((e) => e.id === s.activeEnvironmentId)) {
-        s.setActiveEnvironment(project.environments[0]?.id ?? null)
-      }
+      const envStillDefined = project.environments.some((e) => e.id === activeEnvironmentId)
+      setProjectContext(
+        project,
+        envStillDefined ? activeEnvironmentId : (project.environments[0]?.id ?? null),
+      )
     }
   }
 

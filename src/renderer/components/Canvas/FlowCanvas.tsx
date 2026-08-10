@@ -33,6 +33,8 @@ import type { Action, Flow } from '@shared/types'
 import { computeTreeLayout } from '../../utils/treeLayout'
 import { validateExtraction, extractSubflow } from '../../utils/subflowExtraction'
 import { getGroupBoundary, groupBoxRect } from '../../utils/groups'
+import { Menu, MenuItem } from '../common/Menu'
+import { notify } from '../../stores/confirmStore'
 
 const nodeTypes = { actionNode: ActionNode, groupNode: GroupNode, groupBox: GroupBox }
 const edgeTypes = { branchEdge: BranchEdge }
@@ -337,7 +339,7 @@ function FlowCanvasInner() {
     if (!currentFlow) return
     const validation = validateExtraction(currentFlow.nodes, selectedNodeIds)
     if (!validation.valid) {
-      alert(validation.error)
+      void notify({ title: '無法另存為子流程', message: validation.error })
       return
     }
     setExtractionInfo({ entryNodeId: validation.entryNodeId!, exitNodeId: validation.exitNodeId! })
@@ -350,7 +352,7 @@ function FlowCanvasInner() {
     if (!currentFlow) return
     const validation = validateExtraction(currentFlow.nodes, selectedNodeIds)
     if (!validation.valid) {
-      alert(validation.error)
+      void notify({ title: '無法組成群組', message: validation.error })
       return
     }
     setGroupModal(true)
@@ -514,49 +516,16 @@ function FlowCanvasInner() {
 
       {/* Empty-canvas right-click menu */}
       {paneMenu && (
-        <div
-          style={{ position: 'fixed', inset: 0, zIndex: 1000 }}
-          onMouseDown={() => setPaneMenu(null)}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          <div
-            style={{
-              position: 'absolute',
-              left: paneMenu.x,
-              top: paneMenu.y,
-              background: '#1e293b',
-              border: '1px solid #334155',
-              borderRadius: 8,
-              padding: 4,
-              minWidth: 140,
-              boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+        <Menu x={paneMenu.x} y={paneMenu.y} minWidth={140} onClose={() => setPaneMenu(null)}>
+          <MenuItem
+            icon="➕"
+            label="加入節點"
+            onClick={() => {
+              setAddNodeModal({ flowX: paneMenu.flowX, flowY: paneMenu.flowY })
+              setPaneMenu(null)
             }}
-            onMouseDown={(e) => e.stopPropagation()}
-          >
-            <div
-              onClick={() => {
-                setAddNodeModal({ flowX: paneMenu.flowX, flowY: paneMenu.flowY })
-                setPaneMenu(null)
-              }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '8px 10px',
-                borderRadius: 6,
-                cursor: 'pointer',
-                color: '#e2e8f0',
-                fontSize: 13,
-                userSelect: 'none',
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = '#334155')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-            >
-              <span>➕</span>
-              <span>加入節點</span>
-            </div>
-          </div>
-        </div>
+          />
+        </Menu>
       )}
 
       {addNodeModal && (

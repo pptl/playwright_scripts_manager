@@ -1,5 +1,8 @@
 import { useEffect, useRef } from 'react'
 import type { TestFinishedPayload } from '@shared/types'
+import { Modal } from '../common/Modal'
+import { Button } from '../common/Button'
+import { token, radius } from '../../styles/tokens'
 
 interface TestOutputModalProps {
   lines: string[]
@@ -14,7 +17,7 @@ export function TestOutputModal({ lines, finished, onClose }: TestOutputModalPro
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [lines])
 
-  const statusColor = finished == null ? '#93c5fd' : finished.passed ? '#86efac' : '#f87171'
+  const statusColor = finished == null ? token.accentFg : finished.passed ? SUCCESS_TEXT : token.dangerFg
   const statusText =
     finished == null
       ? '⟳ 測試執行中...'
@@ -22,113 +25,68 @@ export function TestOutputModal({ lines, finished, onClose }: TestOutputModalPro
         ? '✓ 所有測試通過'
         : `✗ 測試失敗 (exit ${finished.exitCode})`
 
+  // Dismissable only once the run is over — there is no way to cancel a run in
+  // flight (A2 in the cleanup backlog), so closing early would just orphan it.
+  const dismissable = finished !== null
+
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.7)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 2000,
-      }}
-    >
-      <div
-        style={{
-          background: '#0f172a',
-          border: '1px solid #334155',
-          borderRadius: 12,
-          width: 760,
-          maxWidth: '90vw',
-          maxHeight: '80vh',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '12px 16px',
-            borderBottom: '1px solid #1e293b',
-            flexShrink: 0,
-          }}
-        >
-          <span style={{ fontWeight: 600, fontSize: 14, color: '#e2e8f0' }}>執行所有測試</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: statusColor }}>{statusText}</span>
-            {finished &&(<button
+    <Modal
+      variant="panel"
+      title="執行所有測試"
+      width={760}
+      onClose={onClose}
+      closeOnBackdrop={dismissable}
+      closeOnEscape={dismissable}
+      cardStyle={{ background: token.bgPage, maxWidth: '90vw' }}
+      headerExtra={
+        <>
+          <span style={{ fontSize: 12, fontWeight: 600, color: statusColor }}>{statusText}</span>
+          {finished && (
+            <button
               onClick={() => window.electronAPI.showReport()}
-              disabled={finished === null}
+              className="ft-btn"
               style={{
                 padding: '4px 12px',
-                borderRadius: 6,
-                border: '1px solid #1d4ed8',
-                background: finished !== null ? '#1e40af' : 'transparent',
-                color: finished !== null ? '#bfdbfe' : '#64748b',
+                borderRadius: radius.md,
+                border: `1px solid ${token.accentDark}`,
+                background: REPORT_BTN_BG,
+                color: REPORT_BTN_FG,
                 fontSize: 12,
-                cursor: finished !== null ? 'pointer' : 'not-allowed',
-                opacity: finished !== null ? 1 : 0.5,
+                cursor: 'pointer',
               }}
             >
               顯示詳細報告
-            </button>)}
-            {finished && (
-              <button
-                onClick={onClose}
-                style={{
-                  padding: '4px 12px',
-                  borderRadius: 6,
-                  border: '1px solid #475569',
-                  background: 'transparent',
-                  color: '#94a3b8',
-                  fontSize: 12,
-                  cursor: 'pointer',
-                }}
-              >
-                關閉
-              </button>
-            )}
+            </button>
+          )}
+          {finished && <Button onClick={onClose}>關閉</Button>}
+        </>
+      }
+      bodyStyle={{
+        padding: '12px 16px',
+        fontFamily: 'monospace',
+        fontSize: 12,
+        lineHeight: 1.6,
+        color: token.textBody,
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-all',
+      }}
+      footer={
+        finished ? (
+          <div style={{ fontSize: 11, color: token.textMuted, marginRight: 'auto' }}>
+            點擊「顯示詳細報告」可開啟 Playwright HTML 報告。點擊背景、按 Esc 或「關閉」以關閉此視窗。
           </div>
-        </div>
-
-        {/* Output */}
-        <div
-          style={{
-            flex: 1,
-            overflowY: 'auto',
-            padding: '12px 16px',
-            fontFamily: 'monospace',
-            fontSize: 12,
-            lineHeight: 1.6,
-            color: '#cbd5e1',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-all',
-          }}
-        >
-          {lines.join('')}
-          <div ref={bottomRef} />
-        </div>
-
-        {/* Footer note when finished */}
-        {finished && (
-          <div
-            style={{
-              padding: '8px 16px',
-              borderTop: '1px solid #1e293b',
-              fontSize: 11,
-              color: '#64748b',
-              flexShrink: 0,
-            }}
-          >
-            點擊「顯示詳細報告」可開啟 Playwright HTML 報告。點擊背景或按「關閉」以關閉此視窗。
-          </div>
-        )}
-      </div>
-    </div>
+        ) : undefined
+      }
+    >
+      {lines.join('')}
+      <div ref={bottomRef} />
+    </Modal>
   )
 }
+
+// Local one-offs, not part of the token palette: the pale pass-green reads better
+// than --ft-success-fg against the dark console ground, and the report button is
+// the only place this blue pairing appears.
+const SUCCESS_TEXT = '#86efac'
+const REPORT_BTN_BG = '#1e40af'
+const REPORT_BTN_FG = '#bfdbfe'

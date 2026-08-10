@@ -4,9 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FlowTest</title>
+    <!--
+      Pre-JS paint only. The real rules live in src/renderer/styles/tokens.css,
+      which main.tsx imports; this block just stops the window flashing a
+      different ground colour before the bundle loads. Keep the two in sync.
+    -->
     <style>
       * { box-sizing: border-box; margin: 0; padding: 0; }
-      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; overflow: hidden; }
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; height: 100vh; overflow: hidden; }
       #root { height: 100vh; display: flex; flex-direction: column; }
     </style>
   </head>

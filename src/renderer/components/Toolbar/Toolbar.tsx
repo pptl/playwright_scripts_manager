@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
+import { useProjectStore } from '../../stores/projectStore'
 import { usePlaywright } from '../../hooks/usePlaywright'
-import { useFlowManager } from '../../hooks/useFlowStore'
+import { useFlowManager } from '../../hooks/useFlowManager'
 import { useWorkspace } from '../../hooks/useWorkspace'
 import { TestOutputModal } from './TestOutputModal'
 import { ProfileEditorModal } from '../ProfileEditor/ProfileEditorModal'
@@ -9,8 +10,12 @@ import { ProjectEnvVarModal } from '../ProjectEnvVar/ProjectEnvVarModal'
 import type { ResolutionContext, TestFinishedPayload } from '../../../shared/types'
 import { DEFAULT_PROJECT_ID } from '../../../shared/types'
 import { useVault } from '../../hooks/useVault'
-import { useConfirmStore } from '../../stores/confirmStore'
+import { useConfirmStore, notify } from '../../stores/confirmStore'
 import { buildResolutionContext, getSecretEnvKeys } from '../../utils/varMaps'
+import { Modal } from '../common/Modal'
+import { Button } from '../common/Button'
+import { menuSurfaceStyle } from '../common/Menu'
+import { token, zIndex } from '../../styles/tokens'
 
 const btn = (label: string, onClick: () => void, disabled = false, danger = false) => (
   <button
@@ -21,8 +26,8 @@ const btn = (label: string, onClick: () => void, disabled = false, danger = fals
       borderRadius: 6,
       border: 'none',
       cursor: disabled ? 'not-allowed' : 'pointer',
-      background: danger ? '#dc2626' : disabled ? '#374151' : '#3b82f6',
-      color: disabled ? '#6b7280' : '#fff',
+      background: danger ? token.danger : disabled ? token.bgDisabled : token.accent,
+      color: disabled ? token.textDisabled : token.textOnAccent,
       fontSize: 13,
       fontWeight: 500,
     }}
@@ -36,21 +41,21 @@ const workspacePathStyle: React.CSSProperties = {
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
-  background: '#0f172a',
-  border: '1px solid #334155',
+  background: token.bgPage,
+  border: `1px solid ${token.border}`,
   borderRadius: 4,
   padding: '3px 8px',
-  color: '#94a3b8',
+  color: token.textSecondary,
   fontSize: 11,
   cursor: 'pointer',
 }
 
 const workspaceSwitchStyle: React.CSSProperties = {
-  background: '#0f172a',
-  border: '1px solid #334155',
+  background: token.bgPage,
+  border: `1px solid ${token.border}`,
   borderRadius: 4,
   padding: '3px 6px',
-  color: '#94a3b8',
+  color: token.textSecondary,
   fontSize: 11,
 }
 
@@ -64,17 +69,19 @@ export function Toolbar() {
     setReplaySpeed,
     activeProfileId,
     setActiveProfile,
-    currentProject,
-    projects,
-    activeEnvironmentId,
-    setActiveEnvironment,
-    addEnvironmentToProject,
     relayoutAll,
     past,
     future,
     undo,
     redo,
   } = useFlowStore()
+  const {
+    currentProject,
+    projects,
+    activeEnvironmentId,
+    setActiveEnvironment,
+    addEnvironmentToProject,
+  } = useProjectStore()
   const { startRecording, stopRecording } = usePlaywright()
   const { newFlow } = useFlowManager()
   const { root: workspaceRoot, pick: pickWorkspace, reveal } = useWorkspace()
@@ -160,12 +167,17 @@ export function Toolbar() {
   const selectedNode = currentFlow?.nodes.find((n) => n.id === selectedNodeId)
   const selectedLabel = selectedNode?.action.description ?? null
 
-  const handleNewFlow = async () => {
-    if (!newName) return
-    await newFlow(newName, newProjectId || undefined)
+  /** Also the Escape / backdrop path, so a dismissed dialog never keeps a stale draft. */
+  const closeNewFlowDialog = () => {
     setShowNewFlowDialog(false)
     setNewName('')
     setNewProjectId('')
+  }
+
+  const handleNewFlow = async () => {
+    if (!newName) return
+    await newFlow(newName, newProjectId || undefined)
+    closeNewFlowDialog()
   }
 
   const handleRelayout = () => {
@@ -197,11 +209,11 @@ export function Toolbar() {
         })
         if (choice === 'secrets') await handleWriteSecretsFile()
       } else {
-        alert(`腳本已匯出到:\n${path}`)
+        await notify({ title: '腳本已匯出', message: path })
       }
     } catch (err) {
       if (isLockedError(err)) promptUnlock('匯出腳本需要讀取私密資料，請先解鎖。')
-      else alert(`匯出失敗: ${String(err)}`)
+      else await notify({ title: '匯出失敗', message: String(err) })
     }
   }
 
@@ -220,7 +232,7 @@ export function Toolbar() {
       })
     } catch (err) {
       if (isLockedError(err)) promptUnlock('匯出密鑰檔需要讀取私密資料，請先解鎖。')
-      else alert(`匯出密鑰檔失敗: ${String(err)}`)
+      else await notify({ title: '匯出密鑰檔失敗', message: String(err) })
     }
   }
 
@@ -245,12 +257,12 @@ export function Toolbar() {
         alignItems: 'center',
         gap: 10,
         padding: '8px 16px',
-        background: '#1e293b',
-        borderBottom: '1px solid #334155',
+        background: token.bgPanel,
+        borderBottom: `1px solid ${token.border}`,
         flexShrink: 0,
       }}
     >
-      <span style={{ fontWeight: 700, fontSize: 16, color: '#60a5fa' }}>
+      <span style={{ fontWeight: 700, fontSize: 16, color: BRAND_BLUE }}>
         FlowTest
       </span>
 
@@ -307,8 +319,8 @@ export function Toolbar() {
             marginRight: 4,
             padding: '3px 8px',
             cursor: 'pointer',
-            color: vaultUsable ? '#4ade80' : '#f87171',
-            borderColor: vaultUsable ? '#166534' : '#7f1d1d',
+            color: vaultUsable ? token.successFg : token.dangerFg,
+            borderColor: vaultUsable ? token.successDark : token.dangerDark,
           }}
         >
           {vaultUsable ? '🔓 已解鎖' : '🔒 已鎖定'}
@@ -337,23 +349,23 @@ export function Toolbar() {
       {/* Status pill */}
       <div style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
         {isReplaying && (
-          <span style={pillStyle('#1d4ed8', '#93c5fd')}>⟳ 重播中</span>
+          <span style={pillStyle(token.accentDark, token.accentFg)}>⟳ 重播中</span>
         )}
         {isRecording && (
-          <span style={pillStyle('#7f1d1d', '#fca5a5')}>● 錄製中</span>
+          <span style={pillStyle(token.dangerDark, PILL_RED_FG)}>● 錄製中</span>
         )}
         {selectedLabel && !isRecording && !isReplaying && (
-          <span style={pillStyle('#14532d', '#86efac')} title={selectedLabel}>
+          <span style={pillStyle(token.successBg, PILL_GREEN_FG)} title={selectedLabel}>
             ✓ {selectedLabel.length > 24 ? selectedLabel.slice(0, 24) + '…' : selectedLabel}
           </span>
         )}
         {!selectedNodeId && !isRecording && !isReplaying && currentFlow && (
-          <span style={{ fontSize: 11, color: '#64748b' }}>右鍵點擊節點以操作</span>
+          <span style={{ fontSize: 11, color: token.textMuted }}>右鍵點擊節點以操作</span>
         )}
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
-        <span style={{ fontSize: 12, color: '#94a3b8' }}>重播速度:</span>
+        <span style={{ fontSize: 12, color: token.textSecondary }}>重播速度:</span>
         {([['快', 100], ['正常', 500], ['慢', 1000]] as [string, number][]).map(([label, ms]) => (
           <button
             key={label}
@@ -363,8 +375,8 @@ export function Toolbar() {
               borderRadius: 4,
               border: 'none',
               cursor: 'pointer',
-              background: replaySpeed === ms ? '#3b82f6' : '#374151',
-              color: replaySpeed === ms ? '#fff' : '#94a3b8',
+              background: replaySpeed === ms ? token.accent : token.bgDisabled,
+              color: replaySpeed === ms ? token.textOnAccent : token.textSecondary,
               fontSize: 12,
             }}
           >
@@ -389,10 +401,10 @@ export function Toolbar() {
                 gap: 4,
                 padding: '3px 10px',
                 borderRadius: 4,
-                border: `1px solid ${activeEnvironmentId ? '#22c55e' : '#475569'}`,
+                border: `1px solid ${activeEnvironmentId ? token.success : token.borderStrong}`,
                 cursor: 'pointer',
-                background: activeEnvironmentId ? '#14532d' : '#1e293b',
-                color: activeEnvironmentId ? '#4ade80' : '#94a3b8',
+                background: activeEnvironmentId ? token.successBg : token.bgPanel,
+                color: activeEnvironmentId ? token.successFg : token.textSecondary,
                 fontSize: 12,
                 fontWeight: activeEnvironmentId ? 600 : 400,
                 whiteSpace: 'nowrap',
@@ -406,20 +418,9 @@ export function Toolbar() {
 
             {showEnvMenu && (
               <div
-                style={{
-                  position: 'absolute',
-                  top: 'calc(100% + 6px)',
-                  right: 0,
-                  background: '#1e293b',
-                  border: '1px solid #334155',
-                  borderRadius: 8,
-                  minWidth: 220,
-                  zIndex: 2000,
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-                  padding: '6px 0',
-                }}
+                style={dropdownStyle}
               >
-                <div style={{ padding: '4px 12px 8px', fontSize: 11, color: '#64748b', borderBottom: '1px solid #334155' }}>
+                <div style={{ padding: '4px 12px 8px', fontSize: 11, color: token.textMuted, borderBottom: `1px solid ${token.border}` }}>
                   環境選擇
                 </div>
 
@@ -428,11 +429,11 @@ export function Toolbar() {
                   style={{
                     display: 'flex', alignItems: 'center', gap: 8,
                     padding: '7px 12px', cursor: 'pointer',
-                    background: !activeEnvironmentId ? '#1e3a5f' : 'transparent',
-                    color: !activeEnvironmentId ? '#93c5fd' : '#cbd5e1',
+                    background: !activeEnvironmentId ? token.bgSelected : 'transparent',
+                    color: !activeEnvironmentId ? token.accentFg : token.textBody,
                     fontSize: 13,
                   }}
-                  onMouseEnter={(e) => { if (activeEnvironmentId) (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                  onMouseEnter={(e) => { if (activeEnvironmentId) (e.currentTarget as HTMLDivElement).style.background = token.bgPage }}
                   onMouseLeave={(e) => { if (activeEnvironmentId) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
                 >
                   <span style={{ fontSize: 10, width: 10, flexShrink: 0 }}>{!activeEnvironmentId ? '●' : '○'}</span>
@@ -448,11 +449,11 @@ export function Toolbar() {
                       style={{
                         display: 'flex', alignItems: 'center', gap: 8,
                         padding: '7px 12px', cursor: 'pointer',
-                        background: isSelected ? '#1e3a5f' : 'transparent',
-                        color: isSelected ? '#93c5fd' : '#cbd5e1',
+                        background: isSelected ? token.bgSelected : 'transparent',
+                        color: isSelected ? token.accentFg : token.textBody,
                         fontSize: 13,
                       }}
-                      onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                      onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = token.bgPage }}
                       onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
                     >
                       <span style={{ fontSize: 10, width: 10, flexShrink: 0 }}>{isSelected ? '●' : '○'}</span>
@@ -464,7 +465,7 @@ export function Toolbar() {
                 })}
 
                 {/* Add new environment */}
-                <div style={{ borderTop: '1px solid #334155', padding: '6px 10px', marginTop: 4 }}>
+                <div style={{ borderTop: `1px solid ${token.border}`, padding: '6px 10px', marginTop: 4 }}>
                   {addingEnv ? (
                     <div style={{ display: 'flex', gap: 4 }}>
                       <input
@@ -482,8 +483,8 @@ export function Toolbar() {
                         placeholder="環境名稱，例如 DEV / UAT / PRD"
                         style={{
                           flex: 1, padding: '3px 6px',
-                          background: '#0f172a', border: '1px solid #3b82f6', borderRadius: 3,
-                          color: '#e2e8f0', fontSize: 12, outline: 'none',
+                          background: token.bgPage, border: `1px solid ${token.accent}`, borderRadius: 3,
+                          color: token.text, fontSize: 12, outline: 'none',
                         }}
                       />
                       <button
@@ -496,7 +497,7 @@ export function Toolbar() {
                         }}
                         style={{
                           padding: '3px 7px', borderRadius: 3, border: 'none',
-                          background: '#3b82f6', color: '#fff', fontSize: 11, cursor: 'pointer',
+                          background: token.accent, color: token.textOnAccent, fontSize: 11, cursor: 'pointer',
                         }}
                       >
                         ✓
@@ -507,8 +508,8 @@ export function Toolbar() {
                       onClick={() => setAddingEnv(true)}
                       style={{
                         width: '100%', padding: '4px 0', borderRadius: 3,
-                        border: '1px dashed #334155', background: 'transparent',
-                        color: '#3b82f6', fontSize: 12, cursor: 'pointer',
+                        border: `1px dashed ${token.border}`, background: 'transparent',
+                        color: token.accent, fontSize: 12, cursor: 'pointer',
                       }}
                     >
                       ＋ 新增環境
@@ -517,15 +518,15 @@ export function Toolbar() {
                 </div>
 
                 {/* Manage project environment variables */}
-                <div style={{ borderTop: '1px solid #334155', padding: '6px 10px' }}>
+                <div style={{ borderTop: `1px solid ${token.border}`, padding: '6px 10px' }}>
                   <button
                     onClick={() => { setShowEnvVarEditor(true); setShowEnvMenu(false) }}
                     style={{
                       width: '100%', padding: '5px 0', borderRadius: 3,
                       border: 'none', background: 'transparent',
-                      color: '#4ade80', fontSize: 12, cursor: 'pointer', textAlign: 'left', paddingLeft: 8,
+                      color: token.successFg, fontSize: 12, cursor: 'pointer', textAlign: 'left', paddingLeft: 8,
                     }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = '#0f172a' }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = token.bgPage }}
                     onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
                   >
                     🔧 管理環境變數…
@@ -549,10 +550,10 @@ export function Toolbar() {
               gap: 4,
               padding: '3px 10px',
               borderRadius: 4,
-              border: `1px solid ${isOverriding ? '#f59e0b' : '#475569'}`,
+              border: `1px solid ${isOverriding ? token.warning : token.borderStrong}`,
               cursor: 'pointer',
-              background: isOverriding ? '#78350f' : '#1e293b',
-              color: isOverriding ? '#fcd34d' : '#94a3b8',
+              background: isOverriding ? token.warningDark : token.bgPanel,
+              color: isOverriding ? token.profileFg : token.textSecondary,
               fontSize: 12,
               fontWeight: isOverriding ? 600 : 400,
               whiteSpace: 'nowrap',
@@ -566,20 +567,9 @@ export function Toolbar() {
 
           {showProfileMenu && (
             <div
-              style={{
-                position: 'absolute',
-                top: 'calc(100% + 6px)',
-                right: 0,
-                background: '#1e293b',
-                border: '1px solid #334155',
-                borderRadius: 8,
-                minWidth: 220,
-                zIndex: 2000,
-                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-                padding: '6px 0',
-              }}
+              style={dropdownStyle}
             >
-              <div style={{ padding: '4px 12px 8px', fontSize: 11, color: '#64748b', borderBottom: '1px solid #334155' }}>
+              <div style={{ padding: '4px 12px 8px', fontSize: 11, color: token.textMuted, borderBottom: `1px solid ${token.border}` }}>
                 環境配置
               </div>
 
@@ -598,18 +588,18 @@ export function Toolbar() {
                       gap: 8,
                       padding: '7px 12px',
                       cursor: 'pointer',
-                      background: isSelected ? '#1e3a5f' : 'transparent',
-                      color: isSelected ? '#93c5fd' : '#cbd5e1',
+                      background: isSelected ? token.bgSelected : 'transparent',
+                      color: isSelected ? token.accentFg : token.textBody,
                       fontSize: 13,
                     }}
-                    onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                    onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = token.bgPage }}
                     onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
                   >
                     <span style={{ fontSize: 10, width: 10, flexShrink: 0 }}>{isSelected ? '●' : '○'}</span>
                     <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {p.name}
                     </span>
-                    <span style={{ fontSize: 10, color: '#475569', flexShrink: 0 }}>
+                    <span style={{ fontSize: 10, color: token.borderStrong, flexShrink: 0 }}>
                       {p.vars.length} 個變數
                     </span>
                   </div>
@@ -620,16 +610,16 @@ export function Toolbar() {
                 onClick={() => { setShowProfileMenu(false); setShowProfileEditor(true) }}
                 style={{
                   padding: '7px 12px',
-                  color: '#3b82f6',
+                  color: token.accent,
                   fontSize: 13,
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   gap: 6,
-                  borderTop: '1px solid #334155',
+                  borderTop: `1px solid ${token.border}`,
                   marginTop: 4,
                 }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = token.bgPage }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
               >
                 ✎ 管理配置...
@@ -640,70 +630,52 @@ export function Toolbar() {
       )}
 
       {currentFlow && (
-        <span style={{ fontSize: 12, color: '#64748b', marginLeft: 12 }}>{currentFlow.name}</span>
+        <span style={{ fontSize: 12, color: token.textMuted, marginLeft: 12 }}>{currentFlow.name}</span>
       )}
 
       {/* New Flow Dialog */}
       {showNewFlowDialog && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-          }}
-        >
-          <div
-            style={{
-              background: '#1e293b',
-              border: '1px solid #334155',
-              borderRadius: 12,
-              padding: 24,
-              minWidth: 360,
-            }}
-          >
-            <h2 style={{ marginBottom: 16, fontSize: 18, color: '#e2e8f0' }}>新增流程</h2>
-            <label style={{ display: 'block', marginBottom: 12, color: '#94a3b8', fontSize: 13 }}>
-              歸類至專案
-              <select
-                value={newProjectId}
-                onChange={(e) => setNewProjectId(e.target.value)}
-                style={{ ...inputStyle, marginTop: 6 }}
-              >
-                <option value="">未分類</option>
-                {projects.filter((p) => p.id !== DEFAULT_PROJECT_ID).map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-            </label>
-            <label style={{ display: 'block', marginBottom: 20, color: '#94a3b8', fontSize: 13 }}>
-              流程名稱
-              <input
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && newName) handleNewFlow() }}
-                placeholder="例：簽核流程"
-                style={inputStyle}
-                autoFocus
-              />
-            </label>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button onClick={() => { setShowNewFlowDialog(false); setNewName(''); setNewProjectId('') }} style={cancelBtnStyle}>
+        <Modal
+          title="新增流程"
+          minWidth={360}
+          onClose={closeNewFlowDialog}
+          footer={
+            <>
+              <Button size="md" onClick={closeNewFlowDialog}>
                 取消
-              </button>
-              <button
-                onClick={handleNewFlow}
-                disabled={!newName}
-                style={confirmBtnStyle(!newName)}
-              >
+              </Button>
+              <Button tone="primary" size="md" onClick={handleNewFlow} disabled={!newName}>
                 建立
-              </button>
-            </div>
-          </div>
-        </div>
+              </Button>
+            </>
+          }
+        >
+          <label style={{ display: 'block', marginBottom: 12, color: token.textSecondary, fontSize: 13 }}>
+            歸類至專案
+            <select
+              value={newProjectId}
+              onChange={(e) => setNewProjectId(e.target.value)}
+              style={{ ...inputStyle, marginTop: 6 }}
+            >
+              <option value="">未分類</option>
+              {projects.filter((p) => p.id !== DEFAULT_PROJECT_ID).map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </label>
+          <label style={{ display: 'block', color: token.textSecondary, fontSize: 13 }}>
+            流程名稱
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && newName) handleNewFlow() }}
+              placeholder="例：簽核流程"
+              className="ft-input"
+              style={inputStyle}
+              autoFocus
+            />
+          </label>
+        </Modal>
       )}
 
       {/* Test Output Modal */}
@@ -734,34 +706,30 @@ const inputStyle: React.CSSProperties = {
   width: '100%',
   marginTop: 6,
   padding: '8px 10px',
-  background: '#0f172a',
-  border: '1px solid #334155',
+  background: token.bgPage,
+  border: `1px solid ${token.border}`,
   borderRadius: 6,
-  color: '#e2e8f0',
+  color: token.text,
   fontSize: 13,
   outline: 'none',
 }
 
-const cancelBtnStyle: React.CSSProperties = {
-  padding: '7px 18px',
-  borderRadius: 6,
-  border: '1px solid #475569',
-  background: 'transparent',
-  color: '#94a3b8',
-  cursor: 'pointer',
-  fontSize: 13,
-}
+/* One-offs, not design tokens: the wordmark blue and the two pale pill foregrounds
+ * appear nowhere else and are tuned against their own dark pill backgrounds. */
+const BRAND_BLUE = '#60a5fa'
+const PILL_GREEN_FG = '#86efac'
+const PILL_RED_FG = '#fca5a5'
 
-const confirmBtnStyle = (disabled: boolean): React.CSSProperties => ({
-  padding: '7px 18px',
-  borderRadius: 6,
-  border: 'none',
-  background: disabled ? '#374151' : '#3b82f6',
-  color: disabled ? '#6b7280' : '#fff',
-  cursor: disabled ? 'not-allowed' : 'pointer',
-  fontSize: 13,
-  fontWeight: 600,
-})
+/** Shared by the 🌐 environment and ⚙ profile dropdowns, which were byte-identical. */
+const dropdownStyle: React.CSSProperties = {
+  ...menuSurfaceStyle,
+  position: 'absolute',
+  top: 'calc(100% + 6px)',
+  right: 0,
+  minWidth: 220,
+  zIndex: zIndex.modal,
+  padding: '6px 0',
+}
 
 const pillStyle = (bg: string, color: string): React.CSSProperties => ({
   padding: '2px 10px',

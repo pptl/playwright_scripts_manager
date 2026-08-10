@@ -3,6 +3,9 @@ import { v4 as uuidv4 } from 'uuid'
 import type { Action, Flow, FlowNode } from '@shared/types'
 import { SECRET_MASK } from '@shared/types'
 import { useFlowStore } from '../../stores/flowStore'
+import { Modal } from '../common/Modal'
+import { Button } from '../common/Button'
+import { token } from '../../styles/tokens'
 
 interface CallFlowModalProps {
   mode: 'insertBefore' | 'appendAfter'
@@ -154,39 +157,42 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
   const displayTotal = preselectedFlowId ? totalSteps - 1 : totalSteps
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      zIndex: 2000,
-    }}>
-      <div style={{
-        background: '#1e293b', borderRadius: 12, width: 560,
-        maxHeight: '80vh', display: 'flex', flexDirection: 'column',
-        border: '1px solid #334155', boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-      }}>
-        {/* Header */}
-        <div style={{
-          padding: '16px 20px', borderBottom: '1px solid #334155',
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0' }}>{modeLabel}</div>
-            <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
-              步驟 {displayStep} / {displayTotal}
-            </div>
+    <Modal
+      variant="panel"
+      width={560}
+      onClose={onClose}
+      cardStyle={{ boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}
+      bodyStyle={{ padding: '16px 20px' }}
+      title={
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: token.text }}>{modeLabel}</div>
+          <div style={{ fontSize: 11, color: token.textMuted, marginTop: 2 }}>
+            步驟 {displayStep} / {displayTotal}
           </div>
-          <button onClick={onClose} style={{
-            background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 18,
-          }}>✕</button>
         </div>
-
-        {/* Body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+      }
+      footer={
+        <>
+          {step > 1 && !preselectedFlowId && (
+            <Button tone="subtle" size="md" onClick={() => setStep((s) => (s - 1) as Step)}>
+              上一步
+            </Button>
+          )}
+          <Button tone="subtle" size="md" onClick={onClose}>
+            取消
+          </Button>
+          <Button tone="primary" size="md" onClick={handleNext} disabled={!canProceed}>
+            {step === 2 && subProfiles.length <= 1 ? '確認' : step === 3 ? '確認' : '下一步'}
+          </Button>
+        </>
+      }
+    >
+      <>
           {step === 1 && (
             <div>
-              <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 10 }}>選擇要呼叫的子流程</div>
+              <div style={{ fontSize: 12, color: token.textSecondary, marginBottom: 10 }}>選擇要呼叫的子流程</div>
               {allFlows.length === 0 && (
-                <div style={{ color: '#64748b', fontSize: 13 }}>尚無其他流程可選</div>
+                <div style={{ color: token.textMuted, fontSize: 13 }}>尚無其他流程可選</div>
               )}
               {allFlows.map((f) => (
                 <div
@@ -194,26 +200,26 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
                   onClick={() => handleSelectFlow(f.id)}
                   style={{
                     padding: '10px 12px', borderRadius: 6, marginBottom: 6, cursor: 'pointer',
-                    background: selectedFlowId === f.id ? '#1e3a5f' : '#0f172a',
-                    border: `1px solid ${selectedFlowId === f.id ? '#3b82f6' : '#334155'}`,
-                    color: selectedFlowId === f.id ? '#93c5fd' : '#cbd5e1',
+                    background: selectedFlowId === f.id ? token.bgSelected : token.bgPage,
+                    border: `1px solid ${selectedFlowId === f.id ? token.accent : token.border}`,
+                    color: selectedFlowId === f.id ? token.accentFg : token.textBody,
                   }}
                 >
                   <div style={{ fontSize: 13, fontWeight: 500 }}>{f.name}</div>
                   {f.description && (
-                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{f.description}</div>
+                    <div style={{ fontSize: 11, color: token.textMuted, marginTop: 2 }}>{f.description}</div>
                   )}
                 </div>
               ))}
               {cycleError && (
-                <div style={{ color: '#ef4444', fontSize: 12, marginTop: 8 }}>⚠ {cycleError}</div>
+                <div style={{ color: token.dangerFg, fontSize: 12, marginTop: 8 }}>⚠ {cycleError}</div>
               )}
               {loading && (
-                <div style={{ color: '#64748b', fontSize: 12, marginTop: 8 }}>載入中…</div>
+                <div style={{ color: token.textMuted, fontSize: 12, marginTop: 8 }}>載入中…</div>
               )}
               {selectedFlowId && !cycleError && (
                 <div style={{ marginTop: 16 }}>
-                  <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase', marginBottom: 6, letterSpacing: '0.05em' }}>
+                  <div style={{ fontSize: 11, color: token.textMuted, fontWeight: 600, textTransform: 'uppercase', marginBottom: 6, letterSpacing: '0.05em' }}>
                     描述
                   </div>
                   <input
@@ -222,9 +228,9 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
                     placeholder="輸入此節點的描述"
                     style={{
                       width: '100%', boxSizing: 'border-box',
-                      padding: '7px 10px', background: '#0f172a',
-                      border: '1px solid #334155', borderRadius: 6,
-                      color: '#e2e8f0', fontSize: 13, outline: 'none',
+                      padding: '7px 10px', background: token.bgPage,
+                      border: `1px solid ${token.border}`, borderRadius: 6,
+                      color: token.text, fontSize: 13, outline: 'none',
                     }}
                   />
                 </div>
@@ -234,11 +240,11 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
 
           {step === 2 && (
             <div>
-              <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: token.textSecondary, marginBottom: 10 }}>
                 選擇子流程的出口節點（走到這個節點時視為子流程執行完畢）
               </div>
               {leafNodes.length === 0 && (
-                <div style={{ color: '#64748b', fontSize: 13 }}>此流程沒有葉子節點</div>
+                <div style={{ color: token.textMuted, fontSize: 13 }}>此流程沒有葉子節點</div>
               )}
               {leafNodes.map((n) => (
                 <div
@@ -246,15 +252,15 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
                   onClick={() => setSelectedExitNodeId(n.id)}
                   style={{
                     padding: '10px 12px', borderRadius: 6, marginBottom: 6, cursor: 'pointer',
-                    background: selectedExitNodeId === n.id ? '#1e3a5f' : '#0f172a',
-                    border: `1px solid ${selectedExitNodeId === n.id ? '#3b82f6' : '#334155'}`,
-                    color: selectedExitNodeId === n.id ? '#93c5fd' : '#cbd5e1',
+                    background: selectedExitNodeId === n.id ? token.bgSelected : token.bgPage,
+                    border: `1px solid ${selectedExitNodeId === n.id ? token.accent : token.border}`,
+                    color: selectedExitNodeId === n.id ? token.accentFg : token.textBody,
                   }}
                 >
                   <div style={{ fontSize: 13, fontWeight: 500 }}>
                     {n.action.description || n.action.type}
                   </div>
-                  <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
+                  <div style={{ fontSize: 10, color: token.textMuted, marginTop: 2 }}>
                     {getBreadcrumb(n, subFlowNodeMap)}
                   </div>
                 </div>
@@ -267,15 +273,15 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
               {isMultiParentProfile ? (
                 // Multi-parent-profile: show mapping table
                 <>
-                  <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 12 }}>
-                    為每個父流程環境配置，指定子流程 <strong style={{ color: '#e2e8f0' }}>{subFlow?.name}</strong> 要套用的配置
+                  <div style={{ fontSize: 12, color: token.textSecondary, marginBottom: 12 }}>
+                    為每個父流程環境配置，指定子流程 <strong style={{ color: token.text }}>{subFlow?.name}</strong> 要套用的配置
                   </div>
                   <div style={{
                     display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
                     marginBottom: 8, padding: '4px 0',
                   }}>
-                    <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>父流程配置</div>
-                    <div style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>子流程套用配置</div>
+                    <div style={{ fontSize: 11, color: token.textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>父流程配置</div>
+                    <div style={{ fontSize: 11, color: token.textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>子流程套用配置</div>
                   </div>
                   {parentProfiles.map((pp) => (
                     <div
@@ -283,11 +289,11 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
                       style={{
                         display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
                         alignItems: 'center', marginBottom: 8,
-                        background: '#0f172a', borderRadius: 6,
-                        padding: '8px 12px', border: '1px solid #334155',
+                        background: token.bgPage, borderRadius: 6,
+                        padding: '8px 12px', border: `1px solid ${token.border}`,
                       }}
                     >
-                      <div style={{ fontSize: 13, color: '#cbd5e1', fontWeight: 500 }}>{pp.name}</div>
+                      <div style={{ fontSize: 13, color: token.textBody, fontWeight: 500 }}>{pp.name}</div>
                       <select
                         value={profileMapping[pp.id] ?? ''}
                         onChange={(e) => setProfileMapping((prev) => ({
@@ -295,7 +301,7 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
                           [pp.id]: e.target.value || null,
                         }))}
                         style={{
-                          background: '#1e293b', color: '#e2e8f0', border: '1px solid #475569',
+                          background: token.bgPanel, color: token.text, border: `1px solid ${token.borderStrong}`,
                           borderRadius: 4, padding: '4px 8px', fontSize: 12, cursor: 'pointer',
                           width: '100%',
                         }}
@@ -310,7 +316,7 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
               ) : (
                 // Single-parent-profile: show original single-selection list
                 <>
-                  <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 10 }}>
+                  <div style={{ fontSize: 12, color: token.textSecondary, marginBottom: 10 }}>
                     選擇子流程套用的配置（Profile）
                   </div>
                   {subProfiles.map((sp) => {
@@ -322,14 +328,14 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
                         onClick={() => setProfileMapping({ [mappingKey]: sp.id })}
                         style={{
                           padding: '10px 12px', borderRadius: 6, marginBottom: 6, cursor: 'pointer',
-                          background: mappedId === sp.id ? '#1e3a5f' : '#0f172a',
-                          border: `1px solid ${mappedId === sp.id ? '#3b82f6' : '#334155'}`,
-                          color: mappedId === sp.id ? '#93c5fd' : '#cbd5e1',
+                          background: mappedId === sp.id ? token.bgSelected : token.bgPage,
+                          border: `1px solid ${mappedId === sp.id ? token.accent : token.border}`,
+                          color: mappedId === sp.id ? token.accentFg : token.textBody,
                         }}
                       >
                         <div style={{ fontSize: 13, fontWeight: 500 }}>{sp.name}</div>
                         {sp.vars.length > 0 && (
-                          <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
+                          <div style={{ fontSize: 10, color: token.textMuted, marginTop: 2 }}>
                             {sp.vars
                               .slice(0, 3)
                               .map((v) => `${v.key}=${v.secret ? SECRET_MASK : v.value}`)
@@ -344,40 +350,7 @@ export function CallFlowModal({ mode, preselectedFlowId, onClose, onConfirm }: C
               )}
             </div>
           )}
-        </div>
-
-        {/* Footer */}
-        <div style={{
-          padding: '12px 20px', borderTop: '1px solid #334155',
-          display: 'flex', justifyContent: 'flex-end', gap: 8,
-        }}>
-          {step > 1 && !preselectedFlowId && (
-            <button
-              onClick={() => setStep((s) => (s - 1) as Step)}
-              style={{
-                padding: '6px 16px', borderRadius: 6, border: '1px solid #334155',
-                background: 'transparent', color: '#94a3b8', cursor: 'pointer', fontSize: 13,
-              }}
-            >上一步</button>
-          )}
-          <button onClick={onClose} style={{
-            padding: '6px 16px', borderRadius: 6, border: '1px solid #334155',
-            background: 'transparent', color: '#94a3b8', cursor: 'pointer', fontSize: 13,
-          }}>取消</button>
-          <button
-            onClick={handleNext}
-            disabled={!canProceed}
-            style={{
-              padding: '6px 16px', borderRadius: 6, border: 'none',
-              background: canProceed ? '#3b82f6' : '#1e3a5f',
-              color: canProceed ? '#fff' : '#475569', cursor: canProceed ? 'pointer' : 'not-allowed',
-              fontSize: 13,
-            }}
-          >
-            {step === 2 && subProfiles.length <= 1 ? '確認' : step === 3 ? '確認' : '下一步'}
-          </button>
-        </div>
-      </div>
-    </div>
+      </>
+    </Modal>
   )
 }

@@ -37,9 +37,9 @@ Main Process (Node.js)         Preload Bridge         Renderer (React)
 ipcHandlers.ts                 preload/index.ts       App.tsx
   ├── BrowserController          contextBridge          ├── WelcomeScreen (no workspace)
   ├── Recorder                   window.electronAPI     └── Toolbar/FlowList/Canvas/PropertyPanel
-  ├── Replayer                                          Zustand stores (flowStore, workspaceStore)
+  ├── Replayer                                          Zustand stores (flowStore, projectStore, workspaceStore)
   ├── CodegenCapture                                    Hooks (usePlaywright, usePlaywrightEvents,
-  ├── runner (bundled Playwright CLI)                         useWorkspace, useUndoRedo, useFlowStore)
+  ├── runner (bundled Playwright CLI)                         useWorkspace, useUndoRedo, useFlowManager)
   ├── browserCheck                                      Canvas utils (treeLayout, groups, subflowExtraction)
   ├── workspace ◄── every path below resolves through this
   ├── FlowStorage
@@ -263,15 +263,19 @@ Projects add a layer **above** flows for managing environment-specific variable 
 
 Two caveats the `?? DEFAULT_PROJECT_ID` idiom does **not** cover:
 - **Unknown ids are only folded in for display.** `?? DEFAULT_PROJECT_ID` catches `null`/`undefined` only. A `projectId` pointing at a deleted project is mapped to `未分類` solely by `FlowList.tsx`; everywhere else (`openFlow`, `setCurrentFlow`, `gateEnvVars`, `executeCallFlow`) it matches no project, so the flow opens with `currentProject === null` — blank environment selector, and domain substitution plus env vars silently inert. A shared `resolveProjectId(flow, knownProjects)` is the fix (A10 in the cleanup backlog).
-- **Deleting a project deletes its flows.** `deleteProject` cascade-deletes every flow whose `projectId` matches, then the project — it does not orphan them into `未分類`.
+- **Deleting a project deletes its flows.** `useFlowManager.deleteProjectWithFlows` cascade-deletes every flow whose `projectId` matches, then the project record — it does not orphan them into `未分類`. `projectStore.deleteProject` is the record-only half and never touches a flow.
 
 - **Every project has ≥1 environment.** `createProject(name, envName='DEV', domain=DEFAULT_DOMAIN)` seeds one environment plus a `domain` env var. `未分類` is materialized on disk by `ProjectStorage.ensureDefault()` (called from `list()`/`load()`) with a `DEV` env and `domain = 'http://localhost:3000/'` — this gives its environment a **stable id**.
 - **`domain` is a reserved project env var** (`DOMAIN_ENV_KEY = 'domain'`, constants in `types.ts`): seeded into every project, **non-deletable and non-renamable** in `ProjectEnvVarModal` (rendered with a 🔒 lock). Its per-environment value drives goto-URL origin substitution in `Replayer` and `ScriptExporter` (trailing slash stripped).
 - A `ProfileVariable` can carry `envValues: Record<envId, string>` — per-environment overrides of its base `value`. Resolution everywhere is `envValues[activeEnvironmentId] ?? value`; profile values may reference project env vars via `{{key}}`.
 - `ProjectEnvVar` = `{ key, values: Record<envId, string>, description? }`, flattened for the active environment by `flattenProjectEnvVars`.
-- The **active environment** (`activeEnvironmentId` in the store) + **active project** (`activeProjectId` = `currentProject.id`) are threaded through replay, branch recording, and export, and used by `Replayer`/`ScriptExporter`/`usePlaywright`/`Toolbar` when building `profileVars`/`envVars`. Env-var references resolve only when the flow belongs to the active project (v1: no cross-project references).
+- The **active environment** (`activeEnvironmentId` in `projectStore`) + **active project** (`activeProjectId` = `currentProject.id`) are threaded through replay, branch recording, and export, and used by `Replayer`/`ScriptExporter`/`usePlaywright`/`Toolbar` when building `profileVars`/`envVars`. Env-var references resolve only when the flow belongs to the active project (v1: no cross-project references).
 - Storage: projects live as `projects/{id}.json` (`ProjectStorage`), separate from flows.
-- Store actions: `createProject`, `renameProject`, `duplicateProject`, `deleteProject`, `addEnvironmentToProject`, `renameEnvironment`, `duplicateEnvironment`, `deleteEnvironment` (the last environment can't be removed), `assignFlowToProject`, `setActiveEnvironment`, `setCurrentProject`, and `commitProjectEnvVars(rows, envId)` — one atomic write for the whole env-var table (see Editing model). `openFlow` loads the owning project (default if none) and picks a sensible active environment (first env by default).
+- **Project state lives in `projectStore`, not `flowStore`** (`projects`, `currentProject`, `activeEnvironmentId`). The two stores **never import each other** and `projectStore` never reads or writes a `Flow`; every sequence spanning both domains lives in `hooks/useFlowManager.ts`. That boundary is what makes "project state can't enter undo history" structural rather than a convention.
+  - `projectStore` actions: `createProject`, `renameProject`, `duplicateProject` (record only), `deleteProject` (record only), `addEnvironmentToProject`, `renameEnvironment`, `duplicateEnvironment`, `deleteEnvironment` (the last environment can't be removed), `setActiveEnvironment`, `setProjectContext` (project + its active env in one write), `refreshProjects`, `reset` (workspace switch), and `commitProjectEnvVars(rows, envId)` — one atomic write for the whole env-var table (see Editing model).
+  - `useFlowManager` owns the cascades: `deleteProjectWithFlows`, `duplicateProjectWithFlows` (copies the flows and rewrites intra-batch `callFlow.subFlowId`), and `openFlow`, which reads the *outgoing* project context first, then loads the owning project (default if none) and picks the active environment — preserved when staying in the same project, first env otherwise.
+  - `assignFlowToProject` stays in **`flowStore`**: despite the name it writes `Flow.projectId` and reads no project state.
+  - `setCurrentFlow` is flow-only — it does **not** clear project context. `useFlowManager.openFlow` and `useWorkspace.resetForNewWorkspace` are what keep the two in step.
 - **UI:** `FlowList` groups flows by project (📁 headers, 未分類 last); the "新增專案" dialog collects 專案名稱 + 環境名稱 (DEV) + domain. The "新增流程" dialog collects 歸類至專案 (first) + 流程名稱 (second) — there is **no 目標URL field** (baseURL is derived from the project's `domain`). The Toolbar shows a 🌐 environment selector (with inline 新增環境) and "🔧 管理環境變數…" (`ProjectEnvVarModal`) for the current flow's project; the modal also handles environment add/rename/duplicate/delete. The right sidebar's `ProjectEnvVarList` shows the active environment's project vars.
 
 ### Sub-flow system
@@ -320,7 +324,7 @@ Note the two env-var maps that deliberately coexist: `env.ctx.envVars` is the ra
 **Deliberately NOT covered — off-canvas configuration.** A Ctrl+Z here would silently revert data the user cannot see (the commit actions are atomic, so a single press would restore a *whole* variable table). These are protected by delete confirmations instead:
 - **Session variables** (`captureAs`) — suppressed at both call sites, `SessionVarList` 🗑 *and* the canvas context menu, so the same variable behaves identically wherever it's touched.
 - **Environment profiles** — `addProfile` / `updateProfile` / `deleteProfile` / `duplicateProfile` / `commitProfileVars`.
-- **Projects** — `currentProject` is not watched at all, so environments, project env vars and project rename never enter history.
+- **Projects** — excluded **structurally**, not by policy: project state lives in `projectStore`, which has no history and which this subscription cannot observe, so environments, project env vars and project rename can never enter it. (`projectStore` therefore has no `setSilently` — there is nothing to suppress.)
 - **Flow metadata** — `renameCurrentFlow`, `assignFlowToProject`.
 
 > **Rule: any store action that writes flow CONFIG must go through `setSilently`.** The subscription's `graphChanged(cf, pf)` check (`nodes` / `rootNodeId` / `groups` reference comparison) is only a safety net for *config-only* writes. It cannot catch the profile actions, which also rewrite `nodes` to maintain callFlow `subFlowProfileMapping` — those need the explicit suppression.
@@ -341,8 +345,21 @@ Every **text / form field** edits component-local `useState` and reaches the sto
 - **Saving re-reads the store.** `PropertyPanel`'s save pulls the node fresh from `useFlowStore.getState()` before `updateNode`, so recorder-written fields (`opensPage`, `pageAlias`, `framePath`, `clickCount`…) are never clobbered by what the panel is holding.
 - **Row identity** — table rows carry `_rid` (stable client id; also the key of ProfileEditorModal's value-input caret map) plus `_origIndex` (ProfileEditorModal) / `_origKey` (ProjectEnvVarModal), which `commitProfileVars` / `commitProjectEnvVars` need to tell added rows from edited ones and to carry other environments' values across a rename. One 儲存 commits the whole table.
 - **Validation runs in the save handler** — empty key / duplicate key (both tables) and "`domain` must survive" (project env vars); failures set `error` and abort the write.
-- **`src/renderer/stores/confirmStore.ts` + `components/common/ConfirmDialog.tsx`** — `confirm()` raises an app-styled dialog from `<ConfirmHost />` (mounted once in `App.tsx`, `zIndex 4000` so it can appear above modals). Replaces `window.confirm` entirely (zero remaining call sites). Five native `alert()` calls do remain and are not yet migrated — `FlowCanvas.tsx` (extraction / grouping validation failures) and `Toolbar.tsx` (export success and the two export failures). Danger dialogs put Enter on 取消.
+- **`src/renderer/stores/confirmStore.ts` + `components/common/ConfirmDialog.tsx`** — `confirm()` raises an app-styled dialog from `<ConfirmHost />` (mounted once in `App.tsx`, `zIndex.confirm` — the top of the scale — so it can appear above modals). `notify()` is the one-OK-button variant that replaced the last native `alert()`s. Both `window.confirm` and `alert` now have zero call sites. Danger dialogs put Enter on 取消.
 - **Destructive actions all confirm** — delete flow / project / environment / profile / profile variable / project env var / session variable, and duplicate project. **Deliberate exception: deleting a node (or node + subtree) does not confirm** — it's a high-frequency editing gesture and Ctrl+Z restores it. Ungroup likewise (destroys no node data, and is undoable).
+
+### The UI layer (design tokens + `components/common/`)
+
+There is exactly one stylesheet, `src/renderer/styles/tokens.css`, imported by `main.tsx`. It defines the palette, the zIndex scale and the base reset as CSS custom properties; `styles/tokens.ts` is a typed mirror where every value is a `var(--ft-…)` reference rather than a hex literal. **Adding a token means adding it to both files — there is no generation step, and that pairing is the only thing keeping them honest.**
+
+Custom properties rather than a plain JS object because the app had no CSS at all, which meant no `:hover` / `:focus`: every hover was hand-rolled with `onMouseEnter` mutating `e.currentTarget.style`. Tokens-as-CSS solves the palette and the pseudo-classes in one move (`.ft-menu-item`, `.ft-btn`, `.ft-input`, `.ft-icon-btn`), with zero new dependencies. `index.html` keeps a three-rule `<style>` block purely as the pre-JS paint; it must stay in sync with the same values.
+
+- **`--ft-accent` (blue) and `--ft-accent-alt` (indigo) are deliberately two tokens**, not one. The "primary action button" role genuinely has two colours today. Unifying them is a visual change, not a cleanup.
+- **`Modal.tsx`** — two variants. `compact` (padding 24, text title) and `panel` (fixed `width`, bordered header with ✕, `maxHeight: 80vh`, scrolling body, bordered footer). Both close on Escape (a window-level capturing listener) and on backdrop click. Four modals opt out via `closeOnBackdrop` / `closeOnEscape`, each for a stated reason: the two variable-table editors would silently discard the whole in-progress table, `VaultModal` would drop a half-typed passphrase, and `TestOutputModal` cannot be dismissed mid-run because there is no way to cancel one (A2 in the cleanup backlog). **This is not dirty tracking and must not become it** — see the editing-model note above.
+- **`Menu.tsx`** — `Menu` (transparent full-screen catcher + a card positioned at a point) for right-click menus, `MenuSurface` (just the card) for dropdowns anchored to a button. The catcher is why no context menu needs a ref, an effect, or a teardown. `NodeContextMenu` keeps its own `ActionMenuItem` rather than the shared `MenuItem`: its entries are `<button>`s on a roomier rhythm with a red hover for destructive actions, and folding the two together would change how both menus look.
+- **`Button.tsx` / `Input.tsx`** — replaced three competing button "systems" and six near-verbatim copies of the text-field style.
+
+Colours that appear in exactly one file and are tuned against their own dark background stay as named local constants with a comment saying why they are not tokens (e.g. `Toolbar`'s `BRAND_BLUE`, `TestOutputModal`'s `REPORT_BTN_BG`). `ActionNode.tsx`'s `TYPE_COLORS` likewise stays put — it is a categorical palette for the 14 action types, i.e. domain data, not design.
 
 ### The workspace (`src/main/storage/workspace.ts`)
 
@@ -397,12 +414,20 @@ Every **text / form field** edits component-local `useState` and reaches the sto
 | `src/shared/electronAPI.ts` | The `ElectronAPI` interface — one declaration read by both preload (`satisfies`) and renderer (`window` augmentation). Must stay free of `electron` imports |
 | `src/preload/index.ts` | contextBridge — exposes `window.electronAPI`, pinned with `satisfies ElectronAPI`; the 10 Main→Renderer `onX` wrappers all come from one generic `subscribe<T>(channel)` |
 | `src/renderer/App.tsx` | Root — calls `usePlaywrightEvents()` + `useUndoRedo()`; **gates on the workspace** (renders `WelcomeScreen` alone until one is open); then Toolbar + FlowList + FlowCanvas + PropertyPanel + right sidebar (VariableList / ProfileVarList / ProjectEnvVarList / SessionVarList, shown only when a node is selected) |
-| `src/renderer/stores/flowStore.ts` | Zustand store — flow/node/profile/project/environment state + actions; node-graph-only undo/redo (`Flow[]` snapshots, `graphChanged` guard, `runAsOneHistoryStep`) + history subscription; `suppressDepth`/`setSilently`; atomic `commitProfileVars` / `commitProjectEnvVars`; group actions; layout actions; domain + callFlow-profile migrations |
-| `src/renderer/stores/workspaceStore.ts` | Workspace state (`info` / `loading` / `installing`) — kept out of flowStore because it outlives every flow |
+| `src/renderer/stores/flowStore.ts` | Zustand store — flow/node/profile state + actions; node-graph-only undo/redo (`Flow[]` snapshots, `graphChanged` guard, `runAsOneHistoryStep`) + history subscription; `suppressDepth`/`setSilently`; atomic `commitProfileVars`; group actions; layout actions; callFlow-profile migration. Holds no project state and does not import `projectStore` |
+| `src/renderer/stores/projectStore.ts` | Projects / environments / project env vars — kept out of flowStore for the same reason as `workspaceStore` (a project outlives every flow under it), and because history here holds `Flow[]`, so project writes are structurally un-undoable. Never reads or writes a `Flow`; record-only `deleteProject` / `duplicateProject` |
+| `src/renderer/stores/persistence.ts` | `persistFlow` / `persistProject` — the single point of ownership for disk writes. A leaf module importing no store, which is what lets both stores use it with no import cycle |
+| `src/renderer/stores/workspaceStore.ts` | Workspace state (`info` / `loading` / `installing`) — kept out of flowStore because it outlives every flow (same rationale as `projectStore`) |
 | `src/renderer/hooks/useWorkspace.ts` | `pick` / `switchTo` / `forget` / `reveal` / `installBrowser`; owns the switch cleanup order (block while recording/replaying → clear flow+project+undo → refresh lists) |
 | `src/renderer/components/Welcome/WelcomeScreen.tsx` | Shown until a workspace is chosen (VSCode Get Started layout: Start / Recent / explainer cards / folder drag-drop; missing-browser banner) |
-| `src/renderer/stores/confirmStore.ts` | `confirm()` — promise-based replacement for `window.confirm` |
-| `src/renderer/components/common/ConfirmDialog.tsx` | `ConfirmHost` — renders queued confirm requests (zIndex 4000, Enter defaults to 取消 on danger) |
+| `src/renderer/stores/confirmStore.ts` | `confirm()` / `notify()` — promise-based replacements for `window.confirm` and `alert` |
+| `src/renderer/components/common/ConfirmDialog.tsx` | `ConfirmHost` — renders queued confirm requests (top of the zIndex scale, Enter defaults to 取消 on danger) |
+| `src/renderer/styles/tokens.css` | The only stylesheet: palette + zIndex scale as CSS custom properties, base reset, and the `.ft-*` hover/focus classes |
+| `src/renderer/styles/tokens.ts` | Typed mirror of the above — `token` / `zIndex` / `radius`; every colour is a `var()` reference. Keep in sync by hand |
+| `src/renderer/components/common/Modal.tsx` | The one modal shell (`compact` / `panel`), Escape + backdrop close, opt-outs per modal |
+| `src/renderer/components/common/Menu.tsx` | `Menu` (catcher-positioned context menu) / `MenuSurface` (anchored dropdown card) / `MenuItem` / `MenuCaption` / `MenuDivider` |
+| `src/renderer/components/common/Button.tsx` | `tone` (primary / primaryAlt / danger / ghost / subtle) × `size` (sm / md) |
+| `src/renderer/components/common/Input.tsx` | The shared text field + `FieldLabel` |
 | `src/renderer/components/Toolbar/Toolbar.tsx` | Action bar: workspace name (📂 click to reveal) + switch (⇄, blocked while recording/replaying), new-flow, undo/redo, record/stop, relayout, export, run-tests, replay-speed, environment selector (🌐), profile selector (⚙), status pills; new-flow dialog (歸類至專案 + 流程名稱, no 目標URL) |
 | `src/renderer/components/Toolbar/TestOutputModal.tsx` | Streams live `TEST_OUTPUT` lines during `RUN_TESTS` |
 | `src/renderer/components/Canvas/FlowCanvas.tsx` | ReactFlow canvas (Background / Controls / MiniMap): node/edge derivation (incl. groups), drag-reposition with debounced save, connect/disconnect, multi-select, node + pane context menus, modals (CallFlow / ExtractSubflow / GroupName / AddNode); one-time layout materialization |
@@ -427,7 +452,7 @@ Every **text / form field** edits component-local `useState` and reaches the sto
 | `src/renderer/hooks/usePlaywrightEvents.ts` | IPC event subscriptions: ACTION_CAPTURED, ACTION_UPDATED, ACTION_REMOVED, REPLAY_NODE_*, REPLAY_FINISHED/ERROR, WORKSPACE_RELOAD; owns `reloadFromDisk()` |
 | `src/renderer/hooks/usePlaywright.ts` | IPC invocation wrappers: startRecording (navigates to the active env's `domain`, persists it as `flow.baseURL`), startBranchRecording, stopRecording, replayToNode (builds env-aware profileVars + envVars) |
 | `src/renderer/hooks/useUndoRedo.ts` | Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z keyboard shortcuts |
-| `src/renderer/hooks/useFlowStore.ts` | `useFlowManager`: refreshFlowList/refreshProjectList, openFlow (+ loads project), newFlow, deleteCurrentFlow |
+| `src/renderer/hooks/useFlowManager.ts` | The flow↔project coordinator — the only place the two stores meet: `refreshFlowList`, `openFlow` (loads the project, preserves the active env within a project), `newFlow`, `deleteCurrentFlow`, `deleteProjectWithFlows`, `duplicateProjectWithFlows` |
 | `src/renderer/utils/treeLayout.ts` | Tree layout: `computeTreeLayout`, `computeAllRootsLayout`, sizing constants, `SizeOf` |
 | `src/renderer/utils/groups.ts` | Group geometry + `computeGroupAwareLayout` |
 | `src/renderer/utils/subflowExtraction.ts` | `validateExtraction` (single entry/exit, connected) + `extractSubflow` (build sub-flow, rewire parent) |

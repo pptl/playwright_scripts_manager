@@ -1,10 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
+import { useProjectStore } from '../../stores/projectStore'
 import { DOMAIN_ENV_KEY, SECRET_ENVELOPE_PREFIX, SECRET_MASK } from '@shared/types'
 import type { ProfileVariable } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
 import { useVault } from '../../hooks/useVault'
+import { Modal } from '../common/Modal'
+import { Button } from '../common/Button'
+import { token, zIndex, radius } from '../../styles/tokens'
 
 const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
 
@@ -64,10 +68,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
     deleteProfile,
     duplicateProfile,
     commitProfileVars,
-    currentProject,
-    activeEnvironmentId,
-    setActiveEnvironment,
   } = useFlowStore()
+  const { currentProject, activeEnvironmentId, setActiveEnvironment } = useProjectStore()
 
   const { ensureUsable } = useVault()
 
@@ -375,56 +377,30 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
   // ── Render ────────────────────────────────────────────────
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.65)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 2000,
-      }}
+    <Modal
+      variant="panel"
+      title="環境配置管理"
+      width={960}
+      onClose={onClose}
+      // A backdrop click here would silently discard an in-progress variable table
+      // (there is deliberately no dirty tracking — see CLAUDE.md), and Escape is
+      // already taken by the env-var popover's own handler above.
+      closeOnBackdrop={false}
+      closeOnEscape={false}
+      bodyStyle={{ overflow: 'hidden' }}
+      footer={
+        <Button onClick={onClose} size="md">
+          關閉
+        </Button>
+      }
     >
-      <div
-        style={{
-          background: '#1e293b',
-          border: '1px solid #334155',
-          borderRadius: 12,
-          width: 960,
-          maxHeight: '80vh',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '14px 20px',
-            borderBottom: '1px solid #334155',
-            flexShrink: 0,
-          }}
-        >
-          <span style={{ fontSize: 15, fontWeight: 700, color: '#e2e8f0' }}>環境配置管理</span>
-          <button
-            onClick={onClose}
-            style={{ background: 'transparent', border: 'none', color: '#64748b', fontSize: 18, cursor: 'pointer' }}
-          >
-            ✕
-          </button>
-        </div>
-
         {/* Body: two columns */}
-        <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
           {/* Left: profile list */}
           <div
             style={{
               width: 200,
-              borderRight: '1px solid #334155',
+              borderRight: `1px solid ${token.border}`,
               display: 'flex',
               flexDirection: 'column',
               flexShrink: 0,
@@ -434,11 +410,11 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
               style={{
                 padding: '8px 12px',
                 fontSize: 11,
-                color: '#64748b',
+                color: token.textMuted,
                 fontWeight: 600,
                 textTransform: 'uppercase',
                 letterSpacing: '0.06em',
-                borderBottom: '1px solid #334155',
+                borderBottom: `1px solid ${token.border}`,
               }}
             >
               配置列表
@@ -454,15 +430,15 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     onClick={() => { if (!isRenaming) selectProfile(p.id) }}
                     style={{
                       padding: '8px 12px',
-                      background: isSelected ? '#1e3a5f' : 'transparent',
-                      color: isSelected ? '#93c5fd' : '#cbd5e1',
+                      background: isSelected ? token.bgSelected : 'transparent',
+                      color: isSelected ? token.accentFg : token.textBody,
                       cursor: 'pointer',
-                      borderBottom: '1px solid #0f172a',
+                      borderBottom: `1px solid ${token.bgPage}`,
                       display: 'flex',
                       alignItems: 'center',
                       gap: 6,
                     }}
-                    onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
+                    onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = token.bgPage }}
                     onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
                   >
                     {isRenaming ? (
@@ -481,14 +457,14 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         <button
                           onClick={(e) => { e.stopPropagation(); handleRenameCommit(p.id) }}
                           title="確認"
-                          style={renameActionBtnStyle('#4ade80')}
+                          style={renameActionBtnStyle(token.successFg)}
                         >
                           ✓
                         </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); cancelRename() }}
                           title="取消"
-                          style={renameActionBtnStyle('#94a3b8')}
+                          style={renameActionBtnStyle(token.textSecondary)}
                         >
                           ✕
                         </button>
@@ -501,7 +477,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                           {p.name}
                         </span>
                         {p.id === activeProfileId && (
-                          <span style={{ fontSize: 9, color: '#4ade80', flexShrink: 0 }}>使用中</span>
+                          <span style={{ fontSize: 9, color: token.successFg, flexShrink: 0 }}>使用中</span>
                         )}
                         <button
                           onClick={(e) => { e.stopPropagation(); setRenamingId(p.id); setRenameInput(p.name) }}
@@ -511,7 +487,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                             background: 'transparent',
                             border: 'none',
                             cursor: 'pointer',
-                            color: '#93c5fd',
+                            color: token.accentFg,
                             fontSize: 12,
                             padding: '1px 3px',
                             borderRadius: 3,
@@ -531,7 +507,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                             background: 'transparent',
                             border: 'none',
                             cursor: 'pointer',
-                            color: '#93c5fd',
+                            color: token.accentFg,
                             fontSize: 12,
                             padding: '1px 3px',
                             borderRadius: 3,
@@ -551,7 +527,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                             background: 'transparent',
                             border: 'none',
                             cursor: 'pointer',
-                            color: '#f87171',
+                            color: token.dangerFg,
                             fontSize: 13,
                             padding: '1px 3px',
                             borderRadius: 3,
@@ -571,7 +547,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
             </div>
 
             {/* Add profile */}
-            <div style={{ padding: 10, borderTop: '1px solid #334155', flexShrink: 0 }}>
+            <div style={{ padding: 10, borderTop: `1px solid ${token.border}`, flexShrink: 0 }}>
               {addingProfile ? (
                 <div style={{ display: 'flex', gap: 6 }}>
                   <input
@@ -587,7 +563,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   />
                   <button
                     onClick={handleAddProfile}
-                    style={{ padding: '4px 8px', borderRadius: 4, border: 'none', background: '#3b82f6', color: '#fff', fontSize: 12, cursor: 'pointer' }}
+                    style={{ padding: '4px 8px', borderRadius: 4, border: 'none', background: token.accent, color: token.textOnAccent, fontSize: 12, cursor: 'pointer' }}
                   >
                     新增
                   </button>
@@ -599,9 +575,9 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     width: '100%',
                     padding: '5px 0',
                     borderRadius: 4,
-                    border: '1px dashed #334155',
+                    border: `1px dashed ${token.border}`,
                     background: 'transparent',
-                    color: '#3b82f6',
+                    color: token.accent,
                     fontSize: 12,
                     cursor: 'pointer',
                   }}
@@ -622,15 +598,15 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     padding: '8px 16px',
-                    borderBottom: '1px solid #334155',
+                    borderBottom: `1px solid ${token.border}`,
                     flexShrink: 0,
                   }}
                 >
                   <div>
-                    <span style={{ fontSize: 13, color: '#e2e8f0', fontWeight: 600 }}>
+                    <span style={{ fontSize: 13, color: token.text, fontWeight: 600 }}>
                       {selectedProfile.name}
                     </span>
-                    <span style={{ fontSize: 11, color: '#64748b', marginLeft: 8 }}>
+                    <span style={{ fontSize: 11, color: token.textMuted, marginLeft: 8 }}>
                       的變數（可用 {'{{key}}'} 引用）
                     </span>
                   </div>
@@ -646,7 +622,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         title={`瀏覽專案環境變數，點擊插入或複製 ${'{{key}}'}`}
                         style={{
                           ...envRefBtnStyle,
-                          ...(envPopoverAnchor ? { borderColor: '#4ade80' } : {}),
+                          ...(envPopoverAnchor ? { borderColor: token.successFg } : {}),
                         }}
                       >
                         🌐 專案環境變數 ({projectEnvVars.length}) {envPopoverAnchor ? '▴' : '▾'}
@@ -661,8 +637,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         padding: '4px 12px',
                         borderRadius: 4,
                         border: 'none',
-                        background: activeProfileId === selectedProfile.id ? '#374151' : '#3b82f6',
-                        color: activeProfileId === selectedProfile.id ? '#6b7280' : '#fff',
+                        background: activeProfileId === selectedProfile.id ? token.bgDisabled : token.accent,
+                        color: activeProfileId === selectedProfile.id ? token.textDisabled : token.textOnAccent,
                         fontSize: 12,
                         cursor: activeProfileId === selectedProfile.id ? 'default' : 'pointer',
                       }}
@@ -681,9 +657,9 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       top: envPopoverAnchor.bottom + 4,
                       left: Math.max(8, envPopoverAnchor.right - 340),
                       width: 340,
-                      zIndex: 2100,
-                      background: '#1e293b',
-                      border: '1px solid #334155',
+                      zIndex: zIndex.popover,
+                      background: token.bgPanel,
+                      border: `1px solid ${token.border}`,
                       borderRadius: 8,
                       boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
                       display: 'flex',
@@ -694,7 +670,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     <div
                       style={{
                         padding: '8px 10px',
-                        borderBottom: '1px solid #334155',
+                        borderBottom: `1px solid ${token.border}`,
                         flexShrink: 0,
                       }}
                     >
@@ -705,7 +681,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         placeholder="🔍 搜尋變數…"
                         style={cellInputStyle}
                       />
-                      <div style={{ fontSize: 10, color: '#64748b', marginTop: 5 }}>
+                      <div style={{ fontSize: 10, color: token.textMuted, marginTop: 5 }}>
                         {rows.some((r) => r._rid === lastValueCaret.current?.rid)
                           ? '點擊插入至編輯中的「值」欄位'
                           : `點擊複製 ${'{{key}}'}（先點一個「值」欄位可直接插入）`}
@@ -723,21 +699,21 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                             style={{
                               padding: '6px 10px',
                               cursor: 'pointer',
-                              borderBottom: '1px solid #0f172a',
+                              borderBottom: `1px solid ${token.bgPage}`,
                               userSelect: 'none',
                             }}
-                            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#08140c' }}
+                            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = ENV_ROW_HOVER_BG }}
                             onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
                           >
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                               <code
                                 style={{
                                   fontSize: 11,
-                                  background: '#0f172a',
-                                  color: '#4ade80',
+                                  background: token.bgPage,
+                                  color: token.successFg,
                                   padding: '1px 5px',
                                   borderRadius: 3,
-                                  border: '1px solid #166534',
+                                  border: `1px solid ${token.successDark}`,
                                   overflow: 'hidden',
                                   textOverflow: 'ellipsis',
                                   whiteSpace: 'nowrap',
@@ -753,7 +729,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                               )}
                               <div style={{ flex: 1 }} />
                               {copiedKey === ev.key && (
-                                <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>
+                                <span style={{ fontSize: 10, color: token.successFg, flexShrink: 0 }}>
                                   {copiedMode === 'insert' ? '已插入' : '已複製'}
                                 </span>
                               )}
@@ -761,7 +737,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                             <div
                               style={{
                                 fontSize: 10,
-                                color: value ? '#78716c' : '#475569',
+                                color: value ? ENV_VALUE_PREVIEW : token.borderStrong,
                                 marginTop: 2,
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis',
@@ -775,7 +751,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       })}
 
                       {visibleEnvVars.length === 0 && (
-                        <div style={{ padding: 12, fontSize: 11, color: '#64748b' }}>
+                        <div style={{ padding: 12, fontSize: 11, color: token.textMuted }}>
                           找不到符合的變數
                         </div>
                       )}
@@ -788,23 +764,23 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   <div
                     style={{
                       padding: '6px 16px',
-                      borderBottom: '1px solid #334155',
+                      borderBottom: `1px solid ${token.border}`,
                       display: 'flex',
                       alignItems: 'center',
                       gap: 8,
                       flexShrink: 0,
                     }}
                   >
-                    <span style={{ fontSize: 11, color: '#64748b', whiteSpace: 'nowrap' }}>環境值:</span>
+                    <span style={{ fontSize: 11, color: token.textMuted, whiteSpace: 'nowrap' }}>環境值:</span>
                     <select
                       value={activeEnvironmentId ?? ''}
                       // The value column is per-environment — switching reloads the table.
                       onChange={(e) => setActiveEnvironment(e.target.value || null)}
                       style={{
-                        background: '#0f172a',
-                        border: '1px solid #334155',
+                        background: token.bgPage,
+                        border: `1px solid ${token.border}`,
                         borderRadius: 4,
-                        color: '#e2e8f0',
+                        color: token.text,
                         fontSize: 12,
                         padding: '2px 6px',
                         cursor: 'pointer',
@@ -827,16 +803,16 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       gridTemplateColumns: gridCols,
                       gap: 8,
                       padding: '4px 16px 8px',
-                      borderBottom: '1px solid #0f172a',
+                      borderBottom: `1px solid ${token.bgPage}`,
                     }}
                   >
-                    <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>參數名稱</span>
-                    <span style={{ fontSize: 11, color: activeEnvironmentId ? '#4ade80' : '#64748b', fontWeight: 600 }}>
+                    <span style={{ fontSize: 11, color: token.textMuted, fontWeight: 600 }}>參數名稱</span>
+                    <span style={{ fontSize: 11, color: activeEnvironmentId ? token.successFg : token.textMuted, fontWeight: 600 }}>
                       值{activeEnvName ? ` (${activeEnvName})` : ''}
                     </span>
-                    <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>敘述（選填）</span>
+                    <span style={{ fontSize: 11, color: token.textMuted, fontWeight: 600 }}>敘述（選填）</span>
                     <span
-                      style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textAlign: 'center' }}
+                      style={{ fontSize: 11, color: token.textMuted, fontWeight: 600, textAlign: 'center' }}
                       title="私密資料：加密後才寫入檔案"
                     >
                       🔐
@@ -884,9 +860,9 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         style={{
                           ...cellInputStyle,
                           ...(row.secret
-                            ? { borderColor: '#a16207' }
+                            ? { borderColor: SECRET_FIELD_BORDER }
                             : activeEnvironmentId
-                              ? { borderColor: '#166534' }
+                              ? { borderColor: token.successDark }
                               : {}),
                         }}
                       />
@@ -895,7 +871,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                         onChange={(e) => setCell(row._rid, 'description', e.target.value)}
                         onKeyDown={cellKeyDown}
                         placeholder="說明此參數用途…"
-                        style={{ ...cellInputStyle, color: '#94a3b8' }}
+                        style={{ ...cellInputStyle, color: token.textSecondary }}
                       />
                       <button
                         onClick={() => void toggleSecret(row._rid)}
@@ -919,7 +895,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                           background: 'transparent',
                           border: 'none',
                           cursor: 'pointer',
-                          color: '#f87171',
+                          color: token.dangerFg,
                           fontSize: 16,
                           padding: '2px',
                           borderRadius: 3,
@@ -936,7 +912,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   })}
 
                   {rows.length === 0 && (
-                    <div style={{ padding: '16px', color: '#64748b', fontSize: 12 }}>
+                    <div style={{ padding: '16px', color: token.textMuted, fontSize: 12 }}>
                       尚無變數。點擊下方「新增變數」。
                     </div>
                   )}
@@ -945,7 +921,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                 <div
                   style={{
                     padding: 12,
-                    borderTop: '1px solid #334155',
+                    borderTop: `1px solid ${token.border}`,
                     flexShrink: 0,
                     display: 'flex',
                     alignItems: 'center',
@@ -957,9 +933,9 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                     style={{
                       padding: '6px 14px',
                       borderRadius: 4,
-                      border: '1px dashed #334155',
+                      border: `1px dashed ${token.border}`,
                       background: 'transparent',
-                      color: '#3b82f6',
+                      color: token.accent,
                       fontSize: 12,
                       cursor: 'pointer',
                     }}
@@ -968,7 +944,7 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                   </button>
                   <div style={{ flex: 1 }} />
                   {error && (
-                    <span style={{ fontSize: 11, color: '#f87171', whiteSpace: 'nowrap' }}>{error}</span>
+                    <span style={{ fontSize: 11, color: token.dangerFg, whiteSpace: 'nowrap' }}>{error}</span>
                   )}
                   <button
                     onClick={() => void handleSave()}
@@ -978,8 +954,8 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                       border: 'none',
                       fontSize: 12,
                       fontWeight: 600,
-                      background: '#3b82f6',
-                      color: '#fff',
+                      background: token.accent,
+                      color: token.textOnAccent,
                       cursor: 'pointer',
                     }}
                   >
@@ -988,41 +964,33 @@ export function ProfileEditorModal({ onClose }: ProfileEditorModalProps) {
                 </div>
               </>
             ) : (
-              <div style={{ padding: 24, color: '#64748b', fontSize: 13 }}>
+              <div style={{ padding: 24, color: token.textMuted, fontSize: 13 }}>
                 請從左側選擇或建立一個配置。
               </div>
             )}
           </div>
         </div>
-
-        {/* Footer */}
-        <div
-          style={{
-            padding: '12px 20px',
-            borderTop: '1px solid #334155',
-            display: 'flex',
-            justifyContent: 'flex-end',
-            flexShrink: 0,
-          }}
-        >
-          <button onClick={onClose} style={closeBtnStyle}>
-            關閉
-          </button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   )
 }
 
 /** 參數名稱 / 值 / 敘述 / 🔐 / 🗑 — the value column is weighted since it holds long URLs and tokens. */
 const gridCols = '1fr 1.3fr 1fr 28px 32px'
 
+/* One-offs, deliberately not design tokens: they appear only in this file and only
+ * because the env-var popover is green-themed and private fields are amber-bordered.
+ * SECRET_FIELD_BORDER is shared with ProjectEnvVarModal by coincidence of meaning,
+ * not by a shared style — the 🔐 affordance is defined independently in each table. */
+const ENV_ROW_HOVER_BG = '#08140c'
+const ENV_VALUE_PREVIEW = '#78716c'
+const SECRET_FIELD_BORDER = '#a16207'
+
 const envRefBtnStyle: React.CSSProperties = {
   padding: '3px 10px',
   borderRadius: 4,
-  border: '1px solid #166534',
-  background: '#14532d',
-  color: '#4ade80',
+  border: `1px solid ${token.successDark}`,
+  background: token.successBg,
+  color: token.successFg,
   fontSize: 11,
   cursor: 'pointer',
   whiteSpace: 'nowrap',
@@ -1030,10 +998,10 @@ const envRefBtnStyle: React.CSSProperties = {
 
 const inlineInputStyle: React.CSSProperties = {
   padding: '3px 7px',
-  background: '#0f172a',
-  border: '1px solid #3b82f6',
+  background: token.bgPage,
+  border: `1px solid ${token.accent}`,
   borderRadius: 4,
-  color: '#e2e8f0',
+  color: token.text,
   fontSize: 12,
   outline: 'none',
   width: '100%',
@@ -1054,22 +1022,12 @@ const renameActionBtnStyle = (color: string): React.CSSProperties => ({
 
 const cellInputStyle: React.CSSProperties = {
   padding: '4px 8px',
-  background: '#0f172a',
-  border: '1px solid #1e293b',
-  borderRadius: 4,
-  color: '#e2e8f0',
+  background: token.bgPage,
+  border: `1px solid ${token.borderSubtle}`,
+  borderRadius: radius.sm,
+  color: token.text,
   fontSize: 12,
   outline: 'none',
   width: '100%',
   transition: 'border-color 0.15s',
-}
-
-const closeBtnStyle: React.CSSProperties = {
-  padding: '7px 20px',
-  borderRadius: 6,
-  border: '1px solid #475569',
-  background: 'transparent',
-  color: '#94a3b8',
-  cursor: 'pointer',
-  fontSize: 13,
 }

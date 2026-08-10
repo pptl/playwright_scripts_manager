@@ -1,5 +1,9 @@
 import React, { useState } from 'react'
 import { useWorkspaceStore } from '../../stores/workspaceStore'
+import { Modal } from '../common/Modal'
+import { Button } from '../common/Button'
+import { Input } from '../common/Input'
+import { token, zIndex } from '../../styles/tokens'
 
 /**
  * The one dialog for every vault gesture: creating the vault, unlocking it, and
@@ -22,21 +26,7 @@ const TITLES: Record<VaultModalMode, string> = {
   change: '🔐 變更通行碼',
 }
 
-const input: React.CSSProperties = {
-  display: 'block',
-  width: '100%',
-  padding: '8px 10px',
-  background: '#0f172a',
-  border: '1px solid #334155',
-  borderRadius: 6,
-  color: '#e2e8f0',
-  fontSize: 13,
-  outline: 'none',
-  marginBottom: 10,
-  boxSizing: 'border-box',
-}
-
-const label: React.CSSProperties = { fontSize: 11, color: '#94a3b8', marginBottom: 4 }
+const label: React.CSSProperties = { fontSize: 11, color: token.textSecondary, marginBottom: 4 }
 
 export function VaultModal({ mode, reason, onClose, onDone }: VaultModalProps) {
   const setVault = useWorkspaceStore((s) => s.setVault)
@@ -86,123 +76,92 @@ export function VaultModal({ mode, reason, onClose, onDone }: VaultModalProps) {
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !busy) submit()
-    if (e.key === 'Escape') onClose()
   }
 
+  const fieldStyle = { marginBottom: 10 }
+
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 3500,
-      }}
-    >
-      <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 12, padding: 24, width: 400 }}>
-        <h2 style={{ fontSize: 16, color: '#e2e8f0', margin: '0 0 6px' }}>{TITLES[mode]}</h2>
-
-        {reason ? (
-          <div style={{ fontSize: 12, color: '#fbbf24', marginBottom: 12 }}>{reason}</div>
-        ) : null}
-
-        {mode === 'setup' ? (
-          <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.6, marginBottom: 14 }}>
-            被標記為私密的變數會用這組通行碼加密後才寫入檔案，因此可以安全地進 git。
-            同事 clone 之後輸入同一組通行碼就能使用。
-            <div style={{ color: '#f87171', marginTop: 6 }}>
-              ⚠ 通行碼遺失將無法復原任何私密資料，請自行妥善保管。
-            </div>
-          </div>
-        ) : null}
-
-        {mode === 'change' ? (
-          <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.6, marginBottom: 14 }}>
-            所有已儲存的私密資料都會用新通行碼重新加密。
-          </div>
-        ) : null}
-
-        {needsCurrent ? (
-          <>
-            <div style={label}>{mode === 'change' ? '目前的通行碼' : '通行碼'}</div>
-            <input
-              autoFocus
-              type="password"
-              value={current}
-              onChange={(e) => setCurrent(e.target.value)}
-              onKeyDown={onKeyDown}
-              style={input}
-            />
-          </>
-        ) : null}
-
-        {needsNew ? (
-          <>
-            <div style={label}>{mode === 'change' ? '新通行碼' : '通行碼'}（至少 8 字元）</div>
-            <input
-              autoFocus={mode === 'setup'}
-              type="password"
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-              onKeyDown={onKeyDown}
-              style={input}
-            />
-            <div style={label}>再次輸入</div>
-            <input
-              type="password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              onKeyDown={onKeyDown}
-              style={input}
-            />
-          </>
-        ) : null}
-
-        <div style={{ fontSize: 11, color: '#64748b', marginBottom: 14 }}>
-          {canRemember
-            ? '✓ 通行碼會由作業系統金鑰圈記住，這台機器只需輸入一次。'
-            : '⚠ 此系統無法使用金鑰圈，每次啟動都需要重新輸入。'}
-        </div>
-
-        {error ? (
-          <div style={{ fontSize: 12, color: '#f87171', marginBottom: 12 }}>{error}</div>
-        ) : null}
-
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button
-            onClick={onClose}
-            disabled={busy}
-            style={{
-              padding: '6px 16px',
-              borderRadius: 6,
-              border: '1px solid #475569',
-              background: 'transparent',
-              color: '#94a3b8',
-              cursor: busy ? 'default' : 'pointer',
-              fontSize: 12,
-            }}
-          >
+    <Modal
+      title={TITLES[mode]}
+      width={400}
+      z={zIndex.vault}
+      onClose={onClose}
+      // A stray click outside must not drop a half-typed passphrase, and while an
+      // operation is in flight neither gesture should dismiss the dialog.
+      closeOnBackdrop={false}
+      closeOnEscape={!busy}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
             取消
-          </button>
-          <button
-            onClick={submit}
-            disabled={busy}
-            style={{
-              padding: '6px 16px',
-              borderRadius: 6,
-              border: 'none',
-              background: busy ? '#4c4f8a' : '#6366f1',
-              color: '#fff',
-              cursor: busy ? 'default' : 'pointer',
-              fontSize: 12,
-            }}
-          >
+          </Button>
+          <Button tone="primaryAlt" onClick={submit} disabled={busy}>
             {busy ? '處理中…' : mode === 'setup' ? '建立' : mode === 'unlock' ? '解鎖' : '變更'}
-          </button>
+          </Button>
+        </>
+      }
+    >
+      {reason ? <div style={{ fontSize: 12, color: token.warningFg, marginBottom: 12 }}>{reason}</div> : null}
+
+      {mode === 'setup' ? (
+        <div style={{ fontSize: 12, color: token.textMuted, lineHeight: 1.6, marginBottom: 14 }}>
+          被標記為私密的變數會用這組通行碼加密後才寫入檔案，因此可以安全地進 git。
+          同事 clone 之後輸入同一組通行碼就能使用。
+          <div style={{ color: token.dangerFg, marginTop: 6 }}>
+            ⚠ 通行碼遺失將無法復原任何私密資料，請自行妥善保管。
+          </div>
         </div>
+      ) : null}
+
+      {mode === 'change' ? (
+        <div style={{ fontSize: 12, color: token.textMuted, lineHeight: 1.6, marginBottom: 14 }}>
+          所有已儲存的私密資料都會用新通行碼重新加密。
+        </div>
+      ) : null}
+
+      {needsCurrent ? (
+        <>
+          <div style={label}>{mode === 'change' ? '目前的通行碼' : '通行碼'}</div>
+          <Input
+            autoFocus
+            type="password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            onKeyDown={onKeyDown}
+            style={fieldStyle}
+          />
+        </>
+      ) : null}
+
+      {needsNew ? (
+        <>
+          <div style={label}>{mode === 'change' ? '新通行碼' : '通行碼'}（至少 8 字元）</div>
+          <Input
+            autoFocus={mode === 'setup'}
+            type="password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            onKeyDown={onKeyDown}
+            style={fieldStyle}
+          />
+          <div style={label}>再次輸入</div>
+          <Input
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            onKeyDown={onKeyDown}
+            style={fieldStyle}
+          />
+        </>
+      ) : null}
+
+      <div style={{ fontSize: 11, color: token.textMuted, marginBottom: error ? 12 : 0 }}>
+        {canRemember
+          ? '✓ 通行碼會由作業系統金鑰圈記住，這台機器只需輸入一次。'
+          : '⚠ 此系統無法使用金鑰圈，每次啟動都需要重新輸入。'}
       </div>
-    </div>
+
+      {error ? <div style={{ fontSize: 12, color: token.dangerFg }}>{error}</div> : null}
+    </Modal>
   )
 }

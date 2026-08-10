@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
+import { Menu, MenuDivider } from '../common/Menu'
+import { token, radius } from '../../styles/tokens'
 
 interface NodeContextMenuProps {
   nodeId: string
@@ -67,29 +69,8 @@ export function NodeContextMenu({
   }
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 1000,
-      }}
-      onMouseDown={onClose}
-    >
-      <div
-        style={{
-          position: 'absolute',
-          left: x,
-          top: y,
-          background: '#1e293b',
-          border: '1px solid #334155',
-          borderRadius: 8,
-          padding: '4px 0',
-          minWidth: 220,
-          boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-        }}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <MenuItem
+    <Menu x={x} y={y} minWidth={220} onClose={onClose}>
+        <ActionMenuItem
           icon="▶"
           label="重播到此節點"
           disabled={disabled}
@@ -98,7 +79,7 @@ export function NodeContextMenu({
             onReplay()
           }}
         />
-        <MenuItem
+        <ActionMenuItem
           icon="⑂"
           label="從此節點分支錄製"
           disabled={disabled}
@@ -110,8 +91,8 @@ export function NodeContextMenu({
 
         {showExtract && (
           <>
-            <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
-            <MenuItem
+            <MenuDivider />
+            <ActionMenuItem
               icon="⊞"
               label={`將選取的 ${selectedCount} 個節點組成群組`}
               disabled={disabled}
@@ -120,7 +101,7 @@ export function NodeContextMenu({
                 onGroup()
               }}
             />
-            <MenuItem
+            <ActionMenuItem
               icon="⧉"
               label={`將選取的 ${selectedCount} 個節點另存為子流程`}
               disabled={disabled}
@@ -132,8 +113,8 @@ export function NodeContextMenu({
           </>
         )}
 
-        <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
-        <MenuItem
+        <MenuDivider />
+        <ActionMenuItem
           icon="⛓"
           label="在此節點前插入子流程"
           disabled={disabled}
@@ -142,7 +123,7 @@ export function NodeContextMenu({
             onInsertCallFlowBefore()
           }}
         />
-        <MenuItem
+        <ActionMenuItem
           icon="⛓"
           label="在此節點後加入子流程"
           disabled={disabled}
@@ -154,9 +135,9 @@ export function NodeContextMenu({
 
         {hasValue && (
           <>
-            <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
+            <MenuDivider />
             {captureInput === null ? (
-              <MenuItem
+              <ActionMenuItem
                 icon="$"
                 label={
                   currentCaptureAs
@@ -168,7 +149,7 @@ export function NodeContextMenu({
               />
             ) : (
               <div style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 12, color: '#94a3b8', flexShrink: 0 }}>{'{{  }}'}</span>
+                <span style={{ fontSize: 12, color: token.textSecondary, flexShrink: 0 }}>{'{{  }}'}</span>
                 <input
                   ref={inputRef}
                   value={captureInput}
@@ -181,10 +162,10 @@ export function NodeContextMenu({
                   style={{
                     flex: 1,
                     padding: '4px 6px',
-                    background: '#0f172a',
-                    border: '1px solid #3b82f6',
-                    borderRadius: 4,
-                    color: '#e2e8f0',
+                    background: token.bgPage,
+                    border: `1px solid ${token.accent}`,
+                    borderRadius: radius.sm,
+                    color: token.text,
                     fontSize: 12,
                     outline: 'none',
                   }}
@@ -193,10 +174,10 @@ export function NodeContextMenu({
                   onClick={commitCapture}
                   style={{
                     padding: '3px 8px',
-                    borderRadius: 4,
+                    borderRadius: radius.sm,
                     border: 'none',
-                    background: '#3b82f6',
-                    color: '#fff',
+                    background: token.accent,
+                    color: token.textOnAccent,
                     fontSize: 12,
                     cursor: 'pointer',
                     flexShrink: 0,
@@ -209,8 +190,8 @@ export function NodeContextMenu({
           </>
         )}
 
-        <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
-        <MenuItem
+        <MenuDivider />
+        <ActionMenuItem
           icon="⊘"
           label={disconnectLabel}
           disabled={disabled}
@@ -220,8 +201,8 @@ export function NodeContextMenu({
           }}
         />
 
-        <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
-        <MenuItem
+        <MenuDivider />
+        <ActionMenuItem
           icon="✂"
           label={deleteOnlyLabel}
           disabled={disabled}
@@ -231,7 +212,7 @@ export function NodeContextMenu({
             onDeleteNodeOnly()
           }}
         />
-        <MenuItem
+        <ActionMenuItem
           icon="🗑"
           label="刪除此節點及其子節點"
           disabled={disabled}
@@ -241,12 +222,17 @@ export function NodeContextMenu({
             onDelete()
           }}
         />
-      </div>
-    </div>
+    </Menu>
   )
 }
 
-function MenuItem({
+/**
+ * Not the shared `MenuItem`. The canvas menu's entries are <button>s (so they take
+ * keyboard focus), sit on a roomier 8×14 rhythm, and tint their hover red when the
+ * action is destructive. Folding it into the shared component would change how both
+ * this menu and FlowList's look; that is a design decision, not a cleanup.
+ */
+function ActionMenuItem({
   icon,
   label,
   disabled,
@@ -259,7 +245,7 @@ function MenuItem({
   danger?: boolean
   onClick: () => void
 }) {
-  const color = disabled ? '#4b5563' : danger ? '#f87171' : '#e2e8f0'
+  const color = disabled ? DISABLED_ITEM : danger ? token.dangerFg : token.text
   return (
     <button
       onClick={onClick}
@@ -279,7 +265,7 @@ function MenuItem({
       }}
       onMouseEnter={(e) => {
         if (!disabled)
-          (e.currentTarget as HTMLButtonElement).style.background = danger ? '#450a0a' : '#334155'
+          (e.currentTarget as HTMLButtonElement).style.background = danger ? DANGER_HOVER_BG : token.border
       }}
       onMouseLeave={(e) => {
         ;(e.currentTarget as HTMLButtonElement).style.background = 'transparent'
@@ -290,3 +276,7 @@ function MenuItem({
     </button>
   )
 }
+
+/** One-offs: a cooler grey than --ft-text-disabled, and the near-black red hover fill. */
+const DISABLED_ITEM = '#4b5563'
+const DANGER_HOVER_BG = '#450a0a'

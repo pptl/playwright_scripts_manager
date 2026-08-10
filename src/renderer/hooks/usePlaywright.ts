@@ -1,5 +1,6 @@
 import { useCallback } from 'react'
 import { useFlowStore } from '../stores/flowStore'
+import { useProjectStore } from '../stores/projectStore'
 import type { Flow } from '@shared/types'
 import { DOMAIN_ENV_KEY } from '@shared/types'
 import { buildResolutionContext, getEnvVars } from '../utils/varMaps'
@@ -25,7 +26,8 @@ export function usePlaywright() {
   const { setIsRecording, setIsReplaying, clearReplayStatus } = useFlowStore()
 
   const startRecording = useCallback(async () => {
-    const { currentFlow: flow, currentProject, activeEnvironmentId } = useFlowStore.getState()
+    const flow = useFlowStore.getState().currentFlow
+    const { currentProject, activeEnvironmentId } = useProjectStore.getState()
     if (!flow) return
     // The recording origin is the active environment's `domain` env var (falling back to the
     // flow's existing baseURL). Persist it as baseURL so replay/export origin substitution
@@ -47,7 +49,8 @@ export function usePlaywright() {
 
   const startBranchRecording = useCallback(
     async (fromNodeId: string) => {
-      const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore.getState()
+      const { currentFlow, activeProfileId } = useFlowStore.getState()
+      const { currentProject, activeEnvironmentId } = useProjectStore.getState()
       if (!currentFlow) return
       // Branch recording silently replays to the branch point first, which may type
       // private values into the page.
@@ -88,7 +91,8 @@ export function usePlaywright() {
 
   const replayToNode = useCallback(
     async (targetNodeId: string, speed: number) => {
-      const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore.getState()
+      const { currentFlow, activeProfileId } = useFlowStore.getState()
+      const { currentProject, activeEnvironmentId } = useProjectStore.getState()
       if (!currentFlow) return
       if (blockedByLock('重播需要讀取私密資料，請先解鎖。')) return
       clearReplayStatus()

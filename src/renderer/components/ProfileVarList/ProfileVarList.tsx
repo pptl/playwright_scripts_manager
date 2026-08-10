@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useFlowStore } from '../../stores/flowStore'
+import { useProjectStore } from '../../stores/projectStore'
 import { flattenProjectEnvVars, resolveValue, hasVariables } from '../../../shared/variableResolver'
 import { SecretValue } from '../common/SecretValue'
 
 export function ProfileVarList() {
-  const { currentFlow, activeProfileId, activeEnvironmentId, currentProject } = useFlowStore()
+  const { currentFlow, activeProfileId } = useFlowStore()
+  const { activeEnvironmentId, currentProject } = useProjectStore()
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
   const profiles = currentFlow?.profiles ?? []

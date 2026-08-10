@@ -1,16 +1,25 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '../../stores/flowStore'
-import { useFlowManager } from '../../hooks/useFlowStore'
+import { useProjectStore } from '../../stores/projectStore'
+import { useFlowManager } from '../../hooks/useFlowManager'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import type { Action } from '@shared/types'
 import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN } from '@shared/types'
 import { resolveProjectId } from '@shared/projectResolution'
 import { confirm } from '../../stores/confirmStore'
+import { Modal } from '../common/Modal'
+import { Button } from '../common/Button'
+import { Input } from '../common/Input'
+import { Menu, MenuItem, MenuCaption, MenuDivider } from '../common/Menu'
+import { token, radius } from '../../styles/tokens'
 
 export function FlowList() {
-  const { flows, currentFlow, projects, addActionNode, updateNode, runAsOneHistoryStep, assignFlowToProject, createProject, deleteProject, renameProject, duplicateProject, renameCurrentFlow } = useFlowStore()
-  const { refreshFlowList, refreshProjectList, openFlow, deleteCurrentFlow } = useFlowManager()
+  const { flows, currentFlow, addActionNode, updateNode, runAsOneHistoryStep, assignFlowToProject, renameCurrentFlow } = useFlowStore()
+  const { projects, refreshProjects, createProject, renameProject } = useProjectStore()
+  // The two cascade actions come from the coordinator, not the store: deleting or
+  // duplicating a project also deletes or copies its flows.
+  const { refreshFlowList, openFlow, deleteCurrentFlow, deleteProjectWithFlows, duplicateProjectWithFlows } = useFlowManager()
 
   const [contextMenu, setContextMenu] = useState<{ flowId: string; x: number; y: number } | null>(null)
   const [projectMenu, setProjectMenu] = useState<{ projectId: string; name: string; x: number; y: number } | null>(null)
@@ -25,8 +34,6 @@ export function FlowList() {
   const [expandedSubFlows, setExpandedSubFlows] = useState<Set<string>>(new Set())
   // Which project folders are collapsed (key = projectId); default expanded (empty set)
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set())
-  const contextMenuRef = useRef<HTMLDivElement>(null)
-  const projectMenuRef = useRef<HTMLDivElement>(null)
 
   const toggleSubFlows = (key: string) => {
     setExpandedSubFlows((prev) => {
@@ -48,30 +55,11 @@ export function FlowList() {
 
   useEffect(() => {
     refreshFlowList()
-    refreshProjectList()
-  }, [refreshFlowList, refreshProjectList])
+    refreshProjects()
+  }, [refreshFlowList, refreshProjects])
 
-  useEffect(() => {
-    if (!contextMenu) return
-    const handler = (e: MouseEvent) => {
-      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
-        setContextMenu(null)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [contextMenu])
-
-  useEffect(() => {
-    if (!projectMenu) return
-    const handler = (e: MouseEvent) => {
-      if (projectMenuRef.current && !projectMenuRef.current.contains(e.target as Node)) {
-        setProjectMenu(null)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [projectMenu])
+  // Both context menus dismiss via <Menu>'s own transparent catcher — no refs,
+  // no document listeners, no teardown.
 
   const handleRenameProject = async () => {
     if (!renameProjectTarget) return
@@ -79,7 +67,6 @@ export function FlowList() {
     if (!newName) return
     await renameProject(renameProjectTarget.projectId, newName)
     setRenameProjectTarget(null)
-    await refreshProjectList()
   }
 
   const handleAssign = async (flowId: string, projectId: string | null) => {
@@ -96,8 +83,7 @@ export function FlowList() {
       danger: true,
     })
     if (!ok) return
-    await deleteProject(projectId)
-    await refreshFlowList()
+    await deleteProjectWithFlows(projectId)
   }
 
   const handleDuplicateProject = async (projectId: string, projectName: string) => {
@@ -107,10 +93,16 @@ export function FlowList() {
       confirmLabel: '建立副本',
     })
     if (!ok) return
-    await duplicateProject(projectId)
-    await refreshProjectList()
-    await refreshFlowList()
+    await duplicateProjectWithFlows(projectId)
     setProjectMenu(null)
+  }
+
+  /** Also the Escape / backdrop path, so a dismissed dialog never keeps a stale draft. */
+  const closeNewProjectDialog = () => {
+    setShowNewProjectDialog(false)
+    setNewProjectName('')
+    setNewProjectEnvName(DEFAULT_ENV_NAME)
+    setNewProjectDomain(DEFAULT_DOMAIN)
   }
 
   const handleCreateProject = async () => {
@@ -119,10 +111,7 @@ export function FlowList() {
     const envName = newProjectEnvName.trim() || DEFAULT_ENV_NAME
     const domain = newProjectDomain.trim() || DEFAULT_DOMAIN
     await createProject(name, envName, domain)
-    setNewProjectName('')
-    setNewProjectEnvName(DEFAULT_ENV_NAME)
-    setNewProjectDomain(DEFAULT_DOMAIN)
-    setShowNewProjectDialog(false)
+    closeNewProjectDialog()
   }
 
   const handleRename = async () => {
@@ -205,20 +194,20 @@ export function FlowList() {
           padding: '7px 14px 7px 0',
           paddingLeft: indent,
           cursor: 'pointer',
-          background: isActive ? '#1e3a5f' : 'transparent',
-          borderRight: isActive ? '3px solid #3b82f6' : '3px solid transparent',
+          background: isActive ? token.bgSelected : 'transparent',
+          borderRight: isActive ? `3px solid ${token.accent}` : '3px solid transparent',
         }}
-        onMouseEnter={(e) => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = '#243449' }}
+        onMouseEnter={(e) => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = token.bgHover }}
         onMouseLeave={(e) => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ flexShrink: 0, color: '#475569', fontSize: 11, lineHeight: 1 }}>📄</span>
+          <span style={{ flexShrink: 0, color: token.borderStrong, fontSize: 11, lineHeight: 1 }}>📄</span>
           <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <div
             style={{
               fontSize: 13,
-              color: isActive ? '#93c5fd' : '#cbd5e1',
+              color: isActive ? token.accentFg : token.textBody,
               fontWeight: 500,
               overflow: 'hidden',
               textOverflow: 'ellipsis',
@@ -235,9 +224,9 @@ export function FlowList() {
               style={{
                 flexShrink: 0,
                 fontSize: 9,
-                color: '#a5b4fc',
-                background: '#312e81',
-                borderRadius: 4,
+                color: token.accentAltSoft,
+                background: SUBFLOW_BADGE_BG,
+                borderRadius: radius.sm,
                 padding: '1px 5px',
                 fontWeight: 600,
               }}
@@ -246,7 +235,7 @@ export function FlowList() {
             </span>
           )}
         </div>
-        <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
+        <div style={{ fontSize: 10, color: token.textMuted, marginTop: 2 }}>
           {new Date(flow.updatedAt).toLocaleDateString('zh-TW', {
             month: 'short',
             day: 'numeric',
@@ -279,7 +268,7 @@ export function FlowList() {
                 padding: '5px 14px 5px 0',
                 paddingLeft: indent,
                 fontSize: 11,
-                color: '#818cf8',
+                color: token.accentAltFg,
                 fontWeight: 600,
                 cursor: 'pointer',
                 display: 'flex',
@@ -287,15 +276,15 @@ export function FlowList() {
                 gap: 5,
                 userSelect: 'none',
               }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#243449' }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = token.bgHover }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
             >
-              <span style={{ width: 10, flexShrink: 0, color: '#64748b' }}>{expanded ? '▾' : '▸'}</span>
+              <span style={{ width: 10, flexShrink: 0, color: token.textMuted }}>{expanded ? '▾' : '▸'}</span>
               <span style={{ flexShrink: 0 }}>📁</span>
               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 子流程
               </span>
-              <span style={{ color: '#475569', fontWeight: 500 }}>({subFlows.length})</span>
+              <span style={{ color: token.borderStrong, fontWeight: 500 }}>({subFlows.length})</span>
             </div>
             {expanded && subFlows.map((f) => renderFlowItem(f, indent + 16))}
           </>
@@ -308,8 +297,8 @@ export function FlowList() {
     <div
       style={{
         width: 200,
-        background: '#1e293b',
-        borderRight: '1px solid #334155',
+        background: token.bgPanel,
+        borderRight: `1px solid ${token.border}`,
         display: 'flex',
         flexDirection: 'column',
         flexShrink: 0,
@@ -319,9 +308,9 @@ export function FlowList() {
       <div
         style={{
           padding: '12px 14px',
-          borderBottom: '1px solid #334155',
+          borderBottom: `1px solid ${token.border}`,
           fontSize: 12,
-          color: '#64748b',
+          color: token.textMuted,
           fontWeight: 600,
           textTransform: 'uppercase',
           letterSpacing: '0.06em',
@@ -335,14 +324,14 @@ export function FlowList() {
           <button
             onClick={() => setShowNewProjectDialog(true)}
             title="新增專案"
-            style={{ background: 'transparent', border: 'none', color: '#3b82f6', cursor: 'pointer', fontSize: 15 }}
+            style={{ background: 'transparent', border: 'none', color: token.accent, cursor: 'pointer', fontSize: 15 }}
           >
             ＋
           </button>
           <button
-            onClick={() => { refreshFlowList(); refreshProjectList() }}
+            onClick={() => { refreshFlowList(); refreshProjects() }}
             title="重新整理"
-            style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 14 }}
+            style={{ background: 'transparent', border: 'none', color: token.textMuted, cursor: 'pointer', fontSize: 14 }}
           >
             ↺
           </button>
@@ -352,7 +341,7 @@ export function FlowList() {
       {/* Flow list grouped by project */}
       <div style={{ overflowY: 'auto', flex: 1 }}>
         {flows.length === 0 && (
-          <div style={{ padding: '16px 14px', color: '#64748b', fontSize: 12 }}>尚無流程</div>
+          <div style={{ padding: '16px 14px', color: token.textMuted, fontSize: 12 }}>尚無流程</div>
         )}
 
         {/* Projects (未分類 pinned to the bottom) */}
@@ -374,7 +363,7 @@ export function FlowList() {
                 style={{
                   padding: '6px 12px 6px 8px',
                   fontSize: 12,
-                  color: '#cbd5e1',
+                  color: token.textBody,
                   fontWeight: 600,
                   cursor: 'pointer',
                   userSelect: 'none',
@@ -382,20 +371,20 @@ export function FlowList() {
                   alignItems: 'center',
                   gap: 5,
                 }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#243449' }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = token.bgHover }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
               >
-                <span style={{ width: 10, flexShrink: 0, color: '#64748b' }}>{collapsed ? '▸' : '▾'}</span>
+                <span style={{ width: 10, flexShrink: 0, color: token.textMuted }}>{collapsed ? '▸' : '▾'}</span>
                 <span style={{ flexShrink: 0 }}>📁</span>
                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {proj.name}
                 </span>
-                <span style={{ color: '#475569', fontSize: 11, fontWeight: 500 }}>({projFlows.length})</span>
+                <span style={{ color: token.borderStrong, fontSize: 11, fontWeight: 500 }}>({projFlows.length})</span>
               </div>
               {!collapsed && (
                 <div style={{ marginLeft: 13 }}>
                   {projFlows.length === 0 ? (
-                    <div style={{ padding: '6px 14px 6px 18px', fontSize: 11, color: '#475569' }}>（空）</div>
+                    <div style={{ padding: '6px 14px 6px 18px', fontSize: 11, color: token.borderStrong }}>（空）</div>
                   ) : (
                     renderGroupBody(proj.id, projFlows, 18)
                   )}
@@ -408,159 +397,76 @@ export function FlowList() {
 
       {/* Project context menu */}
       {projectMenu && (
-        <div
-          ref={projectMenuRef}
-          style={{
-            position: 'fixed',
-            top: projectMenu.y,
-            left: projectMenu.x,
-            background: '#1e293b',
-            border: '1px solid #334155',
-            borderRadius: 8,
-            zIndex: 9999,
-            boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-            padding: '4px 0',
-            minWidth: 150,
-          }}
-        >
-          <div
+        <Menu x={projectMenu.x} y={projectMenu.y} minWidth={150} onClose={() => setProjectMenu(null)}>
+          <MenuItem
+            icon="✎"
+            label="重新命名"
             onClick={() => {
               setRenameProjectTarget({ projectId: projectMenu.projectId, name: projectMenu.name })
               setProjectMenu(null)
             }}
-            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-          >
-            ✎ 重新命名
-          </div>
-          <div
-            onClick={() => {
-              handleDuplicateProject(projectMenu.projectId, projectMenu.name)
-            }}
-            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-          >
-            ⧉ 建立副本
-          </div>
-          <div
+          />
+          <MenuItem
+            icon="⧉"
+            label="建立副本"
+            onClick={() => handleDuplicateProject(projectMenu.projectId, projectMenu.name)}
+          />
+          <MenuItem
+            icon="🗑"
+            label="刪除專案"
+            danger
             onClick={() => {
               handleDeleteProject(projectMenu.projectId, projectMenu.name)
               setProjectMenu(null)
             }}
-            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#f87171'; (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#cbd5e1'; (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-          >
-            🗑 刪除專案
-          </div>
-        </div>
+          />
+        </Menu>
       )}
 
       {/* Context menu */}
       {contextMenu && (
-        <div
-          ref={contextMenuRef}
-          style={{
-            position: 'fixed',
-            top: contextMenu.y,
-            left: contextMenu.x,
-            background: '#1e293b',
-            border: '1px solid #334155',
-            borderRadius: 8,
-            zIndex: 9999,
-            boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-            padding: '4px 0',
-            minWidth: 160,
-          }}
-        >
-          <div
-            style={{
-              padding: '4px 12px 6px',
-              fontSize: 10,
-              color: '#64748b',
-              borderBottom: '1px solid #334155',
-              marginBottom: 2,
-            }}
-          >
-            移至專案
-          </div>
+        <Menu x={contextMenu.x} y={contextMenu.y} minWidth={160} onClose={() => setContextMenu(null)}>
+          <MenuCaption>移至專案</MenuCaption>
           {orderedProjects.map((proj) => (
-            <div
+            <MenuItem
               key={proj.id}
+              icon="📁"
+              label={proj.name}
               onClick={() => handleAssign(contextMenu.flowId, proj.id)}
-              style={{
-                padding: '7px 12px',
-                cursor: 'pointer',
-                color: '#cbd5e1',
-                fontSize: 13,
-              }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-            >
-              📁 {proj.name}
-            </div>
+            />
           ))}
-          <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
-          {(() => {
-            const disabled = !currentFlow || contextMenu.flowId === currentFlow.id
-            return (
-              <div
-                onClick={() => {
-                  if (disabled) { setContextMenu(null); return }
-                  setAddSubFlowFlowId(contextMenu.flowId)
-                  setContextMenu(null)
-                }}
-                style={{
-                  padding: '7px 12px',
-                  cursor: disabled ? 'not-allowed' : 'pointer',
-                  color: disabled ? '#475569' : '#a5b4fc',
-                  fontSize: 13,
-                }}
-                onMouseEnter={(e) => {
-                  if (!disabled) (e.currentTarget as HTMLDivElement).style.background = '#0f172a'
-                }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-              >
-                ↳ 加入當前流程中
-              </div>
-            )
-          })()}
-
-          <div style={{ borderTop: '1px solid #334155', margin: '4px 0' }} />
-          <div
+          <MenuDivider />
+          <MenuItem
+            icon="↳"
+            label="加入當前流程中"
+            accent
+            disabled={!currentFlow || contextMenu.flowId === currentFlow.id}
+            onClick={() => {
+              setAddSubFlowFlowId(contextMenu.flowId)
+              setContextMenu(null)
+            }}
+          />
+          <MenuDivider />
+          <MenuItem
+            icon="✎"
+            label="重新命名"
             onClick={() => {
               const flow = flows.find((f) => f.id === contextMenu.flowId)
               setRenameTarget({ flowId: contextMenu.flowId, name: flow?.name ?? '' })
               setContextMenu(null)
             }}
-            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-          >
-            ✎ 重新命名
-          </div>
-          <div
-            onClick={() => handleDuplicateFlow(contextMenu.flowId)}
-            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-          >
-            ⧉ 建立副本
-          </div>
-          <div
+          />
+          <MenuItem icon="⧉" label="建立副本" onClick={() => handleDuplicateFlow(contextMenu.flowId)} />
+          <MenuItem
+            icon="🗑"
+            label="刪除流程"
+            danger
             onClick={() => {
               const flow = flows.find((f) => f.id === contextMenu.flowId)
               handleDeleteFlow(contextMenu.flowId, flow?.name ?? '')
             }}
-            style={{ padding: '7px 12px', cursor: 'pointer', color: '#cbd5e1', fontSize: 13 }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#f87171'; (e.currentTarget as HTMLDivElement).style.background = '#0f172a' }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.color = '#cbd5e1'; (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-          >
-            🗑 刪除流程
-          </div>
-        </div>
+          />
+        </Menu>
       )}
 
       {/* Add sub-flow modal */}
@@ -589,290 +495,123 @@ export function FlowList() {
 
       {/* New project dialog */}
       {showNewProjectDialog && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 3000,
-          }}
-        >
-          <div
-            style={{
-              background: '#1e293b',
-              border: '1px solid #334155',
-              borderRadius: 12,
-              padding: 24,
-              minWidth: 300,
-            }}
-          >
-            <h2 style={{ fontSize: 16, color: '#e2e8f0', marginBottom: 14, margin: '0 0 14px' }}>
-              新增專案
-            </h2>
-            <label style={newProjectLabelStyle}>
-              專案名稱
-              <input
-                autoFocus
-                value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleCreateProject()
-                  if (e.key === 'Escape') setShowNewProjectDialog(false)
-                }}
-                placeholder="例：簽核系統"
-                style={newProjectInputStyle}
-              />
-            </label>
-            <label style={newProjectLabelStyle}>
-              環境名稱
-              <input
-                value={newProjectEnvName}
-                onChange={(e) => setNewProjectEnvName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleCreateProject()
-                  if (e.key === 'Escape') setShowNewProjectDialog(false)
-                }}
-                placeholder="例：DEV / UAT / PRD"
-                style={newProjectInputStyle}
-              />
-            </label>
-            <label style={{ ...newProjectLabelStyle, marginBottom: 16 }}>
-              domain
-              <input
-                value={newProjectDomain}
-                onChange={(e) => setNewProjectDomain(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleCreateProject()
-                  if (e.key === 'Escape') setShowNewProjectDialog(false)
-                }}
-                placeholder="http://localhost:3000/"
-                style={newProjectInputStyle}
-              />
-            </label>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => { setShowNewProjectDialog(false); setNewProjectName(''); setNewProjectEnvName(DEFAULT_ENV_NAME); setNewProjectDomain(DEFAULT_DOMAIN) }}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  border: '1px solid #475569',
-                  background: 'transparent',
-                  color: '#94a3b8',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                }}
-              >
-                取消
-              </button>
-              <button
-                onClick={handleCreateProject}
-                disabled={!newProjectName.trim()}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  border: 'none',
-                  background: newProjectName.trim() ? '#3b82f6' : '#374151',
-                  color: newProjectName.trim() ? '#fff' : '#6b7280',
-                  cursor: newProjectName.trim() ? 'pointer' : 'not-allowed',
-                  fontSize: 12,
-                }}
-              >
+        <Modal
+          title="新增專案"
+          minWidth={300}
+          onClose={closeNewProjectDialog}
+          footer={
+            <>
+              <Button onClick={closeNewProjectDialog}>取消</Button>
+              <Button tone="primary" onClick={handleCreateProject} disabled={!newProjectName.trim()}>
                 建立
-              </button>
-            </div>
-          </div>
-        </div>
+              </Button>
+            </>
+          }
+        >
+          <label style={newProjectLabelStyle}>
+            專案名稱
+            <Input
+              autoFocus
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={submitOnEnter(handleCreateProject)}
+              placeholder="例：簽核系統"
+              style={newProjectInputStyle}
+            />
+          </label>
+          <label style={newProjectLabelStyle}>
+            環境名稱
+            <Input
+              value={newProjectEnvName}
+              onChange={(e) => setNewProjectEnvName(e.target.value)}
+              onKeyDown={submitOnEnter(handleCreateProject)}
+              placeholder="例：DEV / UAT / PRD"
+              style={newProjectInputStyle}
+            />
+          </label>
+          <label style={newProjectLabelStyle}>
+            domain
+            <Input
+              value={newProjectDomain}
+              onChange={(e) => setNewProjectDomain(e.target.value)}
+              onKeyDown={submitOnEnter(handleCreateProject)}
+              placeholder="http://localhost:3000/"
+              style={newProjectInputStyle}
+            />
+          </label>
+        </Modal>
       )}
 
       {/* Rename flow dialog */}
       {renameTarget && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 3000,
-          }}
-        >
-          <div
-            style={{
-              background: '#1e293b',
-              border: '1px solid #334155',
-              borderRadius: 12,
-              padding: 24,
-              minWidth: 300,
-            }}
-          >
-            <h2 style={{ fontSize: 16, color: '#e2e8f0', marginBottom: 14, margin: '0 0 14px' }}>
-              重新命名流程
-            </h2>
-            <input
-              autoFocus
-              value={renameTarget.name}
-              onChange={(e) => setRenameTarget({ ...renameTarget, name: e.target.value })}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleRename()
-                if (e.key === 'Escape') setRenameTarget(null)
-              }}
-              placeholder="流程名稱"
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '8px 10px',
-                background: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: 6,
-                color: '#e2e8f0',
-                fontSize: 13,
-                outline: 'none',
-                marginBottom: 16,
-                boxSizing: 'border-box',
-              }}
-            />
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => setRenameTarget(null)}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  border: '1px solid #475569',
-                  background: 'transparent',
-                  color: '#94a3b8',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                }}
-              >
-                取消
-              </button>
-              <button
-                onClick={handleRename}
-                disabled={!renameTarget.name.trim()}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  border: 'none',
-                  background: renameTarget.name.trim() ? '#3b82f6' : '#374151',
-                  color: renameTarget.name.trim() ? '#fff' : '#6b7280',
-                  cursor: renameTarget.name.trim() ? 'pointer' : 'not-allowed',
-                  fontSize: 12,
-                }}
-              >
+        <Modal
+          title="重新命名流程"
+          minWidth={300}
+          onClose={() => setRenameTarget(null)}
+          footer={
+            <>
+              <Button onClick={() => setRenameTarget(null)}>取消</Button>
+              <Button tone="primary" onClick={handleRename} disabled={!renameTarget.name.trim()}>
                 儲存
-              </button>
-            </div>
-          </div>
-        </div>
+              </Button>
+            </>
+          }
+        >
+          <Input
+            autoFocus
+            value={renameTarget.name}
+            onChange={(e) => setRenameTarget({ ...renameTarget, name: e.target.value })}
+            onKeyDown={submitOnEnter(handleRename)}
+            placeholder="流程名稱"
+          />
+        </Modal>
       )}
 
       {/* Rename project dialog */}
       {renameProjectTarget && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 3000,
-          }}
-        >
-          <div
-            style={{
-              background: '#1e293b',
-              border: '1px solid #334155',
-              borderRadius: 12,
-              padding: 24,
-              minWidth: 300,
-            }}
-          >
-            <h2 style={{ fontSize: 16, color: '#e2e8f0', marginBottom: 14, margin: '0 0 14px' }}>
-              重新命名專案
-            </h2>
-            <input
-              autoFocus
-              value={renameProjectTarget.name}
-              onChange={(e) => setRenameProjectTarget({ ...renameProjectTarget, name: e.target.value })}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleRenameProject()
-                if (e.key === 'Escape') setRenameProjectTarget(null)
-              }}
-              placeholder="專案名稱"
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '8px 10px',
-                background: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: 6,
-                color: '#e2e8f0',
-                fontSize: 13,
-                outline: 'none',
-                marginBottom: 16,
-                boxSizing: 'border-box',
-              }}
-            />
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => setRenameProjectTarget(null)}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  border: '1px solid #475569',
-                  background: 'transparent',
-                  color: '#94a3b8',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                }}
-              >
-                取消
-              </button>
-              <button
+        <Modal
+          title="重新命名專案"
+          minWidth={300}
+          onClose={() => setRenameProjectTarget(null)}
+          footer={
+            <>
+              <Button onClick={() => setRenameProjectTarget(null)}>取消</Button>
+              <Button
+                tone="primary"
                 onClick={handleRenameProject}
                 disabled={!renameProjectTarget.name.trim()}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  border: 'none',
-                  background: renameProjectTarget.name.trim() ? '#3b82f6' : '#374151',
-                  color: renameProjectTarget.name.trim() ? '#fff' : '#6b7280',
-                  cursor: renameProjectTarget.name.trim() ? 'pointer' : 'not-allowed',
-                  fontSize: 12,
-                }}
               >
                 儲存
-              </button>
-            </div>
-          </div>
-        </div>
+              </Button>
+            </>
+          }
+        >
+          <Input
+            autoFocus
+            value={renameProjectTarget.name}
+            onChange={(e) => setRenameProjectTarget({ ...renameProjectTarget, name: e.target.value })}
+            onKeyDown={submitOnEnter(handleRenameProject)}
+            placeholder="專案名稱"
+          />
+        </Modal>
       )}
     </div>
   )
 }
 
+/** Deep indigo fill behind the ×N sub-flow reference count. Appears only here. */
+const SUBFLOW_BADGE_BG = '#312e81'
+
+/** Escape is handled by <Modal>; the inputs only need to submit. */
+const submitOnEnter = (submit: () => void) => (e: React.KeyboardEvent) => {
+  if (e.key === 'Enter') submit()
+}
+
 const newProjectLabelStyle: React.CSSProperties = {
   display: 'block',
   marginBottom: 12,
-  color: '#94a3b8',
+  color: token.textSecondary,
   fontSize: 13,
 }
 
-const newProjectInputStyle: React.CSSProperties = {
-  display: 'block',
-  width: '100%',
-  marginTop: 6,
-  padding: '8px 10px',
-  background: '#0f172a',
-  border: '1px solid #334155',
-  borderRadius: 6,
-  color: '#e2e8f0',
-  fontSize: 13,
-  outline: 'none',
-  boxSizing: 'border-box',
-}
+const newProjectInputStyle: React.CSSProperties = { marginTop: 6 }

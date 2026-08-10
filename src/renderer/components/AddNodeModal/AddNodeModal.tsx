@@ -1,8 +1,13 @@
 import { useMemo, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useFlowStore } from '@renderer/stores/flowStore'
+import { useProjectStore } from '@renderer/stores/projectStore'
 import { BUILT_IN_VARIABLES } from '@shared/variableResolver'
 import type { Action } from '@shared/types'
+import { Modal } from '../common/Modal'
+import { Button } from '../common/Button'
+import { FieldLabel } from '../common/Input'
+import { token, radius } from '../../styles/tokens'
 
 interface AddNodeModalProps {
   onConfirm: (action: Action) => void
@@ -27,7 +32,7 @@ export function AddNodeModal({ onConfirm, onClose }: AddNodeModalProps) {
 
   const currentFlow = useFlowStore((s) => s.currentFlow)
   const activeProfileId = useFlowStore((s) => s.activeProfileId)
-  const currentProject = useFlowStore((s) => s.currentProject)
+  const currentProject = useProjectStore((s) => s.currentProject)
 
   // Collect the variable names available inside `vars`.
   const varRefs = useMemo(() => {
@@ -90,175 +95,126 @@ export function AddNodeModal({ onConfirm, onClose }: AddNodeModalProps) {
   }
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 3000,
-      }}
-      onMouseDown={onClose}
+    <Modal
+      title="加入節點"
+      width={720}
+      maxWidth="92vw"
+      onClose={onClose}
+      bodyStyle={{ display: 'flex', flexDirection: 'column', maxHeight: '78vh' }}
+      footer={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button tone="primary" onClick={confirm} disabled={!canConfirm}>
+            確認
+          </Button>
+        </>
+      }
     >
-      <div
+      <FieldLabel>節點類型</FieldLabel>
+      <select
+        value={kind}
+        onChange={(e) => setKind(e.target.value as NodeKind)}
         style={{
-          background: '#1e293b',
-          border: '1px solid #334155',
-          borderRadius: 12,
-          padding: 24,
-          width: 720,
-          maxWidth: '92vw',
-          maxHeight: '88vh',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') onClose()
+          display: 'block',
+          width: '100%',
+          padding: '8px 10px',
+          background: token.bgPage,
+          border: `1px solid ${token.border}`,
+          borderRadius: radius.md,
+          color: token.text,
+          fontSize: 13,
+          outline: 'none',
+          marginBottom: 16,
         }}
       >
-        <h2 style={{ fontSize: 16, color: '#e2e8f0', margin: '0 0 16px' }}>加入節點</h2>
+        <option value="code">程式碼 Code</option>
+      </select>
 
-        {/* Node type */}
-        <label style={{ fontSize: 12, color: '#94a3b8', marginBottom: 6, display: 'block' }}>
-          節點類型
-        </label>
-        <select
-          value={kind}
-          onChange={(e) => setKind(e.target.value as NodeKind)}
-          style={{
-            display: 'block',
-            width: '100%',
-            padding: '8px 10px',
-            background: '#0f172a',
-            border: '1px solid #334155',
-            borderRadius: 6,
-            color: '#e2e8f0',
-            fontSize: 13,
-            outline: 'none',
-            marginBottom: 16,
-            boxSizing: 'border-box',
-          }}
-        >
-          <option value="code">程式碼 Code</option>
-        </select>
+      {kind === 'code' && (
+        <div style={{ display: 'flex', gap: 16, minHeight: 0, flex: 1 }}>
+          {/* Code editor */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <FieldLabel>
+              程式碼（可用 <code style={{ color: CODE_REF_COLOR }}>page</code>、
+              <code style={{ color: CODE_REF_COLOR }}>expect</code>、
+              <code style={{ color: CODE_REF_COLOR }}>vars</code>）
+            </FieldLabel>
+            <textarea
+              autoFocus
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder={CODE_PLACEHOLDER}
+              spellCheck={false}
+              className="ft-input"
+              style={{
+                width: '100%',
+                minHeight: 320,
+                resize: 'vertical',
+                padding: '10px 12px',
+                background: token.bgPage,
+                border: `1px solid ${token.border}`,
+                borderRadius: radius.md,
+                color: token.text,
+                fontSize: 12.5,
+                lineHeight: 1.5,
+                fontFamily: 'Consolas, "Courier New", monospace',
+                outline: 'none',
+                tabSize: 2,
+              }}
+            />
+          </div>
 
-        {kind === 'code' && (
-          <div style={{ display: 'flex', gap: 16, minHeight: 0, flex: 1 }}>
-            {/* Code editor */}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-              <label style={{ fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>
-                程式碼（可用 <code style={{ color: '#7dd3fc' }}>page</code>、
-                <code style={{ color: '#7dd3fc' }}>expect</code>、
-                <code style={{ color: '#7dd3fc' }}>vars</code>）
-              </label>
-              <textarea
-                autoFocus
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder={CODE_PLACEHOLDER}
-                spellCheck={false}
-                style={{
-                  width: '100%',
-                  minHeight: 320,
-                  resize: 'vertical',
-                  padding: '10px 12px',
-                  background: '#0f172a',
-                  border: '1px solid #334155',
-                  borderRadius: 6,
-                  color: '#e2e8f0',
-                  fontSize: 12.5,
-                  lineHeight: 1.5,
-                  fontFamily: 'Consolas, "Courier New", monospace',
-                  outline: 'none',
-                  boxSizing: 'border-box',
-                  tabSize: 2,
-                }}
-              />
-            </div>
-
-            {/* Variable reference */}
-            <div style={{ width: 200, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-              <label style={{ fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>可用變數</label>
-              <div
-                style={{
-                  flex: 1,
-                  overflowY: 'auto',
-                  background: '#0f172a',
-                  border: '1px solid #334155',
-                  borderRadius: 6,
-                  padding: 6,
-                }}
-              >
-                {varRefs.length === 0 && (
-                  <div style={{ fontSize: 11, color: '#475569', padding: 6 }}>（無可用變數）</div>
-                )}
-                {varRefs.map((r, i) => (
-                  <div
-                    key={`${r.snippet}-${i}`}
-                    onClick={() => copySnippet(r.snippet)}
-                    title={`點擊複製 ${r.snippet}`}
-                    style={{
-                      padding: '5px 7px',
-                      cursor: 'pointer',
-                      borderRadius: 4,
-                      userSelect: 'none',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 6,
-                    }}
-                  >
-                    <code style={{ fontSize: 11, color: '#7dd3fc' }}>
-                      {r.label}
-                      {r.secret ? <span title="私密資料（執行時解密）"> 🔐</span> : null}
-                    </code>
-                    {copied === r.snippet ? (
-                      <span style={{ fontSize: 9, color: '#4ade80' }}>已複製</span>
-                    ) : (
-                      <span style={{ fontSize: 9, color: '#475569' }}>{r.group}</span>
-                    )}
-                  </div>
-                ))}
-              </div>
+          {/* Variable reference */}
+          <div style={{ width: 200, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <FieldLabel>可用變數</FieldLabel>
+            <div
+              style={{
+                flex: 1,
+                overflowY: 'auto',
+                background: token.bgPage,
+                border: `1px solid ${token.border}`,
+                borderRadius: radius.md,
+                padding: 6,
+              }}
+            >
+              {varRefs.length === 0 && (
+                <div style={{ fontSize: 11, color: token.textMuted, padding: 6 }}>（無可用變數）</div>
+              )}
+              {varRefs.map((r, i) => (
+                <div
+                  key={`${r.snippet}-${i}`}
+                  className="ft-menu-item"
+                  onClick={() => copySnippet(r.snippet)}
+                  title={`點擊複製 ${r.snippet}`}
+                  style={{
+                    padding: '5px 7px',
+                    cursor: 'pointer',
+                    borderRadius: radius.sm,
+                    userSelect: 'none',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 6,
+                  }}
+                >
+                  <code style={{ fontSize: 11, color: CODE_REF_COLOR }}>
+                    {r.label}
+                    {r.secret ? <span title="私密資料（執行時解密）"> 🔐</span> : null}
+                  </code>
+                  {copied === r.snippet ? (
+                    <span style={{ fontSize: 9, color: token.successFg }}>已複製</span>
+                  ) : (
+                    <span style={{ fontSize: 9, color: token.textMuted }}>{r.group}</span>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
-        )}
-
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
-          <button
-            onClick={onClose}
-            style={{
-              padding: '6px 16px',
-              borderRadius: 6,
-              border: '1px solid #475569',
-              background: 'transparent',
-              color: '#94a3b8',
-              cursor: 'pointer',
-              fontSize: 12,
-            }}
-          >
-            取消
-          </button>
-          <button
-            onClick={confirm}
-            disabled={!canConfirm}
-            style={{
-              padding: '6px 16px',
-              borderRadius: 6,
-              border: 'none',
-              background: canConfirm ? '#3b82f6' : '#334155',
-              color: canConfirm ? '#fff' : '#64748b',
-              cursor: canConfirm ? 'pointer' : 'not-allowed',
-              fontSize: 12,
-            }}
-          >
-            確認
-          </button>
         </div>
-      </div>
-    </div>
+      )}
+    </Modal>
   )
 }
+
+/** Sky-blue used for identifiers in this dialog. Not a design token — it only appears here. */
+const CODE_REF_COLOR = '#7dd3fc'

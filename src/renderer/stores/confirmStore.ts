@@ -61,6 +61,28 @@ export const useConfirmStore = create<ConfirmStore>((set, get) => ({
 export const CONFIRM_CANCEL = 'cancel'
 export const CONFIRM_OK = 'ok'
 
+/**
+ * `window.alert` replacement — one OK button, resolves when dismissed.
+ *
+ * The native dialog was unstyled, blocked the whole renderer, and could not be
+ * raised from inside a modal without looking broken. Callers that only want to
+ * tell the user something should await this rather than branching on a result.
+ */
+export async function notify(opts: {
+  title: string
+  message?: string
+  detail?: string
+  okLabel?: string
+}): Promise<void> {
+  await useConfirmStore.getState().ask({
+    title: opts.title,
+    message: opts.message,
+    detail: opts.detail,
+    actions: [{ id: CONFIRM_OK, label: opts.okLabel ?? '確定', tone: 'primary' }],
+    defaultActionId: CONFIRM_OK,
+  })
+}
+
 /** Yes/no sugar. Danger dialogs default Enter to 取消 so a stray Enter can't delete anything. */
 export async function confirm(opts: {
   title: string

@@ -1,30 +1,29 @@
-import React, { useEffect, useMemo, useState } from 'react'
-import { v4 as uuidv4 } from 'uuid'
+import { useMemo } from 'react'
 import { useProjectStore } from '../../stores/projectStore'
-import { DOMAIN_ENV_KEY, SECRET_ENVELOPE_PREFIX } from '@shared/types'
+import { DOMAIN_ENV_KEY } from '@shared/types'
 import type { ProjectEnvVar } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
 import { useVault } from '../../hooks/useVault'
+import { useDraftRows, newRowId, submitOnEnter } from '../../hooks/useDraftRows'
+import type { DraftRowBase } from '../../hooks/useDraftRows'
 import { Modal } from '../common/Modal'
 import { Button } from '../common/Button'
+import {
+  cellInputStyle,
+  SECRET_FIELD_BORDER,
+  SecretToggleButton,
+  DeleteRowButton,
+  TableEmptyState,
+  varHeaderStyle,
+  varRowStyle,
+} from '../common/varTable'
+import { EnvironmentToolbar } from './EnvironmentToolbar'
 import { token, radius } from '../../styles/tokens'
 
-const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
-
-/** One row of the env-var table: a key plus its value for the currently selected environment. */
-interface EnvVarRow {
-  key: string
-  value: string
-  /** Private: the stored value is ciphertext and the UI masks it. */
-  secret: boolean
-}
-
-/** A row as edited in the table. `_rid` is a stable client id (React keys); `_origKey` is the
- *  key this row had in the store at load time — `commitProjectEnvVars` uses it to carry other
- *  environments' values across a rename, and `null` marks a row added here.
- *  `_storedValue` is what is actually on disk (ciphertext for private rows); `value` holds the
- *  plaintext only once revealed or freshly typed. */
-type EditRow = EnvVarRow & { _rid: string; _origKey: string | null; _storedValue: string; _dirty: boolean }
+/** A row as edited in the table. `_origKey` is the key this row had in the store at load
+ *  time — `commitProjectEnvVars` uses it to carry other environments' values across a
+ *  rename, and `null` marks a row added here. The rest comes from `DraftRowBase`. */
+type EditRow = DraftRowBase & { _origKey: string | null }
 
 /** Store env vars → table rows, resolved for the selected environment. */
 function toEditRows(vars: ProjectEnvVar[], envId: string | null): EditRow[] {
@@ -49,22 +48,12 @@ interface ProjectEnvVarModalProps {
 
 /**
  * Editor for project-level environment variables. One key per row with a single
- * value column for the currently selected environment (switched via the dropdown,
+ * value column for the currently selected environment (switched via EnvironmentToolbar,
  * mirroring ProfileEditorModal's 環境值 selector). Flow profile variable values
  * can reference these via {{key}}.
  */
 export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
-  const {
-    currentProject,
-    activeEnvironmentId,
-    setActiveEnvironment,
-    addEnvironmentToProject,
-    renameEnvironment,
-    duplicateEnvironment,
-    deleteEnvironment,
-    commitProjectEnvVars,
-  } = useProjectStore()
-
+  const { currentProject, activeEnvironmentId, commitProjectEnvVars } = useProjectStore()
   const { ensureUsable } = useVault()
 
   const environments = currentProject?.environments ?? []
@@ -75,11 +64,6 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
   const selectedEnv =
     environments.find((e) => e.id === activeEnvironmentId) ?? environments[0] ?? null
 
-  const [renamingEnv, setRenamingEnv] = useState(false)
-  const [envRenameValue, setEnvRenameValue] = useState('')
-  const [addingEnv, setAddingEnv] = useState(false)
-  const [newEnvName, setNewEnvName] = useState('')
-
   // ── Variable table (edit locally → 儲存) ───────────────────
 
   const varSource = useMemo<EditRow[]>(
@@ -87,89 +71,28 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     [envVars, selectedEnv],
   )
 
-  const [rows, setRows] = useState<EditRow[]>([])
-  const [error, setError] = useState<string | null>(null)
-
   // The value column is per-environment, so the environment belongs in the reload key.
   // Reloading overwrites whatever was typed but not saved — deliberately, and silently.
-  const tableKey = currentProject && selectedEnv ? `${currentProject.id}:${selectedEnv.id}` : ''
-  useEffect(() => {
-    setRows(varSource)
-    setError(null)
-    // varSource is intentionally out of the deps: it changes identity on every store write,
-    // and re-running then would wipe rows the user is still editing.
-  }, [tableKey])
-
-  const setCell = <K extends keyof EnvVarRow>(rid: string, key: K, v: EnvVarRow[K]) => {
-    setRows((prev) =>
-      prev.map((r) => (r._rid === rid ? { ...r, [key]: v, _dirty: key === 'value' ? true : r._dirty } : r)),
-    )
-  }
-
-  const addRow = () => {
-    setRows((prev) => [
-      ...prev,
-      { key: '', value: '', secret: false, _rid: `new:${uuidv4()}`, _origKey: null, _storedValue: '', _dirty: true },
-    ])
-  }
-
-  /** Flip a row's private flag. Turning it ON needs a usable vault to encrypt with;
-   *  turning it OFF needs one to recover the plaintext being un-encrypted. */
-  const toggleSecret = async (rid: string) => {
-    const row = rows.find((r) => r._rid === rid)
-    if (!row || row.key === DOMAIN_ENV_KEY) return
-    if (!ensureUsable()) return
-
-    if (!row.secret) {
-      setRows((prev) => prev.map((r) => (r._rid === rid ? { ...r, secret: true, _dirty: true } : r)))
-      return
-    }
-    // Un-marking: pull the plaintext back into the field so the user can see what they
-    // are about to store in the clear.
-    let plain = row.value
-    if (!row._dirty && isCiphertext(row._storedValue)) {
-      try {
-        plain = await window.electronAPI.revealSecret(row._storedValue)
-      } catch {
-        return setError('無法解密此變數，請先解鎖保險庫')
-      }
-    }
-    setRows((prev) =>
-      prev.map((r) => (r._rid === rid ? { ...r, secret: false, value: plain, _dirty: true } : r)),
-    )
-  }
-
-  /** What actually gets written for a row: ciphertext for private values, and the
-   *  untouched stored ciphertext when the user never revealed or edited it. */
-  const storedValueFor = async (r: EditRow): Promise<string> => {
-    if (r.secret) {
-      return !r._dirty && isCiphertext(r._storedValue)
-        ? r._storedValue
-        : await window.electronAPI.encryptSecret(r.value)
-    }
-    if (!r._dirty && isCiphertext(r._storedValue)) {
-      return await window.electronAPI.revealSecret(r._storedValue)
-    }
-    return r.value
-  }
+  const { rows, setRows, error, setCell, addRow, removeRow, toggleSecret, prepareValues } =
+    useDraftRows<EditRow>({
+      source: varSource,
+      reloadKey: currentProject && selectedEnv ? `${currentProject.id}:${selectedEnv.id}` : '',
+      blankRow: () => ({
+        key: '', value: '', secret: false,
+        _rid: newRowId(), _origKey: null, _storedValue: '', _dirty: true,
+      }),
+      ensureUsable,
+      // `domain` is baked into goto URLs as a literal, so it can never be private.
+      canToggleSecret: (row) => row.key !== DOMAIN_ENV_KEY,
+    })
 
   const handleSave = async () => {
     if (!selectedEnv) return
-    const keys = rows.map((r) => r.key.trim())
-    if (keys.some((k) => !k)) return setError('變數名稱不可為空')
-    const dup = keys.find((k, i) => keys.indexOf(k) !== i)
-    if (dup) return setError(`變數名稱重複：${dup}`)
-    // `domain` is reserved: it must survive and keep its name.
-    if (!keys.includes(DOMAIN_ENV_KEY)) return setError(`${DOMAIN_ENV_KEY} 為保留變數，不可刪除或改名`)
-    if (rows.some((r) => r.secret) && !ensureUsable()) return
-    setError(null)
-
-    let values: string[]
-    try {
-      values = await Promise.all(rows.map(storedValueFor))
-    } catch (err) {
-      return setError(`加密失敗：${String(err instanceof Error ? err.message : err)}`)
-    }
+    const values = await prepareValues((keys) =>
+      // `domain` is reserved: it must survive and keep its name.
+      keys.includes(DOMAIN_ENV_KEY) ? null : `${DOMAIN_ENV_KEY} 為保留變數，不可刪除或改名`,
+    )
+    if (!values) return
 
     await commitProjectEnvVars(
       rows.map((r, i) => ({ origKey: r._origKey, key: r.key.trim(), value: values[i], secret: r.secret })),
@@ -180,50 +103,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
     setRows(toEditRows(useProjectStore.getState().currentProject?.envVars ?? [], selectedEnv.id))
   }
 
-  /** Enter saves the whole table; spread onto the cell inputs. */
-  const cellKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      void handleSave()
-    }
-  }
-
-  const startRenameEnv = () => {
-    if (!selectedEnv) return
-    setEnvRenameValue(selectedEnv.name)
-    setRenamingEnv(true)
-  }
-
-  const commitRenameEnv = async () => {
-    const name = envRenameValue.trim()
-    if (selectedEnv && name && name !== selectedEnv.name) await renameEnvironment(selectedEnv.id, name)
-    setRenamingEnv(false)
-  }
-
-  const handleDuplicateEnv = async () => {
-    if (selectedEnv) await duplicateEnvironment(selectedEnv.id)
-  }
-
-  const commitAddEnv = async () => {
-    const name = newEnvName.trim()
-    if (!name) return
-    await addEnvironmentToProject(name)
-    setNewEnvName('')
-    setAddingEnv(false)
-  }
-
-  const handleDeleteEnv = async () => {
-    if (!selectedEnv) return
-    if (environments.length <= 1) return
-    const ok = await confirm({
-      title: `刪除環境「${selectedEnv.name}」？`,
-      detail: '此環境在所有環境變數上的值將一併移除。',
-      confirmLabel: '刪除',
-      danger: true,
-    })
-    if (!ok) return
-    await deleteEnvironment(selectedEnv.id)
-  }
+  const cellKeyDown = submitOnEnter(() => void handleSave())
 
   const handleDeleteVar = async (rid: string) => {
     const key = rows.find((r) => r._rid === rid)?.key ?? ''
@@ -234,20 +114,10 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
       danger: true,
     })
     if (!ok) return
-    setRows((prev) => prev.filter((r) => r._rid !== rid))
+    removeRow(rid)
   }
 
   const gridCols = '1fr 1fr 28px 32px'
-  const envBtnStyle: React.CSSProperties = {
-    background: 'transparent',
-    border: `1px solid ${token.border}`,
-    borderRadius: 4,
-    color: token.textBody,
-    fontSize: 12,
-    padding: '2px 8px',
-    cursor: 'pointer',
-    lineHeight: 1.4,
-  }
 
   return (
     <Modal
@@ -300,99 +170,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
       }
     >
       <>
-
-        {/* Env switcher */}
-        {environments.length > 0 && (
-          <div
-            style={{
-              padding: '6px 16px',
-              borderBottom: `1px solid ${token.border}`,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              flexShrink: 0,
-            }}
-          >
-            <span style={{ fontSize: 11, color: token.textMuted, whiteSpace: 'nowrap' }}>環境:</span>
-            {addingEnv ? (
-              <>
-                <input
-                  autoFocus
-                  value={newEnvName}
-                  onChange={(e) => setNewEnvName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') commitAddEnv()
-                    if (e.key === 'Escape') { setAddingEnv(false); setNewEnvName('') }
-                  }}
-                  placeholder="環境名稱，例如 DEV / UAT / PRD"
-                  style={{ ...cellInputStyle, width: 200, border: `1px solid ${token.accent}` }}
-                />
-                <button onClick={commitAddEnv} title="確認" style={{ ...envBtnStyle, borderColor: token.accent, color: token.accentFg }}>✓</button>
-                <button onClick={() => { setAddingEnv(false); setNewEnvName('') }} title="取消" style={envBtnStyle}>✕</button>
-              </>
-            ) : renamingEnv ? (
-              <>
-                <input
-                  autoFocus
-                  value={envRenameValue}
-                  onChange={(e) => setEnvRenameValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') commitRenameEnv()
-                    if (e.key === 'Escape') setRenamingEnv(false)
-                  }}
-                  style={{ ...cellInputStyle, width: 160, border: `1px solid ${token.accent}` }}
-                />
-                <button onClick={commitRenameEnv} title="確認" style={{ ...envBtnStyle, borderColor: token.accent, color: token.accentFg }}>✓</button>
-                <button onClick={() => setRenamingEnv(false)} title="取消" style={envBtnStyle}>✕</button>
-              </>
-            ) : (
-              <>
-                <select
-                  value={selectedEnv?.id ?? ''}
-                  // The value column is per-environment — switching reloads the table.
-                  onChange={(e) => setActiveEnvironment(e.target.value || null)}
-                  style={{
-                    background: token.bgPage,
-                    border: `1px solid ${token.border}`,
-                    borderRadius: 4,
-                    color: token.text,
-                    fontSize: 12,
-                    padding: '2px 6px',
-                    cursor: 'pointer',
-                    outline: 'none',
-                  }}
-                >
-                  {environments.map((env) => (
-                    <option key={env.id} value={env.id}>{env.name}</option>
-                  ))}
-                </select>
-                <div style={{ flex: 1 }} />
-                <button onClick={startRenameEnv} disabled={!selectedEnv} title="重新命名環境" style={envBtnStyle}>✎ 改名</button>
-                <button onClick={handleDuplicateEnv} disabled={!selectedEnv} title="建立此環境的副本" style={envBtnStyle}>⧉ 副本</button>
-                <button
-                  onClick={handleDeleteEnv}
-                  disabled={!selectedEnv || environments.length <= 1}
-                  title={environments.length <= 1 ? '至少需保留一個環境' : '刪除此環境'}
-                  style={{
-                    ...envBtnStyle,
-                    color: environments.length <= 1 ? token.borderStrong : token.dangerFg,
-                    borderColor: environments.length <= 1 ? token.border : token.dangerDark,
-                    cursor: environments.length <= 1 ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  🗑 刪除
-                </button>
-                <button
-                  onClick={() => { setNewEnvName(''); setAddingEnv(true) }}
-                  title="新增環境"
-                  style={{ ...envBtnStyle, borderColor: token.accent, color: token.accentFg }}
-                >
-                  ＋ 新增
-                </button>
-              </>
-            )}
-          </div>
-        )}
+        <EnvironmentToolbar selectedEnv={selectedEnv} />
 
         {/* Body */}
         <div style={{ overflowY: 'auto', flex: 1, padding: '8px 0' }}>
@@ -403,15 +181,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
           ) : (
             <>
               {/* Column headers */}
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: gridCols,
-                  gap: 8,
-                  padding: '4px 16px 8px',
-                  borderBottom: `1px solid ${token.bgPage}`,
-                }}
-              >
+              <div style={varHeaderStyle(gridCols)}>
                 <span style={{ fontSize: 11, color: token.textMuted, fontWeight: 600 }}>變數名稱</span>
                 <span style={{ fontSize: 11, color: token.successFg, fontWeight: 600 }}>
                   值{selectedEnv ? ` (${selectedEnv.name})` : ''}
@@ -427,16 +197,7 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                 // is locked and it cannot be deleted; only its per-environment value is editable.
                 const isDomain = row.key === DOMAIN_ENV_KEY
                 return (
-                <div
-                  key={row._rid}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: gridCols,
-                    gap: 8,
-                    padding: '5px 16px',
-                    alignItems: 'center',
-                  }}
-                >
+                <div key={row._rid} style={varRowStyle(gridCols)}>
                   <input
                     value={row.key}
                     readOnly={isDomain}
@@ -464,74 +225,26 @@ export function ProjectEnvVarModal({ onClose }: ProjectEnvVarModalProps) {
                       —
                     </span>
                   ) : (
-                    <button
-                      onClick={() => void toggleSecret(row._rid)}
+                    <SecretToggleButton
+                      secret={row.secret}
                       title={row.secret ? '目前為私密資料（加密儲存）— 點擊取消' : '設為私密資料（加密後才寫入檔案）'}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: 13,
-                        padding: 2,
-                        opacity: row.secret ? 1 : 0.3,
-                        filter: row.secret ? undefined : 'grayscale(1)',
-                      }}
-                    >
-                      🔐
-                    </button>
+                      onClick={() => void toggleSecret(row._rid)}
+                    />
                   )}
                   {isDomain ? (
                     <span title="domain 為保留變數，無法刪除" style={{ textAlign: 'center', color: token.borderStrong, fontSize: 13 }}>🔒</span>
                   ) : (
-                    <button
-                      onClick={() => handleDeleteVar(row._rid)}
-                      title="刪除此變數"
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        cursor: 'pointer',
-                        color: token.dangerFg,
-                        fontSize: 16,
-                        padding: '2px',
-                        borderRadius: 3,
-                        lineHeight: 1,
-                        opacity: 0.7,
-                      }}
-                      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '1' }}
-                      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.7' }}
-                    >
-                      🗑
-                    </button>
+                    <DeleteRowButton title="刪除此變數" onClick={() => handleDeleteVar(row._rid)} />
                   )}
                 </div>
                 )
               })}
 
-              {rows.length === 0 && (
-                <div style={{ padding: '16px', color: token.textMuted, fontSize: 12 }}>
-                  尚無環境變數。點擊下方「新增變數」。
-                </div>
-              )}
+              {rows.length === 0 && <TableEmptyState>尚無環境變數。點擊下方「新增變數」。</TableEmptyState>}
             </>
           )}
         </div>
       </>
     </Modal>
   )
-}
-
-/** Amber border marking a private field. A local one-off, matching the same
- *  affordance in ProfileEditorModal — the two tables define it independently. */
-const SECRET_FIELD_BORDER = '#a16207'
-
-const cellInputStyle: React.CSSProperties = {
-  padding: '4px 8px',
-  background: token.bgPage,
-  border: `1px solid ${token.borderSubtle}`,
-  borderRadius: radius.sm,
-  color: token.text,
-  fontSize: 12,
-  outline: 'none',
-  width: '100%',
-  transition: 'border-color 0.15s',
 }

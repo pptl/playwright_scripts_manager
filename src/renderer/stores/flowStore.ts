@@ -48,7 +48,7 @@ interface FlowStore {
   currentFlow: Flow | null
   selectedNodeId: string | null
   replayingNodeId: string | null
-  replayStatus: Record<string, 'running' | 'success' | 'error'>
+  replayStatus: Record<string, 'running' | 'success' | 'error' | 'cancelled'>
   isRecording: boolean
   isReplaying: boolean
   /** The node ID that new recorded actions should be appended to */
@@ -120,8 +120,10 @@ interface FlowStore {
 
   // Replay status
   setReplayingNode: (nodeId: string | null) => void
-  setReplayStatus: (nodeId: string, status: 'running' | 'success' | 'error') => void
+  setReplayStatus: (nodeId: string, status: 'running' | 'success' | 'error' | 'cancelled') => void
   clearReplayStatus: () => void
+  /** End-of-run repaint for a cancelled replay. */
+  markReplayCancelled: () => void
 
   // Recording flag
   setIsRecording: (v: boolean) => void
@@ -723,6 +725,18 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     set((state) => ({ replayStatus: { ...state.replayStatus, [nodeId]: status } })),
 
   clearReplayStatus: () => set({ replayStatus: {}, replayingNodeId: null }),
+
+  // Every node still mid-flight goes amber — the interrupted node AND, for a sub-flow, the
+  // parent callFlow node, since both were started and neither reached a verdict. Verdicts
+  // already recorded (green / red) are left alone; they really did happen. The next replay
+  // wipes the lot via clearReplayStatus.
+  markReplayCancelled: () =>
+    set((state) => ({
+      replayStatus: Object.fromEntries(
+        Object.entries(state.replayStatus).map(([id, st]) => [id, st === 'running' ? 'cancelled' : st]),
+      ),
+      replayingNodeId: null,
+    })),
 
   setIsRecording: (v) => set({ isRecording: v }),
   setIsReplaying: (v) => set({ isReplaying: v }),

@@ -111,6 +111,13 @@ export function usePlaywrightEvents() {
       console.error('Replay error:', err)
     })
 
+    // The user pressed ⏹. Nodes left mid-flight go amber rather than red — they did not
+    // fail, they were interrupted. markReplayCancelled also clears replayingNodeId.
+    const unsubCancelled = window.electronAPI.onReplayCancelled(() => {
+      useFlowStore.getState().markReplayCancelled()
+      setIsReplaying(false)
+    })
+
     // The workspace sits in the user's own repo, so a pull or a branch switch can
     // change these files while we hold them in memory — and the next autosave
     // would quietly write our stale copy back over them. Regaining focus is the
@@ -128,6 +135,7 @@ export function usePlaywrightEvents() {
       unsubNodeComplete()
       unsubFinished()
       unsubError()
+      unsubCancelled()
     }
     // Subscribe once for the app's lifetime; every handler reads fresh store state
     // via getState(), so nothing here needs to be in the deps.

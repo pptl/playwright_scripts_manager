@@ -63,6 +63,9 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
   if (selected) borderColor = '#60a5fa'
   if (nodeStatus === 'success') borderColor = '#22c55e'
   if (nodeStatus === 'error') borderColor = '#ef4444'
+  // Amber: interrupted by the user, not failed. Without this a cancelled node would keep
+  // its plain type colour ('running' has no branch), making the stop invisible.
+  if (nodeStatus === 'cancelled') borderColor = '#f59e0b'
 
   const borderWidth = action.isPageNavigation ? 3 : 1.5
   const borderStyle = action.type === 'callFlow' || action.type === 'code' ? 'dashed' : 'solid'

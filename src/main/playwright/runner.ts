@@ -61,6 +61,42 @@ export interface SpawnResult {
   exitCode: number
   /** Everything the process wrote, so callers can inspect it after the fact. */
   output: string
+  /** True only when cancel() killed this child. NOT inferred from exitCode: on win32
+   *  taskkill /F yields exit 1, indistinguishable from a real test failure (POSIX is the
+   *  one that gives code === null). The killer is the only reliable witness. */
+  cancelled: boolean
+}
+
+export interface RunHandle {
+  /** Resolves when the child exits — including when cancel() killed it. */
+  promise: Promise<SpawnResult>
+  /** Kill the child and everything it spawned. Idempotent; a no-op after exit. */
+  cancel: () => void
+}
+
+/**
+ * Kill a child and everything it spawned.
+ *
+ * child.kill() is not enough on win32. We spawn our own binary as a plain Node interpreter
+ * (ELECTRON_RUN_AS_NODE); that wrapper spawns the Playwright runner, which spawns worker
+ * processes and the browser. Windows has no process groups, so the signal reaches the
+ * wrapper only and the workers keep running — still writing into .flowtest/ and still
+ * holding the report directory. taskkill /F /T walks the tree. Same platform split, and the
+ * same best-effort spirit, as killProcessOnPort in ipcHandlers.ts.
+ *
+ * POSIX is genuinely weaker here: without spawning detached there is no process group to
+ * signal, so we kill the wrapper's direct children and then the wrapper. A grandchild that
+ * reparented can survive. Accepted — detached would change stdio and Ctrl-C semantics for
+ * every run, to fix a case this app's primary target does not hit.
+ */
+function killTree(pid: number): void {
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/F', '/T', '/PID', String(pid)], { shell: false, stdio: 'ignore' })
+      .on('error', () => {})
+  } else {
+    spawn('pkill', ['-9', '-P', String(pid)], { stdio: 'ignore' }).on('error', () => {})
+    try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+  }
 }
 
 /**
@@ -76,6 +112,10 @@ export interface SpawnResult {
  *   from *the importing file*, i.e. the user's workspace — which has no
  *   node_modules and would fail with MODULE_NOT_FOUND. NODE_PATH is the
  *   fallback Node consults after that walk comes up empty.
+ *
+ * Returns a handle rather than a bare promise so the child cannot be spawned without also
+ * handing back a way to kill it — the spawn used to be local to the promise executor, which
+ * is precisely why runs were uncancellable.
  */
 export function runPlaywright(
   cli: PlaywrightCli,
@@ -85,41 +125,56 @@ export function runPlaywright(
   /** Private values, as FT_SECRET_* names. Generated specs read them via process.env,
    *  so an in-app run never writes a plaintext credential to disk. */
   extraEnv: Record<string, string> = {},
-): Promise<SpawnResult> {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [cli.path, ...args], {
-      cwd,
-      env: {
-        ...process.env,
-        ...extraEnv,
-        ELECTRON_RUN_AS_NODE: '1',
-        NODE_PATH: process.env.NODE_PATH
-          ? `${cli.nodePath}${delimiter}${process.env.NODE_PATH}`
-          : cli.nodePath,
-        PLAYWRIGHT_HTML_OUTPUT_DIR: HTML_REPORT_DIR,
-        // The run must never block on a browser popping open by itself; the user
-        // opens the report deliberately via SHOW_REPORT.
-        PLAYWRIGHT_HTML_OPEN: 'never',
-      },
-    })
+): RunHandle {
+  const child = spawn(process.execPath, [cli.path, ...args], {
+    cwd,
+    env: {
+      ...process.env,
+      ...extraEnv,
+      ELECTRON_RUN_AS_NODE: '1',
+      NODE_PATH: process.env.NODE_PATH
+        ? `${cli.nodePath}${delimiter}${process.env.NODE_PATH}`
+        : cli.nodePath,
+      PLAYWRIGHT_HTML_OUTPUT_DIR: HTML_REPORT_DIR,
+      // The run must never block on a browser popping open by itself; the user
+      // opens the report deliberately via SHOW_REPORT.
+      PLAYWRIGHT_HTML_OPEN: 'never',
+    },
+  })
 
-    let output = ''
-    const pipe = (d: Buffer): void => {
-      const text = d.toString()
-      output += text
-      onOutput(text)
-    }
-    child.stdout.on('data', pipe)
-    child.stderr.on('data', pipe)
+  let output = ''
+  let killed = false
+  let exited = false
+  const pipe = (d: Buffer): void => {
+    const text = d.toString()
+    output += text
+    onOutput(text)
+  }
+  child.stdout.on('data', pipe)
+  child.stderr.on('data', pipe)
 
+  const promise = new Promise<SpawnResult>((resolve) => {
     child.on('error', (err) => {
+      exited = true
       const text = `\n✗ 無法啟動測試執行器: ${String(err)}\n`
       output += text
       onOutput(text)
-      resolve({ exitCode: 1, output })
+      resolve({ exitCode: 1, output, cancelled: killed })
     })
-    child.on('close', (code) => resolve({ exitCode: code ?? 1, output }))
+    child.on('close', (code) => {
+      exited = true
+      resolve({ exitCode: code ?? 1, output, cancelled: killed })
+    })
   })
+
+  return {
+    promise,
+    cancel: () => {
+      if (killed || exited || child.pid == null) return
+      killed = true
+      killTree(child.pid)
+    },
+  }
 }
 
 export const MISSING_CLI_MESSAGE =

@@ -17,7 +17,8 @@ import type {
 import { isCallFlowAction } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
 import { Recorder } from '../playwright/recorder'
-import { Replayer } from '../playwright/replayer'
+import { Replayer, newReplaySession, isReplayCancelled } from '../playwright/replayer'
+import type { CancelSignal } from '../playwright/replayer'
 import { FlowStorage } from '../storage/flowStorage'
 import { FixtureStorage } from '../storage/fixtureStorage'
 import { ProjectStorage } from '../storage/projectStorage'
@@ -42,6 +43,14 @@ import {
 
 let browserController: BrowserController | null = null
 let recorder: Recorder | null = null
+/** Stop switch for the in-flight replay — the signal only, never the Replayer: holding the
+ *  Replayer module-level would retain the finished run's Page and session vars (see the
+ *  handler-local note in REPLAY_TO_NODE). Nulled in that handler's finally. */
+let activeReplaySignal: CancelSignal | null = null
+/** The in-flight child-process run — RUN_TESTS or BROWSER_INSTALL, since both stream into
+ *  the same TestOutputModal. `cancelled` is set even before a child exists, so a ⏹ during
+ *  the export phase still aborts. Nulled in a finally. */
+let activeRun: { cancelled: boolean; kill: () => void } | null = null
 
 export function registerIpcHandlers(win: BrowserWindow): void {
   /** Copy files into fixtures/, returning the data-root-relative paths stored on Actions. */
@@ -125,6 +134,8 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
   // ── Replay ───────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.REPLAY_TO_NODE, async (_e, payload: ReplayToNodePayload) => {
+    const session = newReplaySession()
+    activeReplaySignal = session.signal
     try {
       assertUnlocked()
       if (!browserController || !browserController.isRunning()) {
@@ -134,7 +145,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       const page = browserController.getPage()
       // Handler-local: nothing outside this call needs it, and holding it module-level
       // would retain the finished replay's Page and session vars until the next run.
-      const replayer = new Replayer(page, payload.baseURL, decryptContext(payload.ctx))
+      const replayer = new Replayer(page, payload.baseURL, decryptContext(payload.ctx), session)
 
       await replayer.replayToNode(
         payload.nodes,
@@ -146,8 +157,22 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       )
       win.webContents.send(IPC_CHANNELS.REPLAY_FINISHED)
     } catch (err) {
-      win.webContents.send(IPC_CHANNELS.REPLAY_ERROR, String(err))
+      if (isReplayCancelled(err)) win.webContents.send(IPC_CHANNELS.REPLAY_CANCELLED)
+      else win.webContents.send(IPC_CHANNELS.REPLAY_ERROR, String(err))
+    } finally {
+      activeReplaySignal = null
     }
+  })
+
+  // The browser is deliberately left OPEN. Stopping mid-flow is nearly always so the user
+  // can inspect the page they got stuck on; closing the context would also be the only
+  // thing that could settle the orphaned Playwright calls race() abandons, and their late
+  // "Target closed" rejections are not worth the lost page state.
+  ipcMain.handle(IPC_CHANNELS.REPLAY_CANCEL, async () => {
+    // A no-op when nothing is running or ⏹ was already pressed (CancelSignal.cancel is
+    // itself idempotent). REPLAY_CANCELLED is sent by the handler above, never here —
+    // otherwise a late second press could clear a freshly started run's canvas state.
+    activeReplaySignal?.cancel()
   })
 
 
@@ -206,53 +231,90 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   const out = (text: string): void => win.webContents.send(IPC_CHANNELS.TEST_OUTPUT, text)
 
   ipcMain.handle(IPC_CHANNELS.RUN_TESTS, async (_e, payload: ExportScriptsPayload) => {
-    const finish = (exitCode: number): void => {
-      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 })
+    const finish = (exitCode: number, cancelled = false): void => {
+      // A killed run is never a pass, whatever exit code the OS happened to report.
+      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, {
+        exitCode,
+        passed: exitCode === 0 && !cancelled,
+        cancelled,
+      })
     }
 
-    const cli = resolvePlaywrightCli()
-    if (!cli) {
-      out(MISSING_CLI_MESSAGE)
-      return finish(1)
-    }
+    // Registered before the export phase so a ⏹ landing there is still honoured —
+    // ScriptExporter.export cannot itself be interrupted, but it takes milliseconds and we
+    // check the flag the moment it returns, before anything is spawned.
+    const run = { cancelled: false, kill: () => {} }
+    activeRun = run
 
-    // 1. Export script
-    let specPath: string
-    let secretEnv: Record<string, string> = {}
-    const config = decryptContext(payload.ctx)
     try {
-      assertUnlocked()
-      specPath = await ScriptExporter.export(payload.flow, config)
-      // Private values are emitted as process.env lookups, never literals. Handing them
-      // to the child process means an in-app run leaves no plaintext on disk at all.
-      secretEnv = await ScriptExporter.collectSecretEnv(payload.flow, config)
-      out(`✓ 腳本已匯出: ${specPath}\n`)
-      if (Object.keys(secretEnv).length) {
-        out(`✓ 已注入 ${Object.keys(secretEnv).length} 個私密變數 (僅存在於記憶體)\n`)
+      const cli = resolvePlaywrightCli()
+      if (!cli) {
+        out(MISSING_CLI_MESSAGE)
+        return finish(1)
       }
-    } catch (err) {
-      out(`✗ 匯出失敗: ${String(err)}\n`)
-      return finish(1)
+
+      // 1. Export script
+      let specPath: string
+      let secretEnv: Record<string, string> = {}
+      const config = decryptContext(payload.ctx)
+      try {
+        assertUnlocked()
+        specPath = await ScriptExporter.export(payload.flow, config)
+        // Private values are emitted as process.env lookups, never literals. Handing them
+        // to the child process means an in-app run leaves no plaintext on disk at all.
+        secretEnv = await ScriptExporter.collectSecretEnv(payload.flow, config)
+        out(`✓ 腳本已匯出: ${specPath}\n`)
+        if (Object.keys(secretEnv).length) {
+          out(`✓ 已注入 ${Object.keys(secretEnv).length} 個私密變數 (僅存在於記憶體)\n`)
+        }
+      } catch (err) {
+        out(`✗ 匯出失敗: ${String(err)}\n`)
+        return finish(1)
+      }
+
+      if (run.cancelled) {
+        out('\n⏹ 已中止 (尚未開始執行)\n')
+        return finish(1, true)
+      }
+
+      // 2. Run the bundled CLI. Only the filename is passed: the generated config
+      //    sets testDir to './exports', and Playwright treats a path argument as a
+      //    regex against paths relative to testDir, so 'exports/x.spec.ts' matches
+      //    nothing. --config is explicit so a config higher up the user's tree
+      //    cannot take over the run.
+      const specFilename = basename(specPath)
+      const cwd = getWorkspaceRoot()
+      const args = ['test', specFilename, '--config', configPath(), '--reporter=list,html']
+
+      out(`✓ 執行器: ${cli.path} (v${cli.version})\n`)
+      out(`▶ playwright ${args.join(' ')}\n\n`)
+
+      const handle = runPlaywright(cli, args, cwd, out, secretEnv)
+      run.kill = handle.cancel
+      // ⏹ can land in the gap between the spawn above and the assignment.
+      if (run.cancelled) handle.cancel()
+
+      const { exitCode, output, cancelled } = await handle.promise
+
+      if (cancelled) {
+        out('\n⏹ 測試已中止\n')
+        return finish(exitCode, true)
+      }
+      if (exitCode !== 0 && isMissingBrowserError(output)) {
+        out('\n⚠ 缺少 Chromium 瀏覽器 — 請點擊「安裝瀏覽器」後重試。\n')
+      }
+      finish(exitCode)
+    } finally {
+      activeRun = null
     }
+  })
 
-    // 2. Run the bundled CLI. Only the filename is passed: the generated config
-    //    sets testDir to './exports', and Playwright treats a path argument as a
-    //    regex against paths relative to testDir, so 'exports/x.spec.ts' matches
-    //    nothing. --config is explicit so a config higher up the user's tree
-    //    cannot take over the run.
-    const specFilename = basename(specPath)
-    const cwd = getWorkspaceRoot()
-    const args = ['test', specFilename, '--config', configPath(), '--reporter=list,html']
-
-    out(`✓ 執行器: ${cli.path} (v${cli.version})\n`)
-    out(`▶ playwright ${args.join(' ')}\n\n`)
-
-    const { exitCode, output } = await runPlaywright(cli, args, cwd, out, secretEnv)
-
-    if (exitCode !== 0 && isMissingBrowserError(output)) {
-      out('\n⚠ 缺少 Chromium 瀏覽器 — 請點擊「安裝瀏覽器」後重試。\n')
-    }
-    finish(exitCode)
+  ipcMain.handle(IPC_CHANNELS.TEST_CANCEL, async () => {
+    if (!activeRun || activeRun.cancelled) return
+    activeRun.cancelled = true
+    out('\n⏹ 已要求中止…\n')
+    // A no-op if the child has not spawned yet — the flag above is what covers that window.
+    activeRun.kill()
   })
 
   ipcMain.handle(IPC_CHANNELS.SHOW_REPORT, async () => {
@@ -278,10 +340,29 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       return false
     }
     out('▶ 正在下載 Chromium…\n\n')
-    const { exitCode } = await runPlaywright(cli, ['install', 'chromium'], getWorkspaceRoot(), out)
-    out(exitCode === 0 ? '\n✓ 瀏覽器安裝完成\n' : `\n✗ 安裝失敗 (exit ${exitCode})\n`)
-    win.webContents.send(IPC_CHANNELS.TEST_FINISHED, { exitCode, passed: exitCode === 0 })
-    return exitCode === 0
+    // Shares activeRun with RUN_TESTS: both stream into the same TestOutputModal, so its
+    // ⏹ has to reach whichever one is running. Aborting a 150 MB download on a bad
+    // connection is arguably the more valuable of the two.
+    const run = { cancelled: false, kill: () => {} }
+    activeRun = run
+    try {
+      const handle = runPlaywright(cli, ['install', 'chromium'], getWorkspaceRoot(), out)
+      run.kill = handle.cancel
+      if (run.cancelled) handle.cancel()
+
+      const { exitCode, cancelled } = await handle.promise
+      out(cancelled
+        ? '\n⏹ 安裝已中止\n'
+        : exitCode === 0 ? '\n✓ 瀏覽器安裝完成\n' : `\n✗ 安裝失敗 (exit ${exitCode})\n`)
+      win.webContents.send(IPC_CHANNELS.TEST_FINISHED, {
+        exitCode,
+        passed: exitCode === 0 && !cancelled,
+        cancelled,
+      })
+      return exitCode === 0 && !cancelled
+    } finally {
+      activeRun = null
+    }
   })
 
   // ── Workspace ────────────────────────────────────────────

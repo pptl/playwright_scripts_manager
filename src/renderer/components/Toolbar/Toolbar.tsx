@@ -82,7 +82,7 @@ export function Toolbar() {
     setActiveEnvironment,
     addEnvironmentToProject,
   } = useProjectStore()
-  const { startRecording, stopRecording } = usePlaywright()
+  const { startRecording, stopRecording, cancelReplay } = usePlaywright()
   const { newFlow } = useFlowManager()
   const { root: workspaceRoot, pick: pickWorkspace, reveal } = useWorkspace()
   // Show just the folder name; the full path lives in the tooltip.
@@ -94,6 +94,9 @@ export function Toolbar() {
   const [showTestModal, setShowTestModal] = useState(false)
   const [testLines, setTestLines] = useState<string[]>([])
   const [testFinished, setTestFinished] = useState<TestFinishedPayload | null>(null)
+  // A process-tree kill takes a few hundred ms and Playwright keeps printing while it dies,
+  // so the 中止 button has to disable itself or it looks broken.
+  const [cancelRequested, setCancelRequested] = useState(false)
   const testLinesRef = useRef<string[]>([])
   const hasNodes = (currentFlow?.nodes.length ?? 0) > 0
 
@@ -156,6 +159,7 @@ export function Toolbar() {
     const offFinished = window.electronAPI.onTestFinished((payload) => {
       setTestFinished(payload)
       setIsRunningTests(false)
+      setCancelRequested(false)
     })
     return () => {
       offOutput()
@@ -245,9 +249,18 @@ export function Toolbar() {
     testLinesRef.current = []
     setTestLines([])
     setTestFinished(null)
+    setCancelRequested(false)
     setIsRunningTests(true)
     setShowTestModal(true)
     await window.electronAPI.runTests(currentFlow, config)
+  }
+
+  const handleCancelTests = async () => {
+    if (cancelRequested) return
+    setCancelRequested(true)
+    await window.electronAPI.cancelTests()
+    // The modal stays up: TEST_FINISHED still arrives (with cancelled: true) once the
+    // process tree is actually dead, and that is what closes out the run.
   }
 
   return (
@@ -349,7 +362,12 @@ export function Toolbar() {
       {/* Status pill */}
       <div style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
         {isReplaying && (
-          <span style={pillStyle(token.accentDark, token.accentFg)}>⟳ 重播中</span>
+          <>
+            <span style={pillStyle(token.accentDark, token.accentFg)}>⟳ 重播中</span>
+            {/* Only rendered while replaying, so it needs no disabled bookkeeping —
+                isReplaying already goes false on finish, error and cancel alike. */}
+            {btn('⏹ 停止重播', () => void cancelReplay(), false, true)}
+          </>
         )}
         {isRecording && (
           <span style={pillStyle(token.dangerDark, PILL_RED_FG)}>● 錄製中</span>
@@ -683,6 +701,8 @@ export function Toolbar() {
         <TestOutputModal
           lines={testLines}
           finished={testFinished}
+          cancelling={cancelRequested}
+          onCancel={() => void handleCancelTests()}
           onClose={() => setShowTestModal(false)}
         />
       )}

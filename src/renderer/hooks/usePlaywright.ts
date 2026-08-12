@@ -89,6 +89,17 @@ export function usePlaywright() {
     }
   }, [setIsRecording])
 
+  const cancelReplay = useCallback(async () => {
+    try {
+      await window.electronAPI.cancelReplay()
+    } catch (err) {
+      console.error('Failed to cancel replay:', err)
+    }
+    // Deliberately no setIsReplaying(false) here — REPLAY_CANCELLED owns that, exactly as
+    // REPLAY_FINISHED does. Clearing it locally would unblock reloadFromDisk and the undo
+    // subscription while the main process is still unwinding the run.
+  }, [])
+
   const replayToNode = useCallback(
     async (targetNodeId: string, speed: number) => {
       const { currentFlow, activeProfileId } = useFlowStore.getState()
@@ -115,5 +126,5 @@ export function usePlaywright() {
     [clearReplayStatus, setIsReplaying],
   )
 
-  return { startRecording, startBranchRecording, stopRecording, replayToNode }
+  return { startRecording, startBranchRecording, stopRecording, replayToNode, cancelReplay }
 }

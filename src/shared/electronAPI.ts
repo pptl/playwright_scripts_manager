@@ -34,6 +34,9 @@ export interface ElectronAPI {
     baseURL?: string,
     ctx?: ResolutionContext,
   ) => Promise<void>
+  /** Stop the in-flight replay. Resolves immediately — completion arrives as
+   *  onReplayCancelled, the same way a normal finish arrives as onReplayFinished. */
+  cancelReplay: () => Promise<void>
   /** `touch: false` writes without bumping updatedAt (drag repositioning). */
   saveFlow: (flow: Flow, touch?: boolean) => Promise<void>
   loadFlow: (flowId: string) => Promise<Flow | null>
@@ -41,6 +44,9 @@ export interface ElectronAPI {
   deleteFlow: (flowId: string) => Promise<void>
   exportScripts: (flow: Flow, ctx: ResolutionContext) => Promise<string>
   runTests: (flow: Flow, ctx: ResolutionContext) => Promise<void>
+  /** Kill the in-flight test run or browser install. Completion still arrives as
+   *  onTestFinished, with `cancelled: true`. */
+  cancelTests: () => Promise<void>
   showReport: () => Promise<void>
   onActionCaptured: (cb: (action: Action) => void) => () => void
   onActionUpdated: (cb: (payload: ActionUpdatedPayload) => void) => () => void
@@ -49,6 +55,7 @@ export interface ElectronAPI {
   onReplayNodeComplete: (cb: (payload: ReplayNodeCompletePayload) => void) => () => void
   onReplayFinished: (cb: () => void) => () => void
   onReplayError: (cb: (error: string) => void) => () => void
+  onReplayCancelled: (cb: () => void) => () => void
   onTestOutput: (cb: (line: string) => void) => () => void
   onTestFinished: (cb: (payload: TestFinishedPayload) => void) => () => void
   /** Opens the native file picker; returns paths already copied into fixtures/. */

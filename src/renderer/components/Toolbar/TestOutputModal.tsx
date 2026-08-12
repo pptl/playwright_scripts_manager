@@ -7,26 +7,35 @@ import { token, radius } from '../../styles/tokens'
 interface TestOutputModalProps {
   lines: string[]
   finished: TestFinishedPayload | null
+  /** ⏹ was pressed and the process tree is being killed — disables the button. */
+  cancelling: boolean
+  onCancel: () => void
   onClose: () => void
 }
 
-export function TestOutputModal({ lines, finished, onClose }: TestOutputModalProps) {
+export function TestOutputModal({ lines, finished, cancelling, onCancel, onClose }: TestOutputModalProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [lines])
 
-  const statusColor = finished == null ? token.accentFg : finished.passed ? SUCCESS_TEXT : token.dangerFg
+  const statusColor =
+    finished == null ? token.accentFg
+      : finished.cancelled ? token.warningFg
+        : finished.passed ? SUCCESS_TEXT : token.dangerFg
   const statusText =
     finished == null
-      ? '⟳ 測試執行中...'
-      : finished.passed
-        ? '✓ 所有測試通過'
-        : `✗ 測試失敗 (exit ${finished.exitCode})`
+      ? (cancelling ? '⏹ 中止中...' : '⟳ 測試執行中...')
+      : finished.cancelled
+        ? '⏹ 已中止'
+        : finished.passed
+          ? '✓ 所有測試通過'
+          : `✗ 測試失敗 (exit ${finished.exitCode})`
 
-  // Dismissable only once the run is over — there is no way to cancel a run in
-  // flight (A2 in the cleanup backlog), so closing early would just orphan it.
+  // Dismissable only once the run is over. Cancelling is now a separate gesture (the ⏹ 中止
+  // button below): the modal has to stay up through the kill so it can show 已中止 and
+  // whatever the runner printed on its way out. Closing early would hide that, not orphan it.
   const dismissable = finished !== null
 
   return (
@@ -41,6 +50,11 @@ export function TestOutputModal({ lines, finished, onClose }: TestOutputModalPro
       headerExtra={
         <>
           <span style={{ fontSize: 12, fontWeight: 600, color: statusColor }}>{statusText}</span>
+          {!finished && (
+            <Button tone="danger" onClick={onCancel} disabled={cancelling}>
+              {cancelling ? '中止中…' : '⏹ 中止'}
+            </Button>
+          )}
           {finished && (
             <button
               onClick={() => window.electronAPI.showReport()}

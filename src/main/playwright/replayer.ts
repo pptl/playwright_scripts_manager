@@ -64,6 +64,70 @@ type NodeCompleteCallback = (nodeId: string, success: boolean, error?: string) =
  *  leftover listener would swallow the user's own file chooser. */
 const swallowFileChooser = () => {}
 
+/** Thrown when the run is cancelled. A sentinel, not a failure: the replay loop uses it
+ *  to skip onNodeComplete, so an interrupted node is never painted red. */
+export class ReplayCancelledError extends Error {
+  constructor() {
+    super('replay cancelled')
+    this.name = 'ReplayCancelledError'
+  }
+}
+
+export function isReplayCancelled(err: unknown): boolean {
+  return err instanceof ReplayCancelledError
+}
+
+/**
+ * One replay run's stop switch.
+ *
+ * `rejected` never resolves — it only ever rejects, once, when cancel() is called. That
+ * is what every in-flight Playwright call is raced against (see Replayer.race).
+ */
+export class CancelSignal {
+  cancelled = false
+  readonly rejected: Promise<never>
+  private fire!: (err: unknown) => void
+
+  constructor() {
+    this.rejected = new Promise<never>((_res, rej) => { this.fire = rej })
+    // Load-bearing, not defensive: cancel() can land in a window where nothing is racing
+    // this yet — while the browser is still launching, say — and a rejection with zero
+    // subscribers takes down the main process. Same passive-handler idiom as the
+    // popupPromise catch in executeAction.
+    this.rejected.catch(() => {})
+  }
+
+  /** Idempotent: pressing ⏹ twice, or after the run ended, must be a no-op. */
+  cancel(): void {
+    if (this.cancelled) return
+    this.cancelled = true
+    this.fire(new ReplayCancelledError())
+  }
+
+  throwIfCancelled(): void {
+    if (this.cancelled) throw new ReplayCancelledError()
+  }
+}
+
+/**
+ * What a nested call-flow Replayer inherits from its parent for the duration of one run:
+ * the popup page map, and the stop switch that unwinds the whole tree at once.
+ *
+ * `suppressedPages` is deliberately NOT in here. It stays per-Replayer so a nested
+ * call-flow replayer can only ever release its own file-chooser listener — folding it in
+ * would let an inner run lift the outer run's suppression, which is the "click upload,
+ * nothing happens" bug.
+ */
+export interface ReplaySession {
+  /** pageAlias → Page for popups opened during the run. */
+  pages: Map<string, Page>
+  signal: CancelSignal
+}
+
+export function newReplaySession(): ReplaySession {
+  return { pages: new Map(), signal: new CancelSignal() }
+}
+
 export class Replayer {
   private page: Page
   private sessionVars = new Map<string, string>()
@@ -74,7 +138,10 @@ export class Replayer {
     profileVars: Record<string, string>
     envVars: Record<string, string>
   }
-  /** pageAlias → Page for popups opened during replay (shared with nested Replayers). */
+  /** Shared verbatim with every nested Replayer: the popup page map plus this run's
+   *  stop switch, so a cancel raised anywhere in the tree unwinds the whole tree. */
+  private session: ReplaySession
+  /** pageAlias → Page for popups opened during replay (an alias for session.pages). */
   private pages: Map<string, Page>
   /** Pages this replay muted the file chooser on, released when the replay ends. */
   private suppressedPages = new Set<Page>()
@@ -83,10 +150,13 @@ export class Replayer {
    *  everywhere else (resolveProjectId). Each nested Replayer re-fetches its own on entry. */
   private knownProjectIds = new Set<string>()
 
-  constructor(page: Page, baseURL = '', ctx: ResolutionContext = {}, sharedPages?: Map<string, Page>) {
+  constructor(page: Page, baseURL = '', ctx: ResolutionContext = {}, session?: ReplaySession) {
     this.page = page
     this.ctx = { ...ctx, profileVars: ctx.profileVars ?? {}, envVars: ctx.envVars ?? {} }
-    this.pages = sharedPages ?? new Map()
+    // No session = a run nobody can cancel. That is the branch-recording silent replay,
+    // which has no stop button of its own (see A2 in the cleanup backlog).
+    this.session = session ?? newReplaySession()
+    this.pages = this.session.pages
     this.baseOrigin = (() => { try { return new URL(baseURL).origin } catch { return '' } })()
   }
 
@@ -117,6 +187,8 @@ export class Replayer {
 
     try {
       for (const node of path) {
+        // Before onNodeStart, so a cancelled run never lights up a node it will not run.
+        this.session.signal.throwIfCancelled()
         onNodeStart(node.id)
         try {
           if (isCallFlowAction(node.action)) {
@@ -126,10 +198,14 @@ export class Replayer {
           }
           onNodeComplete(node.id, true)
         } catch (err) {
-          onNodeComplete(node.id, false, String(err))
+          // A cancel is not a node failure. Skipping onNodeComplete leaves this node — and,
+          // for a sub-flow, the parent callFlow node too — showing 'running', which the
+          // renderer repaints amber on REPLAY_CANCELLED. Still rethrown, so the finally
+          // below releases file-chooser suppression at every nesting level.
+          if (!isReplayCancelled(err)) onNodeComplete(node.id, false, String(err))
           throw err
         }
-        await new Promise((res) => setTimeout(res, speed))
+        await this.sleep(speed)
       }
     } finally {
       this.releaseFileChooserSuppression()
@@ -164,6 +240,34 @@ export class Replayer {
       profileVars: this.ctx.profileVars,
       envVars: this.ctx.envVars,
     })
+  }
+
+  /**
+   * Race one in-flight Playwright call against this run's stop switch.
+   *
+   * Playwright exposes no abort signal on locator/page calls: a goto, or a locator sitting
+   * on its 30 s default timeout, cannot be interrupted from the outside. Racing is the only
+   * way to make ⏹ land in under 100 ms mid-step, which is the whole point — a flag checked
+   * between steps would still leave the user watching a timeout run down.
+   *
+   * The honest cost, and it is a real one: THE LOSING OPERATION IS NOT STOPPED. The click
+   * may still land, the goto may still navigate, seconds after the UI says the run has
+   * stopped. We accept that because the browser is deliberately left OPEN on cancel
+   * (stopping mid-flow is nearly always so the user can look at the page), so there is no
+   * context teardown to settle them for us. Their late rejections are harmless: Promise.race
+   * has already subscribed to each one, so nothing becomes an unhandled rejection.
+   */
+  private race<T>(op: Promise<T>): Promise<T> {
+    return Promise.race([op, this.session.signal.rejected])
+  }
+
+  /** Interruptible pace delay. A plain setTimeout would hold the loop for up to a full
+   *  second (slow speed) after ⏹ — the one cancel latency that is entirely self-inflicted,
+   *  so it is the one that must not exist. */
+  private sleep(ms: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const delay = new Promise<void>((res) => { timer = setTimeout(res, ms) })
+    return this.race(delay).finally(() => { if (timer) clearTimeout(timer) })
   }
 
   private async executeCallFlow(
@@ -205,7 +309,7 @@ export class Replayer {
       profileVars: subProfileVars,
       activeProfileId: subProfile?.id,
       envVars: subFlowEnvVars,
-    }, this.pages)
+    }, this.session)
     await nested.replayToNode(
       subFlow.nodes,
       action.subFlowExitNodeId!,
@@ -309,40 +413,42 @@ export class Replayer {
     // subscription — it doesn't consume the rejection for the real `await` below.
     popupPromise?.catch(() => {})
 
+    // Every await below goes through race() so ⏹ interrupts mid-action — see its docblock
+    // for what that does and does not guarantee.
     switch (action.type) {
       case 'goto':
-        await this.pageFor(action).goto(this.substituteOrigin(val!))
+        await this.race(this.pageFor(action).goto(this.substituteOrigin(val!)))
         break
       case 'click': {
         const opts: { button?: 'left' | 'right' | 'middle'; modifiers?: Array<'Alt' | 'Control' | 'Meta' | 'Shift'> } = {}
         if (action.button && action.button !== 'left') opts.button = action.button
         if (action.modifiers?.length) opts.modifiers = action.modifiers as Array<'Alt' | 'Control' | 'Meta' | 'Shift'>
-        if ((action.clickCount ?? 1) >= 2) await this.getLocator(action).dblclick(opts)
-        else await this.getLocator(action).click(opts)
+        if ((action.clickCount ?? 1) >= 2) await this.race(this.getLocator(action).dblclick(opts))
+        else await this.race(this.getLocator(action).click(opts))
         break
       }
       case 'fill':
-        await this.getLocator(action).fill(val ?? '')
+        await this.race(this.getLocator(action).fill(val ?? ''))
         break
       case 'selectOption':
         if (action.values?.length) {
-          await this.getLocator(action).selectOption(action.values.map((v) => this.resolve(v)))
+          await this.race(this.getLocator(action).selectOption(action.values.map((v) => this.resolve(v))))
         } else {
-          await this.getLocator(action).selectOption(val ?? '')
+          await this.race(this.getLocator(action).selectOption(val ?? ''))
         }
         break
       case 'check':
-        await this.getLocator(action).check()
+        await this.race(this.getLocator(action).check())
         break
       case 'uncheck':
-        await this.getLocator(action).uncheck()
+        await this.race(this.getLocator(action).uncheck())
         break
       case 'press':
         // press can be a keyboard shortcut (no locator) or locator.press()
         if (action.locatorExpr) {
-          await this.getLocator(action).press(val ?? '')
+          await this.race(this.getLocator(action).press(val ?? ''))
         } else {
-          await this.pageFor(action).keyboard.press(val ?? '')
+          await this.race(this.pageFor(action).keyboard.press(val ?? ''))
         }
         break
       case 'upload': {
@@ -357,24 +463,30 @@ export class Replayer {
         for (const f of files) {
           if (!existsSync(f)) throw new Error(`找不到檔案: ${f}`)
         }
-        await (await this.resolveFileInput(action)).setInputFiles(files)
+        // Split so each half is raced individually — resolveFileInput probes with .count().
+        const input = await this.race(this.resolveFileInput(action))
+        await this.race(input.setInputFiles(files))
         break
       }
       case 'wait':
-        await this.getLocator(action).waitFor({ state: 'visible' })
+        await this.race(this.getLocator(action).waitFor({ state: 'visible' }))
         break
       case 'assertVisible':
-        await requireExpect()(this.getLocator(action)).toBeVisible({ timeout: ASSERT_TIMEOUT_MS })
+        await this.race(requireExpect()(this.getLocator(action)).toBeVisible({ timeout: ASSERT_TIMEOUT_MS }))
         break
       case 'assertText':
-        await requireExpect()(this.getLocator(action)).toContainText(val ?? '', { timeout: ASSERT_TIMEOUT_MS })
+        await this.race(requireExpect()(this.getLocator(action)).toContainText(val ?? '', { timeout: ASSERT_TIMEOUT_MS }))
         break
       case 'assertValue':
-        await requireExpect()(this.getLocator(action)).toHaveValue(val ?? '', { timeout: ASSERT_TIMEOUT_MS })
+        await this.race(requireExpect()(this.getLocator(action)).toHaveValue(val ?? '', { timeout: ASSERT_TIMEOUT_MS }))
         break
       case 'code': {
         const fn = new AsyncFunction('page', 'expect', 'vars', action.code ?? '')
-        await fn(this.pageFor(action), getExpect(), this.buildCodeVars())
+        // Raced like everything else, but note what that means here: arbitrary user JS is
+        // ABANDONED, not interrupted — it keeps running to completion in the background.
+        // Worth it: this is the only action type with no timeout at all, so a `while (true)`
+        // in a code node currently makes the whole app unrecoverable.
+        await this.race(fn(this.pageFor(action), getExpect(), this.buildCodeVars()))
         break
       }
       case 'callFlow':
@@ -382,8 +494,8 @@ export class Replayer {
     }
 
     if (popupPromise && action.opensPage) {
-      const newPage = await popupPromise
-      await newPage.waitForLoadState('domcontentloaded').catch(() => {})
+      const newPage = await this.race(popupPromise)
+      await this.race(newPage.waitForLoadState('domcontentloaded').catch(() => {}))
       this.suppressFileChooser(newPage)
       this.pages.set(action.opensPage, newPage)
     }

@@ -287,12 +287,18 @@ export const IPC_CHANNELS = {
   RECORDING_START: 'recording:start',
   RECORDING_STOP: 'recording:stop',
   REPLAY_TO_NODE: 'replay:toNode',
+  /** Stop the in-flight replay. Interrupts mid-action (the Replayer races every
+   *  Playwright call against it) but deliberately leaves the browser open. */
+  REPLAY_CANCEL: 'replay:cancel',
   FLOW_SAVE: 'flow:save',
   FLOW_LOAD: 'flow:load',
   FLOW_LIST: 'flow:list',
   FLOW_DELETE: 'flow:delete',
   EXPORT_SCRIPTS: 'export:scripts',
   RUN_TESTS: 'test:run',
+  /** Kill the in-flight test run or browser install — both stream into the same
+   *  TestOutputModal, so one channel covers both. */
+  TEST_CANCEL: 'test:cancel',
   SHOW_REPORT: 'test:showReport',
   FLOW_GET: 'flow:get',
   FLOW_CHECK_CYCLE: 'flow:checkCycle',
@@ -340,6 +346,10 @@ export const IPC_CHANNELS = {
   REPLAY_NODE_COMPLETE: 'replay:nodeComplete',
   REPLAY_FINISHED: 'replay:finished',
   REPLAY_ERROR: 'replay:error',
+  /** The replay stopped because the user asked it to. Distinct from REPLAY_FINISHED
+   *  ("reached the target") and from REPLAY_ERROR (which is console-only, so routing
+   *  a deliberate user action through it would make it invisible). */
+  REPLAY_CANCELLED: 'replay:cancelled',
 } as const
 
 export type IpcChannel = (typeof IPC_CHANNELS)[keyof typeof IPC_CHANNELS]
@@ -392,6 +402,10 @@ export interface FlowLoadPayload {
 export interface TestFinishedPayload {
   exitCode: number
   passed: boolean
+  /** The user pressed 中止. Never inferred from exitCode: on win32 a taskkill'd child
+   *  reports exit 1, which is indistinguishable from a genuine test failure — only the
+   *  killer knows (see runner.ts SpawnResult). */
+  cancelled?: boolean
 }
 
 export interface RecordingStartPayload {

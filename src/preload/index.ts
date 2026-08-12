@@ -36,6 +36,7 @@ const api = {
   // Replay
   replayToNode: (nodes: FlowNode[], targetNodeId: string, speed: number, baseURL?: string, ctx?: ResolutionContext) =>
     ipcRenderer.invoke(IPC_CHANNELS.REPLAY_TO_NODE, { nodes, targetNodeId, speed, baseURL, ctx }),
+  cancelReplay: () => ipcRenderer.invoke(IPC_CHANNELS.REPLAY_CANCEL),
 
   // Storage
   saveFlow: (flow: Flow, touch?: boolean) =>
@@ -51,6 +52,7 @@ const api = {
   // Run tests
   runTests: (flow: Flow, ctx: ResolutionContext) =>
     ipcRenderer.invoke(IPC_CHANNELS.RUN_TESTS, { flow, ctx }),
+  cancelTests: () => ipcRenderer.invoke(IPC_CHANNELS.TEST_CANCEL),
   showReport: () => ipcRenderer.invoke(IPC_CHANNELS.SHOW_REPORT),
 
   // Native file picker — copies the picks into fixtures/ and returns their stored paths
@@ -99,6 +101,7 @@ const api = {
   onReplayNodeComplete: subscribe<ReplayNodeCompletePayload>(IPC_CHANNELS.REPLAY_NODE_COMPLETE),
   onReplayFinished: subscribe<void>(IPC_CHANNELS.REPLAY_FINISHED),
   onReplayError: subscribe<string>(IPC_CHANNELS.REPLAY_ERROR),
+  onReplayCancelled: subscribe<void>(IPC_CHANNELS.REPLAY_CANCELLED),
   onTestOutput: subscribe<string>(IPC_CHANNELS.TEST_OUTPUT),
   onTestFinished: subscribe<TestFinishedPayload>(IPC_CHANNELS.TEST_FINISHED),
   onWorkspaceReload: subscribe<void>(IPC_CHANNELS.WORKSPACE_RELOAD),

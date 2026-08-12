@@ -30,6 +30,7 @@ import { usePlaywright } from '../../hooks/usePlaywright'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import { AddNodeModal } from '../AddNodeModal/AddNodeModal'
 import type { Action, Flow } from '@shared/types'
+import { hasValueField } from '@shared/actionFields'
 import { computeTreeLayout } from '../../utils/treeLayout'
 import { validateExtraction, extractSubflow } from '../../utils/subflowExtraction'
 import { getGroupBoundary, groupBoxRect } from '../../utils/groups'
@@ -420,8 +421,7 @@ function FlowCanvasInner() {
     <div style={{ flex: 1, position: 'relative' }}>
       {contextMenu && (() => {
         const contextNode = currentFlow?.nodes.find((n) => n.id === contextMenu.nodeId)
-        const VALUE_TYPES = new Set(['fill', 'selectOption', 'goto', 'press', 'assertText', 'assertValue'])
-        const hasValue = !!(contextNode?.action.value && VALUE_TYPES.has(contextNode.action.type))
+        const hasValue = !!(contextNode?.action.value && hasValueField(contextNode.action.type))
         const multi = selectedNodeIds.size >= 2 && selectedNodeIds.has(contextMenu.nodeId)
         const deleteOnlyLabel = multi ? `刪除選取的 ${selectedNodeIds.size} 個節點` : '刪除此節點'
         const disconnectLabel = multi ? `斷開選取的 ${selectedNodeIds.size} 個節點連綫` : '斷開此節點連綫'

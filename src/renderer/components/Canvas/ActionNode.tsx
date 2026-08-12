@@ -1,41 +1,8 @@
 import { memo } from 'react'
 import { Handle, Position, NodeProps } from 'reactflow'
 import type { FlowNode } from '@shared/types'
+import { TYPE_COLORS, TYPE_ICONS } from '@shared/actionFields'
 import { useFlowStore } from '../../stores/flowStore'
-
-const TYPE_COLORS: Record<string, string> = {
-  goto: '#3b82f6',
-  click: '#6b7280',
-  fill: '#8b5cf6',
-  selectOption: '#8b5cf6',
-  check: '#10b981',
-  uncheck: '#f59e0b',
-  press: '#ec4899',
-  wait: '#f97316',
-  upload: '#06b6d4',
-  assertVisible: '#22c55e',
-  assertText: '#22c55e',
-  assertValue: '#22c55e',
-  callFlow: '#f59e0b',
-  code: '#64748b',
-}
-
-const TYPE_ICONS: Record<string, string> = {
-  goto: '🌐',
-  click: '👆',
-  fill: '✏️',
-  selectOption: '📋',
-  check: '✅',
-  uncheck: '☐',
-  press: '⌨️',
-  wait: '⏳',
-  upload: '📁',
-  assertVisible: '👁',
-  assertText: '📝',
-  assertValue: '🔢',
-  callFlow: '⛓',
-  code: '</>',
-}
 
 export interface ActionNodeData {
   flowNode: FlowNode

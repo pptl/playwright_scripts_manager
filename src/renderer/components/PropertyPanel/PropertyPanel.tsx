@@ -1,14 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import type { FlowProfile } from '@shared/types'
 import { SECRET_ENVELOPE_PREFIX, SECRET_MASK } from '@shared/types'
+import { hasValueField, isSecretable } from '@shared/actionFields'
 import { useFlowStore } from '../../stores/flowStore'
 import { useVault } from '../../hooks/useVault'
 
 const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
-
-/** Node types whose value can be private. `goto` is excluded (its URL is rewritten by
- *  domain substitution) and so is `upload` (fixture paths are not credentials). */
-const SECRETABLE_TYPES = ['fill', 'press', 'selectOption', 'assertText', 'assertValue']
 
 export function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode } = useFlowStore()
@@ -271,7 +268,7 @@ export function PropertyPanel() {
             )}
 
             {/* Value */}
-            {['fill', 'selectOption', 'goto', 'press', 'upload', 'assertText', 'assertValue'].includes(selectedNode.action.type) && (
+            {hasValueField(selectedNode.action.type) && (
               <Field label={
                 selectedNode.action.type === 'assertText' ? '驗證文字' :
                 selectedNode.action.type === 'assertValue' ? '驗證值' :
@@ -286,7 +283,7 @@ export function PropertyPanel() {
                     placeholder={secret && !valueDirty ? '（已加密，輸入以覆寫）' : undefined}
                     style={{ ...inputStyle, ...(secret ? { borderColor: '#a16207' } : {}) }}
                   />
-                  {SECRETABLE_TYPES.includes(selectedNode.action.type) && (
+                  {isSecretable(selectedNode.action.type) && (
                     <button
                       onClick={() => void toggleSecret()}
                       title={secret

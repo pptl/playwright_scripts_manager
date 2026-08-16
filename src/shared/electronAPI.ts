@@ -42,8 +42,10 @@ export interface ElectronAPI {
   /** Stop the in-flight replay. Resolves immediately — completion arrives as
    *  onReplayCancelled, the same way a normal finish arrives as onReplayFinished. */
   cancelReplay: () => Promise<void>
-  /** `touch: false` writes without bumping updatedAt (drag repositioning). */
-  saveFlow: (flow: Flow, touch?: boolean) => Promise<void>
+  /** `touch: false` writes without bumping updatedAt (drag repositioning).
+   *  Resolves with the `updatedAt` that landed on disk — go through
+   *  `stores/persistence.ts`, which records it, rather than calling this directly. */
+  saveFlow: (flow: Flow, touch?: boolean) => Promise<string>
   loadFlow: (flowId: string) => Promise<Flow | null>
   listFlows: () => Promise<FlowListItem[]>
   deleteFlow: (flowId: string) => Promise<void>

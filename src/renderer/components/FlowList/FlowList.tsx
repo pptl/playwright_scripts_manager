@@ -8,7 +8,7 @@ import type { Action } from '@shared/types'
 import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN } from '@shared/types'
 import { resolveProjectId } from '@shared/projectResolution'
 import { confirm } from '../../stores/confirmStore'
-import { reportError } from '../../stores/errorStore'
+import { persistFlow } from '../../stores/persistence'
 import { Modal } from '../common/Modal'
 import { Button } from '../common/Button'
 import { Input } from '../common/Input'
@@ -124,7 +124,10 @@ export function FlowList() {
     } else {
       const flow = await window.electronAPI.loadFlow(renameTarget.flowId)
       if (flow) {
-        await window.electronAPI.saveFlow({ ...flow, name: newName, updatedAt: new Date().toISOString() })
+        await persistFlow(
+          { ...flow, name: newName, updatedAt: new Date().toISOString() },
+          { label: '流程改名後存檔失敗' },
+        )
       }
     }
     setRenameTarget(null)
@@ -142,7 +145,7 @@ export function FlowList() {
       createdAt: now,
       updatedAt: now,
     }
-    await window.electronAPI.saveFlow(copy)
+    await persistFlow(copy, { label: '複製流程存檔失敗' })
     await refreshFlowList()
     setContextMenu(null)
   }
@@ -490,9 +493,7 @@ export function FlowList() {
             setAddSubFlowFlowId(null)
             const updated = useFlowStore.getState().currentFlow
             if (updated) {
-              await window.electronAPI
-                .saveFlow(updated)
-                .catch((err) => reportError('加入子流程後存檔失敗', err))
+              await persistFlow(updated, { label: '加入子流程後存檔失敗' })
             }
           }}
         />

@@ -57,7 +57,7 @@ export function useFlowManager() {
       const flow = createFlow(name, baseURL, description)
       const savedFlow = projectId ? { ...flow, projectId } : flow
       if (projectId) useFlowStore.getState().setCurrentFlow(savedFlow)
-      await window.electronAPI.saveFlow(savedFlow)
+      await persistFlow(savedFlow, { label: '新增流程存檔失敗' })
       await refreshFlowList()
       return savedFlow
     },

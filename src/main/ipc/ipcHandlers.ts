@@ -242,8 +242,9 @@ export function registerIpcHandlers(win: BrowserWindow): void {
 
 
   // ── Storage ──────────────────────────────────────────────
+  // Resolves with the `updatedAt` that landed on disk — see FlowStorage.save.
   ipcMain.handle(IPC_CHANNELS.FLOW_SAVE, async (_e, payload: FlowSavePayload) => {
-    await FlowStorage.save(payload.flow, { touch: payload.touch })
+    return await FlowStorage.save(payload.flow, { touch: payload.touch })
   })
 
   ipcMain.handle(IPC_CHANNELS.FLOW_LOAD, async (_e, payload: FlowLoadPayload) => {

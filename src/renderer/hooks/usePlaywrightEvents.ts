@@ -3,7 +3,24 @@ import { useFlowStore } from '../stores/flowStore'
 import { useProjectStore } from '../stores/projectStore'
 import { useWorkspaceStore } from '../stores/workspaceStore'
 import { reportError } from '../stores/errorStore'
-import type { Action, AppErrorPayload } from '@shared/types'
+import { lastWrittenStamp } from '../stores/persistence'
+import type { Action, AppErrorPayload, Project } from '@shared/types'
+
+/**
+ * What the UI and variable resolution actually read off a project. Comparing this — rather
+ * than `updatedAt` — is what makes an externally edited project get picked up.
+ *
+ * `updatedAt` cannot do the job in either direction. It is a field INSIDE the JSON, not a
+ * filesystem mtime: a hand edit or a `git pull` leaves it untouched, and a checkout to an
+ * older branch moves it BACKWARDS — so an external change is invisible to a `>` test. And on
+ * the other side it is stale by construction, because `ProjectStorage.save` stamps the new
+ * timestamp onto main's own deserialized copy, which never travels back to the renderer;
+ * including it here would make every focus after any local edit report a phantom difference.
+ *
+ * `id` / `createdAt` can't change for a given file, which is why they are left out too.
+ */
+const projectSignature = (p: Project): string =>
+  JSON.stringify([p.name, p.environments, p.envVars ?? []])
 
 /**
  * Re-read the workspace after it may have changed on disk.
@@ -21,11 +38,21 @@ async function reloadFromDisk(): Promise<void> {
   store.setFlows(await window.electronAPI.listFlows())
   await useProjectStore.getState().refreshProjects()
 
-  // The open project's environments / env vars can have changed too.
+  // The open project's environments / env vars can have changed too. The disk copy is taken
+  // whenever it differs, with no "is it newer" gate: unlike a flow, a project has no unsaved
+  // in-memory state to protect — every write goes straight through `persistProject`, and the
+  // one draft that does exist (the env-var table) survives this because `useDraftRows` is
+  // keyed on `projectId:envId`, not on the project object's identity.
   const openProject = useProjectStore.getState().currentProject
   if (openProject) {
     const project = await window.electronAPI.loadProject(openProject.id)
-    if (project && project.updatedAt > openProject.updatedAt) {
+    if (!project) {
+      // Deleted out from under us. Leaving the context pointing at a project that is gone
+      // leaves the environment selector and every env-var reference resolving against a ghost.
+      // Inherits `load()`'s known limitation (A3): a corrupted file is also a null, so it is
+      // treated as a deletion here — same as the flow branch below, and it does raise a toast.
+      useProjectStore.getState().setProjectContext(null, null)
+    } else if (projectSignature(project) !== projectSignature(openProject)) {
       const { activeEnvironmentId, setProjectContext } = useProjectStore.getState()
       // Drop an active environment the incoming version no longer defines.
       const envStillDefined = project.environments.some((e) => e.id === activeEnvironmentId)
@@ -45,9 +72,17 @@ async function reloadFromDisk(): Promise<void> {
     useFlowStore.getState().setCurrentFlow(null)
     return
   }
-  // Only take the disk copy when it is genuinely newer — otherwise a focus event
-  // during ordinary editing would throw away unsaved in-memory state.
-  if (onDisk.updatedAt > open.updatedAt) {
+  // Take the disk copy only when it is NOT the one we last wrote, i.e. when something
+  // outside this renderer changed it. Comparing against `open.updatedAt` instead was true
+  // after every local edit — main stamps its own copy on save and never sends it back — so
+  // ordinary editing plus an alt-tab silently reloaded the flow. `lastWrittenStamp` is what
+  // that comparison always meant to ask; see the ledger's note in `persistence.ts`.
+  //
+  // No record at all means this renderer has not saved this flow yet, so the disk copy is
+  // the authority. Reloading then costs nothing: with no save behind it there is no undo
+  // history, no selection and no profile choice to lose.
+  const ours = lastWrittenStamp(open.id)
+  if (onDisk.updatedAt !== ours) {
     // setCurrentFlow clears undo history, which is correct: those snapshots
     // describe a version of the flow that no longer exists.
     useFlowStore.getState().setCurrentFlow(onDisk)

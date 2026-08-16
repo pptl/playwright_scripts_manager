@@ -7,6 +7,7 @@ import { buildResolutionContext, getEnvVars } from '../utils/varMaps'
 import { useWorkspaceStore } from '../stores/workspaceStore'
 import { notify } from '../stores/confirmStore'
 import { reportError, formatError } from '../stores/errorStore'
+import { persistFlow } from '../stores/persistence'
 
 /**
  * Refuse anything that would drive a real browser while private values are unreadable,
@@ -47,9 +48,7 @@ export function usePlaywright() {
       if (domain && domain !== flow.baseURL) {
         const updated: Flow = { ...flow, baseURL: domain }
         useFlowStore.setState({ currentFlow: updated })
-        await window.electronAPI
-          .saveFlow(updated)
-          .catch((e) => reportError('流程存檔失敗', e))
+        await persistFlow(updated, { label: '流程存檔失敗' })
       }
     } catch (err) {
       setIsRecording(false)
@@ -109,9 +108,7 @@ export function usePlaywright() {
       useFlowStore.getState().setRecordingHead(null)
       const flow = useFlowStore.getState().currentFlow
       if (flow) {
-        await window.electronAPI
-          .saveFlow(flow)
-          .catch((e) => reportError('錄製結束後存檔失敗', e))
+        await persistFlow(flow, { label: '錄製結束後存檔失敗' })
       }
     }
   }, [setIsRecording])

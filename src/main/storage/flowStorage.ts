@@ -23,14 +23,22 @@ export class FlowStorage {
    * behind node dragging: repositioning is not a content change, and stamping a
    * new timestamp on every drag makes the flow's JSON conflict in git for what
    * is really just a cosmetic move.
+   *
+   * Returns the `updatedAt` that actually landed on disk. That return trip is not
+   * cosmetic: this stamp is applied to main's own deserialized copy, which never
+   * travels back on its own, so the renderer's in-memory `updatedAt` is always a
+   * few milliseconds behind after a touch:true write. `persistence.ts` records what
+   * comes back, and the focus reload compares against it — without this, "is the disk
+   * copy newer than mine" was true after every single local edit.
    */
-  static async save(flow: Flow, opts?: { touch?: boolean }): Promise<void> {
+  static async save(flow: Flow, opts?: { touch?: boolean }): Promise<string> {
     await FlowStorage.ensureDir()
     if (opts?.touch !== false) flow.updatedAt = new Date().toISOString()
     const filePath = FlowStorage.filePath(flow.id)
     const tmpPath = `${filePath}.tmp`
     await fs.writeFile(tmpPath, JSON.stringify(flow, null, 2), 'utf-8')
     await fs.rename(tmpPath, filePath)
+    return flow.updatedAt
   }
 
   /**

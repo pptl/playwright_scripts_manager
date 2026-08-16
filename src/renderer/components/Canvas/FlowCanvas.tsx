@@ -36,7 +36,7 @@ import { validateExtraction, extractSubflow } from '../../utils/subflowExtractio
 import { getGroupBoundary, groupBoxRect } from '../../utils/groups'
 import { Menu, MenuItem } from '../common/Menu'
 import { notify } from '../../stores/confirmStore'
-import { reportError } from '../../stores/errorStore'
+import { persistFlow } from '../../stores/persistence'
 
 const nodeTypes = { actionNode: ActionNode, groupNode: GroupNode, groupBox: GroupBox }
 const edgeTypes = { branchEdge: BranchEdge }
@@ -208,9 +208,7 @@ function FlowCanvasInner() {
       pendingSaveRef.current = null
       // Only drag saves are ever pending here, so the same touch:false applies.
       if (pending) {
-        window.electronAPI
-          .saveFlow(pending, false)
-          .catch((err) => reportError('節點位置儲存失敗', err))
+        void persistFlow(pending, { touch: false, label: '節點位置儲存失敗' })
       }
     }
   }, [currentFlow?.id])
@@ -294,10 +292,8 @@ function FlowCanvasInner() {
           // touch:false — moving a node is not a content change, and bumping
           // updatedAt on every drag makes the JSON conflict in git for nothing.
           if (pending) {
-        window.electronAPI
-          .saveFlow(pending, false)
-          .catch((err) => reportError('節點位置儲存失敗', err))
-      }
+            void persistFlow(pending, { touch: false, label: '節點位置儲存失敗' })
+          }
         }, 500)
       }
     },
@@ -391,9 +387,9 @@ function FlowCanvasInner() {
         subFlowId,
         callFlowNodeId,
       )
-      await window.electronAPI.saveFlow(newSubFlow)
+      await persistFlow(newSubFlow, { label: '子流程存檔失敗' })
       useFlowStore.getState().setCurrentFlow(updatedParentFlow)
-      await window.electronAPI.saveFlow(updatedParentFlow)
+      await persistFlow(updatedParentFlow, { label: '抽出子流程後存檔失敗' })
       const list = await window.electronAPI.listFlows()
       useFlowStore.getState().setFlows(list)
       setSelectedNodeIds(new Set())

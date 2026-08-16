@@ -9,6 +9,7 @@ import type {
   FlowSavePayload,
   FlowLoadPayload,
   RecordingStartPayload,
+  RecordingStartResult,
   ProjectSavePayload,
   ProjectLoadPayload,
   ResolutionContext,
@@ -33,6 +34,7 @@ import {
   warnAbout,
 } from '../storage/workspace'
 import * as vault from '../security/vault'
+import { setErrorSink, drainBufferedErrors } from '../errorChannel'
 import { hasChromium, isMissingBrowserError } from '../playwright/browserCheck'
 import {
   resolvePlaywrightCli,
@@ -51,8 +53,19 @@ let activeReplaySignal: CancelSignal | null = null
  *  the same TestOutputModal. `cancelled` is set even before a child exists, so a ⏹ during
  *  the export phase still aborts. Nulled in a finally. */
 let activeRun: { cancelled: boolean; kill: () => void } | null = null
+/** The in-flight RECORDING_START — the switch only, shaped like `activeRun` rather than like
+ *  `activeReplaySignal`, because what has to be interruptible is not one await but a whole
+ *  sequence (browser launch → branch-recording silent replay → recorder start). A signal
+ *  alone would only cover the replay; the `cancelled` flag covers every gap around it.
+ *  Nulled in that handler's finally. */
+let activeRecordingStart: { cancelled: boolean; cancel: () => void } | null = null
 
 export function registerIpcHandlers(win: BrowserWindow): void {
+  // Give the error channel its window. Reports raised before the renderer drains (every
+  // startup failure, since loadSettings runs before this window even exists) stay buffered.
+  setErrorSink(win)
+  ipcMain.handle(IPC_CHANNELS.APP_ERRORS_DRAIN, () => drainBufferedErrors())
+
   /** Copy files into fixtures/, returning the data-root-relative paths stored on Actions. */
   const importFiles = async (absPaths: string[]): Promise<string[]> =>
     (await Promise.all(absPaths.map((p) => FixtureStorage.importFile(p)))).map((i) => i.stored)
@@ -75,59 +88,111 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   )
 
   // ── Recording ────────────────────────────────────────────
-  ipcMain.handle(IPC_CHANNELS.RECORDING_START, async (_e, payload: RecordingStartPayload) => {
-    // Branch recording silently replays first, which may type private values.
-    if (payload.branchFromNodeId) assertUnlocked()
+  ipcMain.handle(
+    IPC_CHANNELS.RECORDING_START,
+    async (_e, payload: RecordingStartPayload): Promise<RecordingStartResult> => {
+      // Branch recording silently replays first, which may type private values.
+      if (payload.branchFromNodeId) assertUnlocked()
 
-    // Always relaunch browser — _enableRecorder can only be called once per context
-    if (browserController) {
-      await browserController.close().catch(() => {})
-    }
-    browserController = new BrowserController()
-    await browserController.launch({ maximized: true })
-    const page = browserController.getPage()
-
-    // Branch recording: silently replay to the branch point first
-    if (payload.branchFromNodeId && payload.branchNodes?.length) {
-      const silentReplayer = new Replayer(page, payload.baseURL, decryptContext(payload.ctx))
-      try {
-        await silentReplayer.replayToNode(
-          payload.branchNodes,
-          payload.branchFromNodeId,
-          () => {},  // no UI feedback during silent replay
-          () => {},
-          payload.replaySpeed ?? 200,
-        )
-      } catch (err) {
-        // If silent replay fails, abort and report
-        win.webContents.send(IPC_CHANNELS.REPLAY_ERROR, `靜默重播失敗: ${String(err)}`)
-        return
+      const session = newReplaySession()
+      const start = {
+        cancelled: false,
+        cancel: () => {
+          start.cancelled = true
+          // Interrupts the silent replay mid-action; a no-op once it has finished.
+          session.signal.cancel()
+        },
       }
-    }
+      activeRecordingStart = start
+      // Called at every gap between the awaits below — a ⏹ can land in any of them, and a
+      // cancel that is only honoured in some is indistinguishable from the bug this fixes.
+      const cancelled = () => start.cancelled
 
-    // The locator picker (Cell vs Row) is now handled in-browser by CodegenCapture,
-    // so every action arrives here finalised and is forwarded straight to the renderer.
-    recorder = new Recorder(
-      page,
-      (action) => {
-        win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
-      },
-      (payload) => {
-        // Late popup attribution: patch the already-captured action in the renderer
-        win.webContents.send(IPC_CHANNELS.ACTION_UPDATED, payload)
-      },
-      // Uploads: the real paths CDP read out of the browser, copied into fixtures/
-      importFiles,
-      (actionId) => {
-        // Un-record the click that opened the file chooser
-        win.webContents.send(IPC_CHANNELS.ACTION_REMOVED, actionId)
-      },
-    )
-    // For branch recording, don't navigate (we're already at the right page)
-    await recorder.start(payload.branchFromNodeId ? undefined : payload.baseURL)
-  })
+      try {
+        // Always relaunch browser — _enableRecorder can only be called once per context.
+        // Drop the previous recorder with it: its context is gone, so stopping it later
+        // would only throw.
+        if (browserController) {
+          await browserController.close().catch(() => {})
+        }
+        recorder = null
+        browserController = new BrowserController()
+        await browserController.launch({ maximized: true })
+        if (cancelled()) return { started: false }
+        const page = browserController.getPage()
+
+        // Branch recording: silently replay to the branch point first. It runs on `session`,
+        // so RECORDING_STOP can interrupt it (see A2 in the cleanup backlog) — the browser is
+        // left open, exactly as a cancelled REPLAY_TO_NODE leaves it.
+        if (payload.branchFromNodeId && payload.branchNodes?.length) {
+          const silentReplayer = new Replayer(
+            page,
+            payload.baseURL,
+            decryptContext(payload.ctx),
+            session,
+          )
+          try {
+            await silentReplayer.replayToNode(
+              payload.branchNodes,
+              payload.branchFromNodeId,
+              () => {},  // no UI feedback during silent replay
+              () => {},
+              payload.replaySpeed ?? 200,
+            )
+          } catch (err) {
+            // A cancel is the user pressing ⏹, not a failure: reporting it would put
+            // "靜默重播失敗" on screen for a deliberate action.
+            if (!isReplayCancelled(err)) {
+              win.webContents.send(IPC_CHANNELS.REPLAY_ERROR, `靜默重播失敗: ${String(err)}`)
+            }
+            return { started: false }
+          }
+          if (cancelled()) return { started: false }
+        }
+
+        // The locator picker (Cell vs Row) is now handled in-browser by CodegenCapture,
+        // so every action arrives here finalised and is forwarded straight to the renderer.
+        // Built into a local and published to `recorder` only once it is actually recording:
+        // otherwise a ⏹ landing inside start() would call stop() on a half-started recorder.
+        const started = new Recorder(
+          page,
+          (action) => {
+            win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
+          },
+          (payload) => {
+            // Late popup attribution: patch the already-captured action in the renderer
+            win.webContents.send(IPC_CHANNELS.ACTION_UPDATED, payload)
+          },
+          // Uploads: the real paths CDP read out of the browser, copied into fixtures/
+          importFiles,
+          (actionId) => {
+            // Un-record the click that opened the file chooser
+            win.webContents.send(IPC_CHANNELS.ACTION_REMOVED, actionId)
+          },
+        )
+        // For branch recording, don't navigate (we're already at the right page)
+        await started.start(payload.branchFromNodeId ? undefined : payload.baseURL)
+        if (cancelled()) {
+          await started.stop().catch(() => {})
+          return { started: false }
+        }
+        recorder = started
+        return { started: true }
+      } finally {
+        // Only if it is still ours: a cancelled start unwinds asynchronously, so the user can
+        // press ▶ again and have a second start install its own switch before this one gets
+        // here. A bare `= null` would disarm that second start's ⏹.
+        if (activeRecordingStart === start) activeRecordingStart = null
+      }
+    },
+  )
 
   ipcMain.handle(IPC_CHANNELS.RECORDING_STOP, async () => {
+    // Cancel FIRST. While a branch recording is still silently replaying, `recorder` is null
+    // and the stop below is a no-op — yet the renderer has already cleared recordingHeadId,
+    // so the start would go on to record actions that then append as floating roots with no
+    // recording UI on screen (A2 in the cleanup backlog).
+    activeRecordingStart?.cancel()
     await recorder?.stop()
     recorder = null
   })

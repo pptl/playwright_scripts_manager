@@ -76,6 +76,8 @@
    * Replaces the ad-hoc 1000/2000/2100/3000/3500/4000/9999 values. Relative order
    * is preserved: a panel modal covers a menu, a compact dialog covers a panel
    * modal, and a confirm covers everything (it can be raised from inside any of them).
+   * A toast sits above even a confirm: background failures keep happening while a
+   * dialog is open, and the bottom-right corner never covers a centred card anyway.
    */
   --ft-z-menu: 1000;
   --ft-z-modal: 2000;
@@ -83,6 +85,7 @@
   --ft-z-dialog: 3000;
   --ft-z-vault: 3500;
   --ft-z-confirm: 4000;
+  --ft-z-toast: 4500;
 }
 
 /* ---- base ---- */

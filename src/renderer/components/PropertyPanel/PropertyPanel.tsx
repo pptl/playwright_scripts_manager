@@ -4,13 +4,18 @@ import { SECRET_ENVELOPE_PREFIX, SECRET_MASK } from '@shared/types'
 import { hasValueField, isSecretable } from '@shared/actionFields'
 import { useFlowStore } from '../../stores/flowStore'
 import { useVault } from '../../hooks/useVault'
+import { notify } from '../../stores/confirmStore'
+import { formatError } from '../../stores/errorStore'
 
 const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
+
+/** Same test Toolbar uses — main throws this message from assertUnlocked(). */
+const isLockedError = (err: unknown): boolean => String(err).includes('保險庫已鎖定')
 
 export function PropertyPanel() {
   const { currentFlow, selectedNodeId, updateNode } = useFlowStore()
   const selectedNode = currentFlow?.nodes.find((n) => n.id === selectedNodeId)
-  const { ensureUsable } = useVault()
+  const { ensureUsable, promptUnlock } = useVault()
 
   // callFlow-specific state (loaded async; not an edited field)
   const [subFlowProfiles, setSubFlowProfiles] = useState<FlowProfile[]>([])
@@ -127,7 +132,11 @@ export function PropertyPanel() {
         storedForDisk = await window.electronAPI.revealSecret(storedValue)
       }
     } catch (err) {
-      console.error('[FlowTest] 私密資料處理失敗', err)
+      // A modal, not a toast: the user pressed 儲存 and this return is the whole reason
+      // nothing happened. A locked vault is actionable, so raise the unlock dialog for it
+      // instead of just describing the problem.
+      if (isLockedError(err)) promptUnlock('儲存私密資料需要讀取保險庫，請先解鎖。')
+      else await notify({ title: '儲存失敗', message: '私密資料處理失敗', detail: formatError(err) })
       return
     }
 
@@ -157,7 +166,7 @@ export function PropertyPanel() {
     setStoredValue(storedForDisk)
     setValueDirty(false)
     // updateNode persists itself (this isn't a position-only update).
-  }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector, locatorExpr, value, code, profileMapping, secret, storedValue, valueDirty])
+  }, [selectedNodeId, subFlowProfiles, updateNode, desc, selector, locatorExpr, value, code, profileMapping, secret, storedValue, valueDirty, promptUnlock])
 
   /** Enter saves; spread onto the single-line inputs. */
   const fieldKeyDown = (e: React.KeyboardEvent) => {

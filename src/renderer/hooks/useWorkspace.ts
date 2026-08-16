@@ -3,17 +3,8 @@ import { useWorkspaceStore } from '../stores/workspaceStore'
 import { useFlowStore } from '../stores/flowStore'
 import { useProjectStore } from '../stores/projectStore'
 import { useFlowManager } from './useFlowManager'
-import { useConfirmStore } from '../stores/confirmStore'
-
-/** Single-button notice — nothing to decide, just something to acknowledge. */
-function notify(title: string, message: string): Promise<string | null> {
-  return useConfirmStore.getState().ask({
-    title,
-    message,
-    actions: [{ id: 'ok', label: '知道了', tone: 'primary' }],
-    defaultActionId: 'ok',
-  })
-}
+import { notify } from '../stores/confirmStore'
+import { formatError } from '../stores/errorStore'
 
 /**
  * Opening a different workspace invalidates everything the app is holding: the
@@ -42,7 +33,11 @@ export function useWorkspace() {
   const busy = useCallback(async (): Promise<boolean> => {
     const { isRecording, isReplaying } = useFlowStore.getState()
     if (!isRecording && !isReplaying) return false
-    await notify('無法切換工作區', isRecording ? '請先停止錄製。' : '請先停止重播。')
+    await notify({
+      title: '無法切換工作區',
+      message: isRecording ? '請先停止錄製。' : '請先停止重播。',
+      okLabel: '知道了',
+    })
     return true
   }, [])
 
@@ -61,7 +56,7 @@ export function useWorkspace() {
         setInfo(await window.electronAPI.setWorkspace(dir))
       } catch (err) {
         // Most likely the folder was moved or deleted since it was remembered.
-        await notify('無法開啟工作區', String(err instanceof Error ? err.message : err))
+        await notify({ title: '無法開啟工作區', message: formatError(err), okLabel: '知道了' })
         await forget(dir)
         return
       }

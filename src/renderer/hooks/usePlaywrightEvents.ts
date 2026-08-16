@@ -2,7 +2,8 @@ import { useEffect } from 'react'
 import { useFlowStore } from '../stores/flowStore'
 import { useProjectStore } from '../stores/projectStore'
 import { useWorkspaceStore } from '../stores/workspaceStore'
-import type { Action } from '@shared/types'
+import { reportError } from '../stores/errorStore'
+import type { Action, AppErrorPayload } from '@shared/types'
 
 /**
  * Re-read the workspace after it may have changed on disk.
@@ -62,8 +63,13 @@ export function usePlaywrightEvents() {
 
   useEffect(() => {
     const unsubCaptured = window.electronAPI.onActionCaptured((action: Action) => {
-      const { currentFlow, addActionNode, recordingHeadId } = useFlowStore.getState()
+      const { currentFlow, addActionNode, recordingHeadId, isRecording } = useFlowStore.getState()
       if (!currentFlow) return
+      // Backstop for A2: an action arriving after the UI says recording has stopped would be
+      // appended with recordingHeadId === null — i.e. silently dropped onto the canvas as a
+      // floating root, on top of whatever else landed at the start position. Main is supposed
+      // to make this unreachable; dropping the action is the safer half if it ever isn't.
+      if (!isRecording) return
 
       // Use the explicit recording head (tracks the last added node during recording).
       // addActionNode persists itself.
@@ -96,8 +102,12 @@ export function usePlaywrightEvents() {
       setReplayStatus(nodeId, 'running')
     })
 
-    const unsubNodeComplete = window.electronAPI.onReplayNodeComplete(({ nodeId, success }) => {
-      setReplayStatus(nodeId, success ? 'success' : 'error')
+    // The `error` used to be dropped here, which left the user with a red node and no
+    // reason for it. It is now kept on the node (ActionNode shows it as a tooltip) and
+    // raised once as a toast, since the run stops on the first failure anyway.
+    const unsubNodeComplete = window.electronAPI.onReplayNodeComplete(({ nodeId, success, error }) => {
+      setReplayStatus(nodeId, success ? 'success' : 'error', error)
+      if (!success) reportError('節點執行失敗', undefined, { detail: error })
     })
 
     const unsubFinished = window.electronAPI.onReplayFinished(() => {
@@ -108,7 +118,7 @@ export function usePlaywrightEvents() {
     const unsubError = window.electronAPI.onReplayError((err: string) => {
       setReplayingNode(null)
       setIsReplaying(false)
-      console.error('Replay error:', err)
+      reportError('重播失敗', undefined, { detail: err })
     })
 
     // The user pressed ⏹. Nodes left mid-flight go amber rather than red — they did not
@@ -126,8 +136,19 @@ export function usePlaywrightEvents() {
       void reloadFromDisk()
     })
 
+    // Main's half of the error channel. Subscribe FIRST, then drain: anything main
+    // reported before this effect ran is sitting in its buffer, anything after arrives
+    // here live, and that ordering means nothing can fall between the two. The drain
+    // is what makes startup failures reportable at all — loadSettings runs before the
+    // window exists, so a live send then would have had no one to reach.
+    const toast = (p: AppErrorPayload): void =>
+      reportError(p.title, undefined, { detail: p.detail, tone: p.tone })
+    const unsubAppError = window.electronAPI.onAppError(toast)
+    void window.electronAPI.drainAppErrors().then((queued) => queued.forEach(toast))
+
     return () => {
       unsubReload()
+      unsubAppError()
       unsubCaptured()
       unsubUpdated()
       unsubRemoved()

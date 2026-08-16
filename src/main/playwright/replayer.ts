@@ -153,8 +153,9 @@ export class Replayer {
   constructor(page: Page, baseURL = '', ctx: ResolutionContext = {}, session?: ReplaySession) {
     this.page = page
     this.ctx = { ...ctx, profileVars: ctx.profileVars ?? {}, envVars: ctx.envVars ?? {} }
-    // No session = a run nobody can cancel. That is the branch-recording silent replay,
-    // which has no stop button of its own (see A2 in the cleanup backlog).
+    // No session = a run nobody can cancel: it gets a private signal no caller holds. Every
+    // caller that can be stopped passes one in — including the branch-recording silent
+    // replay, whose signal is held by RECORDING_START and fired by RECORDING_STOP.
     this.session = session ?? newReplaySession()
     this.pages = this.session.pages
     this.baseOrigin = (() => { try { return new URL(baseURL).origin } catch { return '' } })()

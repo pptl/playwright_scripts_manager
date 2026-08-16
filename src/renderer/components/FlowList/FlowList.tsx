@@ -8,6 +8,7 @@ import type { Action } from '@shared/types'
 import { DEFAULT_PROJECT_ID, DEFAULT_ENV_NAME, DEFAULT_DOMAIN } from '@shared/types'
 import { resolveProjectId } from '@shared/projectResolution'
 import { confirm } from '../../stores/confirmStore'
+import { reportError } from '../../stores/errorStore'
 import { Modal } from '../common/Modal'
 import { Button } from '../common/Button'
 import { Input } from '../common/Input'
@@ -488,7 +489,11 @@ export function FlowList() {
             })
             setAddSubFlowFlowId(null)
             const updated = useFlowStore.getState().currentFlow
-            if (updated) await window.electronAPI.saveFlow(updated).catch(console.error)
+            if (updated) {
+              await window.electronAPI
+                .saveFlow(updated)
+                .catch((err) => reportError('加入子流程後存檔失敗', err))
+            }
           }}
         />
       )}

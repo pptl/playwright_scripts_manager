@@ -10,6 +10,7 @@ import {
   DOMAIN_ENV_KEY,
 } from '../../shared/types'
 import { getWorkspaceRoot } from './workspace'
+import { reportToUser, describeError, isNotFound } from '../errorChannel'
 
 function projectsDir(): string {
   return join(getWorkspaceRoot(), 'projects')
@@ -69,7 +70,11 @@ export class ProjectStorage {
     try {
       const raw = await fs.readFile(ProjectStorage.filePath(projectId), 'utf-8')
       return JSON.parse(raw) as Project
-    } catch {
+    } catch (err) {
+      // Mirrors FlowStorage.load: "not there" is normal, "unreadable" is not.
+      if (!isNotFound(err)) {
+        reportToUser(`專案檔案無法讀取：${projectId}.json`, describeError(err))
+      }
       return null
     }
   }
@@ -78,6 +83,8 @@ export class ProjectStorage {
     await ProjectStorage.ensureDefault()
     const files = await fs.readdir(projectsDir())
     const results: Pick<Project, 'id' | 'name' | 'updatedAt'>[] = []
+    // One report for the whole scan — see the same note in FlowStorage.list.
+    const corrupted: string[] = []
 
     for (const file of files) {
       if (!file.endsWith('.json')) continue
@@ -86,8 +93,15 @@ export class ProjectStorage {
         const project = JSON.parse(raw) as Project
         results.push({ id: project.id, name: project.name, updatedAt: project.updatedAt })
       } catch (err) {
-        console.error(`[ProjectStorage] Skipping corrupted project file: ${file}`, err)
+        corrupted.push(`${file} — ${describeError(err)}`)
       }
+    }
+
+    if (corrupted.length) {
+      reportToUser(
+        `有 ${corrupted.length} 個專案檔案無法讀取，已跳過`,
+        `${corrupted.join('\n')}\n\n這些專案底下的流程會歸到「未分類」。`,
+      )
     }
 
     results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -99,8 +113,11 @@ export class ProjectStorage {
     if (projectId === DEFAULT_PROJECT_ID) return
     try {
       await fs.unlink(ProjectStorage.filePath(projectId))
-    } catch {
-      // ignore
+    } catch (err) {
+      // Already gone is fine; anything else means the row comes back on the next reload.
+      if (!isNotFound(err)) {
+        reportToUser(`專案檔案刪除失敗：${projectId}.json`, describeError(err))
+      }
     }
   }
 }

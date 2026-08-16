@@ -21,9 +21,12 @@ function hasUploadPath(action: FlowNode['action']): boolean {
 function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
   const { flowNode } = data
   const { action } = flowNode
-  const { replayStatus, replayingNodeId } = useFlowStore()
+  const { replayStatus, replayErrors, replayingNodeId } = useFlowStore()
 
   const nodeStatus = replayStatus[flowNode.id]
+  // Why the node went red. A native tooltip costs no layout and survives after the run,
+  // so the reason is still reachable once the toast has been dismissed.
+  const failure = replayErrors[flowNode.id]
   const isReplaying = replayingNodeId === flowNode.id
 
   let borderColor = TYPE_COLORS[action.type] ?? '#6b7280'
@@ -40,6 +43,7 @@ function ActionNodeComponent({ data, selected }: NodeProps<ActionNodeData>) {
 
   return (
     <div
+      title={failure}
       style={{
         background: '#1e1e3a',
         border: `${borderWidth}px ${borderStyle} ${borderColor}`,

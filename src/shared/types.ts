@@ -335,8 +335,17 @@ export const IPC_CHANNELS = {
   SECRET_REVEAL: 'secret:reveal',
   SECRETS_FILE_WRITE: 'secret:writeFile',
 
+  /** Renderer → Main: collect anything main reported before the renderer was
+   *  subscribed. Startup failures (a workspace that no longer scaffolds) happen
+   *  before the window exists at all, so a live send would simply be dropped. */
+  APP_ERRORS_DRAIN: 'app:errorsDrain',
+
   // Main → Renderer
   WORKSPACE_RELOAD: 'workspace:reload',
+  /** Main has something the user needs to know about — a corrupted flow file, a
+   *  failed delete, a degraded recorder. Rendered as a toast; main never raises a
+   *  modal, since none of these are things the user can answer in a dialog. */
+  APP_ERROR: 'app:error',
   ACTION_CAPTURED: 'action:captured',
   ACTION_UPDATED: 'action:updated',
   ACTION_REMOVED: 'action:removed',
@@ -347,8 +356,8 @@ export const IPC_CHANNELS = {
   REPLAY_FINISHED: 'replay:finished',
   REPLAY_ERROR: 'replay:error',
   /** The replay stopped because the user asked it to. Distinct from REPLAY_FINISHED
-   *  ("reached the target") and from REPLAY_ERROR (which is console-only, so routing
-   *  a deliberate user action through it would make it invisible). */
+   *  ("reached the target") and from REPLAY_ERROR (which raises an error toast, so
+   *  routing a deliberate user action through it would report a failure that isn't one). */
   REPLAY_CANCELLED: 'replay:cancelled',
 } as const
 
@@ -382,6 +391,17 @@ export interface ReplayNodeCompletePayload {
   nodeId: string
   success: boolean
   error?: string
+}
+
+/**
+ * A failure main needs to surface. Deliberately shaped like the renderer's
+ * `reportError(title, err, { detail, tone })` so the subscriber is a one-liner —
+ * `tone` mirrors `ToastTone` structurally, since shared/ cannot import the renderer.
+ */
+export interface AppErrorPayload {
+  title: string
+  detail?: string
+  tone?: 'error' | 'warning'
 }
 
 export interface ExportScriptsPayload {
@@ -418,6 +438,18 @@ export interface RecordingStartPayload {
   replaySpeed?: number
   /** Only the branch-recording silent replay reads this; a plain recording needs no context. */
   ctx?: ResolutionContext
+}
+
+/**
+ * Main → Renderer result of RECORDING_START.
+ *
+ * A recording start is a *sequence* (browser launch → silent replay → recorder start), not
+ * one operation, and ⏹ can land in any gap between them. `started: false` means the whole
+ * sequence was abandoned and no action will ever be captured — the renderer must clear
+ * `isRecording` / `recordingHeadId` itself, since nothing else will.
+ */
+export interface RecordingStartResult {
+  started: boolean
 }
 
 export interface ProjectSavePayload {

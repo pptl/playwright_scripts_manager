@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid'
 import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile } from '../../shared/types'
 import { computeGroupAwareLayout } from '../utils/groups'
 import { persistFlow } from './persistence'
+import { reportError } from './errorStore'
 
 const NODE_VERTICAL_GAP = 80
 const NODE_START_Y = 50
@@ -49,6 +50,9 @@ interface FlowStore {
   selectedNodeId: string | null
   replayingNodeId: string | null
   replayStatus: Record<string, 'running' | 'success' | 'error' | 'cancelled'>
+  /** Why a node failed, keyed by node id. Like `replayStatus` this is NOT part of `Flow`,
+   *  so the undo subscription (which snapshots `currentFlow`) never sees it. */
+  replayErrors: Record<string, string>
   isRecording: boolean
   isReplaying: boolean
   /** The node ID that new recorded actions should be appended to */
@@ -120,7 +124,11 @@ interface FlowStore {
 
   // Replay status
   setReplayingNode: (nodeId: string | null) => void
-  setReplayStatus: (nodeId: string, status: 'running' | 'success' | 'error' | 'cancelled') => void
+  setReplayStatus: (
+    nodeId: string,
+    status: 'running' | 'success' | 'error' | 'cancelled',
+    error?: string,
+  ) => void
   clearReplayStatus: () => void
   /** End-of-run repaint for a cancelled replay. */
   markReplayCancelled: () => void
@@ -189,6 +197,14 @@ function migrateCallFlowProfiles(flow: Flow): Flow {
 }
 
 
+/** Copy without one key. Only worth a helper because doing it inline inside a `set()`
+ *  updater needs a statement body. */
+function omitKey<T>(map: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in map)) return map
+  const { [key]: _removed, ...rest } = map
+  return rest
+}
+
 /** Apply a state change without recording an undo entry. Used by actions that are pure
  *  view state (group collapse), automatic bookkeeping (one-time layout materialization),
  *  or any write to flow CONFIG (profiles, name, project assignment). */
@@ -207,6 +223,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   selectedNodeId: null,
   replayingNodeId: null,
   replayStatus: {},
+  replayErrors: {},
   isRecording: false,
   isReplaying: false,
   recordingHeadId: null,
@@ -238,8 +255,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   setCurrentFlow: (flow) => {
     if (!flow) {
       set({
-        currentFlow: null, selectedNodeId: null, replayStatus: {}, recordingHeadId: null,
-        activeProfileId: null, past: [], future: [],
+        currentFlow: null, selectedNodeId: null, replayStatus: {}, replayErrors: {},
+        recordingHeadId: null, activeProfileId: null, past: [], future: [],
       })
       return
     }
@@ -252,6 +269,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       currentFlow: migratedFlow,
       selectedNodeId: null,
       replayStatus: {},
+      replayErrors: {},
       recordingHeadId: null,
       activeProfileId: profiles[0]?.id ?? null,
       past: [],
@@ -608,7 +626,12 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     const target = flow.nodes.find((n) => n.id === targetId)
     if (!target) return
     if (target.parentId !== null) {
-      console.warn(`connectNodes: target ${targetId} already has parent ${target.parentId}`)
+      // The dragged edge just disappears, so say why — otherwise the gesture reads as
+      // a bug in the canvas rather than as a rule about the graph.
+      reportError('無法連接節點', undefined, {
+        tone: 'warning',
+        detail: '目標節點已經有父節點了。一個節點只能有一個父節點 —— 請先中斷它原本的連線。',
+      })
       return
     }
     const updatedNodes = flow.nodes.map((n) => {
@@ -721,10 +744,17 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
 
   setReplayingNode: (nodeId) => set({ replayingNodeId: nodeId }),
 
-  setReplayStatus: (nodeId, status) =>
-    set((state) => ({ replayStatus: { ...state.replayStatus, [nodeId]: status } })),
+  setReplayStatus: (nodeId, status, error) =>
+    set((state) => ({
+      replayStatus: { ...state.replayStatus, [nodeId]: status },
+      // Keyed alongside the status so a re-run of the same node clears the stale reason
+      // rather than leaving last run's message hanging off a now-green node.
+      replayErrors: error
+        ? { ...state.replayErrors, [nodeId]: error }
+        : omitKey(state.replayErrors, nodeId),
+    })),
 
-  clearReplayStatus: () => set({ replayStatus: {}, replayingNodeId: null }),
+  clearReplayStatus: () => set({ replayStatus: {}, replayErrors: {}, replayingNodeId: null }),
 
   // Every node still mid-flight goes amber — the interrupted node AND, for a sub-flow, the
   // parent callFlow node, since both were started and neither reached a verdict. Verdicts

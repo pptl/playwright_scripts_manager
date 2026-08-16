@@ -252,7 +252,15 @@ export function Toolbar() {
     setCancelRequested(false)
     setIsRunningTests(true)
     setShowTestModal(true)
-    await window.electronAPI.runTests(currentFlow, config)
+    try {
+      await window.electronAPI.runTests(currentFlow, config)
+    } catch (err) {
+      // RUN_TESTS reports its own failures through TEST_OUTPUT / TEST_FINISHED, so this
+      // only fires when the handler throws outside its own try — in which case no
+      // TEST_FINISHED is coming and the modal would sit on 執行中 forever.
+      setIsRunningTests(false)
+      await notify({ title: '執行測試失敗', message: String(err) })
+    }
   }
 
   const handleCancelTests = async () => {

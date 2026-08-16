@@ -7,9 +7,11 @@ import type {
   ResolutionContext,
   ReplayNodeCompletePayload,
   RecordingStartPayload,
+  RecordingStartResult,
   TestFinishedPayload,
   Project,
   ActionUpdatedPayload,
+  AppErrorPayload,
 } from '../shared/types'
 import type { ElectronAPI } from '../shared/electronAPI'
 
@@ -29,7 +31,9 @@ function subscribe<T>(channel: string) {
 // declaration, so a signature can no longer drift out of sync with the renderer's view of it.
 const api = {
   // Recording
-  startRecording: (payload: RecordingStartPayload) =>
+  // The return annotation is deliberate: `invoke` gives back Promise<any>, so without it
+  // nothing here would say the handler answers with a RecordingStartResult.
+  startRecording: (payload: RecordingStartPayload): Promise<RecordingStartResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_START, payload),
   stopRecording: () => ipcRenderer.invoke(IPC_CHANNELS.RECORDING_STOP),
 
@@ -87,6 +91,10 @@ const api = {
   writeSecretsFile: (flow: Flow, ctx: ResolutionContext) =>
     ipcRenderer.invoke(IPC_CHANNELS.SECRETS_FILE_WRITE, { flow, ctx }),
 
+  // Failures main raised before the renderer was subscribed (see APP_ERRORS_DRAIN)
+  drainAppErrors: (): Promise<AppErrorPayload[]> =>
+    ipcRenderer.invoke(IPC_CHANNELS.APP_ERRORS_DRAIN),
+
   // Projects
   saveProject: (project: Project) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, { project }),
   loadProject: (projectId: string) => ipcRenderer.invoke(IPC_CHANNELS.PROJECT_LOAD, { projectId }),
@@ -105,6 +113,7 @@ const api = {
   onTestOutput: subscribe<string>(IPC_CHANNELS.TEST_OUTPUT),
   onTestFinished: subscribe<TestFinishedPayload>(IPC_CHANNELS.TEST_FINISHED),
   onWorkspaceReload: subscribe<void>(IPC_CHANNELS.WORKSPACE_RELOAD),
+  onAppError: subscribe<AppErrorPayload>(IPC_CHANNELS.APP_ERROR),
 } satisfies ElectronAPI
 
 contextBridge.exposeInMainWorld('electronAPI', api)

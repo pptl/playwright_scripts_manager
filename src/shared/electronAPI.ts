@@ -7,10 +7,12 @@ import type {
   ResolutionContext,
   ReplayNodeCompletePayload,
   RecordingStartPayload,
+  RecordingStartResult,
   TestFinishedPayload,
   Project,
   WorkspaceInfo,
   VaultStatus,
+  AppErrorPayload,
 } from './types'
 
 /**
@@ -25,7 +27,10 @@ import type {
  * Keep this file free of `electron` imports: the renderer bundle pulls it in too.
  */
 export interface ElectronAPI {
-  startRecording: (payload: RecordingStartPayload) => Promise<void>
+  /** Resolves only once recording is actually under way (a branch recording silently replays
+   *  first). `started: false` = the sequence was cancelled by stopRecording; no action will
+   *  be captured, and the caller owns clearing its own recording UI state. */
+  startRecording: (payload: RecordingStartPayload) => Promise<RecordingStartResult>
   stopRecording: () => Promise<void>
   replayToNode: (
     nodes: FlowNode[],
@@ -77,6 +82,11 @@ export interface ElectronAPI {
   revealWorkspace: () => Promise<void>
   installBrowser: () => Promise<boolean>
   onWorkspaceReload: (cb: () => void) => () => void
+  /** Main raised a failure the user needs to see. Rendered as a toast. */
+  onAppError: (cb: (payload: AppErrorPayload) => void) => () => void
+  /** Collect what main reported before this renderer subscribed — startup failures
+   *  happen before the window exists, so a live send would have been dropped. */
+  drainAppErrors: () => Promise<AppErrorPayload[]>
   /** Vault state of the open workspace; also triggers the auto-unlock attempt. */
   getVaultStatus: () => Promise<VaultStatus>
   /** Create the vault. Throws if one already exists. */

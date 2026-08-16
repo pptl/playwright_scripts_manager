@@ -4,6 +4,7 @@ import * as vm from 'vm'
 import * as path from 'path'
 import { createRequire } from 'module'
 import type { Action, LocatorOption } from '../../shared/types'
+import { reportToUser, describeError } from '../errorChannel'
 
 export type ActionCallback = (action: Action, alternatives?: LocatorOption[]) => void
 
@@ -156,7 +157,14 @@ try{
 }
 })();`
   } catch (e) {
-    console.warn('[FlowTest] Playwright InjectedScript extraction failed — falling back to built-in locator logic:', e)
+    // Not fatal, but not cosmetic either: without Playwright's own generator every locator
+    // for the whole session comes from the fallback CSS builder. Silently, the user records
+    // forty nodes and only finds out at replay time, so this is worth saying out loud once.
+    reportToUser(
+      '錄製器降級：無法取得 Playwright 的 locator 產生器',
+      `${describeError(e)}\n\n本次錄製會改用備援的 CSS selector 產生器，locator 品質會明顯下降。`,
+      'warning',
+    )
     _initScript = ''
   }
   return _initScript

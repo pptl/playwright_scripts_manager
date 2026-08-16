@@ -36,6 +36,7 @@ import { validateExtraction, extractSubflow } from '../../utils/subflowExtractio
 import { getGroupBoundary, groupBoxRect } from '../../utils/groups'
 import { Menu, MenuItem } from '../common/Menu'
 import { notify } from '../../stores/confirmStore'
+import { reportError } from '../../stores/errorStore'
 
 const nodeTypes = { actionNode: ActionNode, groupNode: GroupNode, groupBox: GroupBox }
 const edgeTypes = { branchEdge: BranchEdge }
@@ -206,7 +207,11 @@ function FlowCanvasInner() {
       const pending = pendingSaveRef.current
       pendingSaveRef.current = null
       // Only drag saves are ever pending here, so the same touch:false applies.
-      if (pending) window.electronAPI.saveFlow(pending, false).catch(console.error)
+      if (pending) {
+        window.electronAPI
+          .saveFlow(pending, false)
+          .catch((err) => reportError('節點位置儲存失敗', err))
+      }
     }
   }, [currentFlow?.id])
 
@@ -288,7 +293,11 @@ function FlowCanvasInner() {
           pendingSaveRef.current = null
           // touch:false — moving a node is not a content change, and bumping
           // updatedAt on every drag makes the JSON conflict in git for nothing.
-          if (pending) window.electronAPI.saveFlow(pending, false).catch(console.error)
+          if (pending) {
+        window.electronAPI
+          .saveFlow(pending, false)
+          .catch((err) => reportError('節點位置儲存失敗', err))
+      }
         }, 500)
       }
     },

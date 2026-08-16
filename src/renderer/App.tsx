@@ -8,6 +8,7 @@ import { SessionVarList } from './components/SessionVarList/SessionVarList'
 import { ProfileVarList } from './components/ProfileVarList/ProfileVarList'
 import { ProjectEnvVarList } from './components/ProjectEnvVar/ProjectEnvVarList'
 import { ConfirmHost } from './components/common/ConfirmDialog'
+import { ToastHost } from './components/common/ToastHost'
 import { VaultHost } from './components/Vault/VaultHost'
 import { WelcomeScreen } from './components/Welcome/WelcomeScreen'
 import { usePlaywrightEvents } from './hooks/usePlaywrightEvents'
@@ -36,6 +37,7 @@ export default function App() {
       <>
         <WelcomeScreen />
         <ConfirmHost />
+        <ToastHost />
       </>
     )
   }
@@ -62,6 +64,7 @@ export default function App() {
       </div>
       <ConfirmHost />
       <VaultHost />
+      <ToastHost />
     </div>
   )
 }

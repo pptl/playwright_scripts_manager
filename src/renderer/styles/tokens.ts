@@ -68,6 +68,7 @@ export const zIndex = {
   dialog: 3000,
   vault: 3500,
   confirm: 4000,
+  toast: 4500,
 } as const
 
 /** Corner radii used across the app. */

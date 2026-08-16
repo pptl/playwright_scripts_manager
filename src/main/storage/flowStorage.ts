@@ -3,6 +3,7 @@ import { join } from 'path'
 import type { Flow, FlowListItem } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
 import { getWorkspaceRoot } from './workspace'
+import { reportToUser, describeError, isNotFound } from '../errorChannel'
 
 function flowsDir(): string {
   return join(getWorkspaceRoot(), 'flows')
@@ -32,11 +33,20 @@ export class FlowStorage {
     await fs.rename(tmpPath, filePath)
   }
 
+  /**
+   * Still `Flow | null` for both "not there" and "unreadable" — callers are unchanged.
+   * But only the first is normal, so the second is now reported: a corrupted file used to
+   * be indistinguishable from a deletion, and `reloadFromDisk` reads a null as "deleted out
+   * from under us" and closes the open flow. It still does; at least the user now learns why.
+   */
   static async load(flowId: string): Promise<Flow | null> {
     try {
       const raw = await fs.readFile(FlowStorage.filePath(flowId), 'utf-8')
       return JSON.parse(raw) as Flow
-    } catch {
+    } catch (err) {
+      if (!isNotFound(err)) {
+        reportToUser(`流程檔案無法讀取：${flowId}.json`, describeError(err))
+      }
       return null
     }
   }
@@ -47,6 +57,9 @@ export class FlowStorage {
     const summaries: Omit<FlowListItem, 'refCount'>[] = []
     // subFlowId → how many callFlow nodes (across all flows) reference it
     const usage = new Map<string, number>()
+    // Collected rather than reported per file: one unreadable directory would otherwise
+    // raise a toast per file and blow straight past the 4-deep stack.
+    const corrupted: string[] = []
 
     for (const file of files) {
       if (!file.endsWith('.json')) continue
@@ -67,8 +80,15 @@ export class FlowStorage {
           }
         }
       } catch (err) {
-        console.error(`[FlowStorage] Skipping corrupted flow file: ${file}`, err)
+        corrupted.push(`${file} — ${describeError(err)}`)
       }
+    }
+
+    if (corrupted.length) {
+      reportToUser(
+        `有 ${corrupted.length} 個流程檔案無法讀取，已跳過`,
+        `${corrupted.join('\n')}\n\n這些流程不會出現在清單中。`,
+      )
     }
 
     return summaries
@@ -79,8 +99,13 @@ export class FlowStorage {
   static async delete(flowId: string): Promise<void> {
     try {
       await fs.unlink(FlowStorage.filePath(flowId))
-    } catch {
-      // ignore
+    } catch (err) {
+      // Already gone is the outcome we wanted. Anything else has to be reported: the
+      // renderer drops the row either way, so a failed unlink used to mean the flow
+      // reappeared out of nowhere on the next reload.
+      if (!isNotFound(err)) {
+        reportToUser(`流程檔案刪除失敗：${flowId}.json`, describeError(err))
+      }
     }
   }
 }

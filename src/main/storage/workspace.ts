@@ -2,6 +2,7 @@ import { promises as fs } from 'fs'
 import { homedir } from 'os'
 import { join, parse, resolve } from 'path'
 import { app } from 'electron'
+import { reportToUser, describeError } from '../errorChannel'
 
 /**
  * The workspace: one user-chosen directory holding flows/, projects/, fixtures/
@@ -83,9 +84,16 @@ export async function loadSettings(): Promise<void> {
       try {
         await scaffold(data.workspaceRoot)
         workspaceRoot = data.workspaceRoot
-      } catch {
+      } catch (err) {
         // Unwritable now (moved onto read-only media, permissions changed) —
-        // fall through to the picker rather than dying at startup.
+        // fall through to the picker rather than dying at startup. Reported, because
+        // otherwise the user is looking at the Welcome screen with no idea why their
+        // workspace didn't open. This runs before the window exists, so it lands in
+        // errorChannel's buffer and reaches the renderer via the drain.
+        reportToUser(
+          '無法開啟上次的工作區',
+          `${data.workspaceRoot}\n${describeError(err)}\n\n請重新選擇資料夾。`,
+        )
       }
     } else if (data.workspaceRoot) {
       recent = recent.filter((p) => p !== data.workspaceRoot)

@@ -3,6 +3,7 @@ import { join } from 'path'
 import type { Flow, FlowListItem } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
 import { getWorkspaceRoot } from './workspace'
+import { writeJsonAtomic } from './atomicWrite'
 import { reportToUser, describeError, isNotFound } from '../errorChannel'
 
 function flowsDir(): string {
@@ -16,6 +17,15 @@ export class FlowStorage {
 
   static filePath(flowId: string): string {
     return join(flowsDir(), `${flowId}.json`)
+  }
+
+  /** Every flow file on disk, readable or not. `list()` deliberately skips what it cannot
+   *  parse; a caller that must account for EVERY file (security/recrypt.ts) needs to see
+   *  those too, so it can refuse rather than silently leave one behind. */
+  static async allFilePaths(): Promise<string[]> {
+    await FlowStorage.ensureDir()
+    const files = await fs.readdir(flowsDir())
+    return files.filter((f) => f.endsWith('.json')).map((f) => join(flowsDir(), f))
   }
 
   /**
@@ -34,10 +44,7 @@ export class FlowStorage {
   static async save(flow: Flow, opts?: { touch?: boolean }): Promise<string> {
     await FlowStorage.ensureDir()
     if (opts?.touch !== false) flow.updatedAt = new Date().toISOString()
-    const filePath = FlowStorage.filePath(flow.id)
-    const tmpPath = `${filePath}.tmp`
-    await fs.writeFile(tmpPath, JSON.stringify(flow, null, 2), 'utf-8')
-    await fs.rename(tmpPath, filePath)
+    await writeJsonAtomic(FlowStorage.filePath(flow.id), flow)
     return flow.updatedAt
   }
 

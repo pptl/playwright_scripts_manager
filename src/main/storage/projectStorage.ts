@@ -10,6 +10,7 @@ import {
   DOMAIN_ENV_KEY,
 } from '../../shared/types'
 import { getWorkspaceRoot } from './workspace'
+import { writeJsonAtomic } from './atomicWrite'
 import { reportToUser, describeError, isNotFound } from '../errorChannel'
 
 function projectsDir(): string {
@@ -23,6 +24,14 @@ export class ProjectStorage {
 
   static filePath(projectId: string): string {
     return join(projectsDir(), `${projectId}.json`)
+  }
+
+  /** Mirror of `FlowStorage.allFilePaths` — every project file, including ones `list()`
+   *  would skip as unparseable. See the note there. */
+  static async allFilePaths(): Promise<string[]> {
+    await ProjectStorage.ensureDir()
+    const files = await fs.readdir(projectsDir())
+    return files.filter((f) => f.endsWith('.json')).map((f) => join(projectsDir(), f))
   }
 
   /** Materialize the reserved default project ("未分類") on disk if it doesn't exist yet,
@@ -46,20 +55,13 @@ export class ProjectStorage {
       createdAt: now,
       updatedAt: now,
     }
-    await ProjectStorage.writeAtomic(DEFAULT_PROJECT_ID, project)
+    await writeJsonAtomic(ProjectStorage.filePath(DEFAULT_PROJECT_ID), project)
   }
 
   static async save(project: Project): Promise<void> {
     await ProjectStorage.ensureDir()
     project.updatedAt = new Date().toISOString()
-    await ProjectStorage.writeAtomic(project.id, project)
-  }
-
-  private static async writeAtomic(projectId: string, project: Project): Promise<void> {
-    const filePath = ProjectStorage.filePath(projectId)
-    const tmpPath = `${filePath}.tmp`
-    await fs.writeFile(tmpPath, JSON.stringify(project, null, 2), 'utf-8')
-    await fs.rename(tmpPath, filePath)
+    await writeJsonAtomic(ProjectStorage.filePath(project.id), project)
   }
 
   static async load(projectId: string): Promise<Project | null> {

@@ -273,7 +273,15 @@ export function decryptMap(vars: Record<string, string> | undefined): Record<str
 /**
  * Re-key the vault: verify the old passphrase, then let the caller rewrite every stored
  * ciphertext while both keys are available, and only commit the new metadata once that
- * succeeds. `rewrite` receives re-encrypting helpers rather than the keys themselves.
+ * succeeds. `rewrite` receives a re-encrypting function rather than the keys themselves.
+ *
+ * The ordering here is only half of the guarantee, and used to be mistaken for all of it:
+ * not writing the metadata keeps the OLD passphrase verifying, but says nothing about files
+ * `rewrite` already replaced. `rewrite` (security/recrypt.ts) is therefore all-or-nothing in
+ * its own right — it stages every file before replacing any, and restores from a backup if
+ * the commit fails — so a throw from here really does leave the whole workspace on the old
+ * passphrase. The one residual: a commit that fails AND cannot be rolled back, which
+ * recrypt.ts reports with the path to the backup it kept.
  */
 export async function changePassphrase(
   oldPassphrase: string,

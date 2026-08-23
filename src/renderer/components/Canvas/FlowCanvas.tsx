@@ -65,6 +65,7 @@ function FlowCanvasInner() {
     toggleGroupCollapsed,
     ungroupGroup,
     addNodeAt,
+    flowEpoch,
   } = useFlowStore()
   const { replayToNode, startBranchRecording } = usePlaywright()
   const { screenToFlowPosition } = useReactFlow()
@@ -196,8 +197,19 @@ function FlowCanvasInner() {
     materializeLayout(layout)
   }, [currentFlow?.id, materializeLayout])
 
-  // Flush any debounced drag save before the flow changes or the canvas unmounts — otherwise
-  // a drag followed by a quick flow switch is silently lost.
+  // Settle any debounced drag save whenever the open document is replaced (or the canvas
+  // unmounts). `flowEpoch` is in the deps, not just the id: `setCurrentFlow` also fires for
+  // a RELOAD of the same flow, which an id comparison alone cannot see.
+  //
+  // Which way it settles depends on what replaced it:
+  //  - a different flow (or none) → persist, or a drag followed by a quick flow switch is
+  //    silently lost, which is what this effect was originally for;
+  //  - the SAME flow, i.e. its disk copy came back (focus reload, or the reload pushed after
+  //    a passphrase change) → discard. The captured object is a whole stale document, and
+  //    writing it back would undo everything the reload just brought in — after a passphrase
+  //    change that means old-key ciphertext landing on top of the freshly re-keyed file, the
+  //    same damage as A16. All that is lost by dropping it is one node's coordinates, which
+  //    the reload had already replaced anyway.
   useEffect(() => {
     return () => {
       if (saveTimerRef.current) {
@@ -206,12 +218,16 @@ function FlowCanvasInner() {
       }
       const pending = pendingSaveRef.current
       pendingSaveRef.current = null
+      if (!pending) return
+      // Read the store rather than `currentFlow`: cleanup runs after the state that
+      // triggered it has already landed, so this is what the flow was replaced BY.
+      const live = useFlowStore.getState().currentFlow
       // Only drag saves are ever pending here, so the same touch:false applies.
-      if (pending) {
+      if (live?.id !== pending.id) {
         void persistFlow(pending, { touch: false, label: '節點位置儲存失敗' })
       }
     }
-  }, [currentFlow?.id])
+  }, [currentFlow?.id, flowEpoch])
 
   useEffect(() => {
     setNodes(rfNodes)

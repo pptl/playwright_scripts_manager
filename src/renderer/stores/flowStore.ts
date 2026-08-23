@@ -47,6 +47,10 @@ interface FlowStore {
   // State
   flows: FlowListItem[]
   currentFlow: Flow | null
+  /** Counts wholesale replacements of the open document (`setCurrentFlow` only), never
+   *  edits to it. Nothing renders from it — it exists so an effect can depend on "the
+   *  document was swapped" even when the flow id is unchanged. */
+  flowEpoch: number
   selectedNodeId: string | null
   replayingNodeId: string | null
   replayStatus: Record<string, 'running' | 'success' | 'error' | 'cancelled'>
@@ -220,6 +224,7 @@ function setSilently(partial: Partial<FlowStore>) {
 export const useFlowStore = create<FlowStore>((set, get) => ({
   flows: [],
   currentFlow: null,
+  flowEpoch: 0,
   selectedNodeId: null,
   replayingNodeId: null,
   replayStatus: {},
@@ -253,10 +258,16 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   // Flow state only. The project context that goes with a flow is loaded (and preserved or
   // reset) by `useFlowManager.openFlow`, which owns the flow↔project sequence.
   setCurrentFlow: (flow) => {
+    // Bumped here and nowhere else, so it counts wholesale REPLACEMENTS of the open
+    // document rather than edits to it. FlowCanvas watches it to notice the case an id
+    // comparison cannot see: the same flow replaced by its disk copy (focus reload, or the
+    // reload a passphrase change pushes), where a pending drag save is holding a version
+    // that is now stale in a way that matters — see the flush effect there.
+    const flowEpoch = get().flowEpoch + 1
     if (!flow) {
       set({
         currentFlow: null, selectedNodeId: null, replayStatus: {}, replayErrors: {},
-        recordingHeadId: null, activeProfileId: null, past: [], future: [],
+        recordingHeadId: null, activeProfileId: null, past: [], future: [], flowEpoch,
       })
       return
     }
@@ -274,6 +285,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       activeProfileId: profiles[0]?.id ?? null,
       past: [],
       future: [],
+      flowEpoch,
     })
   },
 

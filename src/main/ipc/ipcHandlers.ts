@@ -34,6 +34,7 @@ import {
   warnAbout,
 } from '../storage/workspace'
 import * as vault from '../security/vault'
+import { recryptWorkspace } from '../security/recrypt'
 import { setErrorSink, drainBufferedErrors } from '../errorChannel'
 import { hasChromium, isMissingBrowserError } from '../playwright/browserCheck'
 import {
@@ -509,11 +510,20 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(
     IPC_CHANNELS.VAULT_CHANGE_PASSPHRASE,
     async (_e, { oldPassphrase, newPassphrase }: { oldPassphrase: string; newPassphrase: string }) => {
-      // Every stored ciphertext is rewritten under the new key before the new metadata
-      // is committed, so a failure part-way leaves the old passphrase still working.
+      // Every stored ciphertext is rewritten under the new key before the new metadata is
+      // committed, and `recryptWorkspace` is all-or-nothing about that rewrite (staged
+      // writes + a backup it restores from), so a failure anywhere leaves the whole
+      // workspace on the old passphrase — files included, not just the metadata.
       const ok = await vault.changePassphrase(oldPassphrase, newPassphrase, async (recrypt) => {
         await recryptWorkspace(recrypt)
       })
+
+      // A16: every stored secret on disk is now under the new key, but the renderer is still
+      // holding the OLD ciphertext for whatever flow is open — and its next autosave would
+      // write that straight back over what we just rewrote. Focus reload is the existing
+      // reconciliation path, and the window never lost focus here, so trigger it directly.
+      // Only on success: a rejected old passphrase never ran the rewrite at all.
+      if (ok) win.webContents.send(IPC_CHANNELS.WORKSPACE_RELOAD)
       return { ok, status: vault.status() }
     },
   )
@@ -562,37 +572,6 @@ function decryptContext(ctx: ResolutionContext = {}): ResolutionContext {
     ...ctx,
     profileVars: vault.decryptMap(ctx.profileVars),
     envVars: vault.decryptMap(ctx.envVars),
-  }
-}
-
-/** Re-encrypt every stored secret under a new key (see VAULT_CHANGE_PASSPHRASE). */
-async function recryptWorkspace(recrypt: (envelope: string) => string): Promise<void> {
-  const pass = (v: string): string => (vault.isCiphertext(v) ? recrypt(v) : v)
-
-  for (const item of await FlowStorage.list()) {
-    const flow = await FlowStorage.load(item.id)
-    if (!flow) continue
-    for (const profile of flow.profiles ?? []) {
-      for (const v of profile.vars) {
-        v.value = pass(v.value)
-        if (v.envValues) {
-          for (const envId of Object.keys(v.envValues)) v.envValues[envId] = pass(v.envValues[envId])
-        }
-      }
-    }
-    for (const node of flow.nodes) {
-      if (node.action.value) node.action.value = pass(node.action.value)
-    }
-    await FlowStorage.save(flow, { touch: false })
-  }
-
-  for (const summary of await ProjectStorage.list()) {
-    const project = await ProjectStorage.load(summary.id)
-    if (!project) continue
-    for (const v of project.envVars ?? []) {
-      for (const envId of Object.keys(v.values)) v.values[envId] = pass(v.values[envId])
-    }
-    await ProjectStorage.save(project)
   }
 }
 

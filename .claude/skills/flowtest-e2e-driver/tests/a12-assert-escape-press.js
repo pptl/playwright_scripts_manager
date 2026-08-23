@@ -8,7 +8,8 @@
 //
 // Unlike the other tests in this directory, this one does NOT drive the Electron app via
 // `_electron` — A12 lives entirely in JS injected into the RECORDED page
-// (getDOMCaptureScript / getAssertionToolbarScript in src/main/playwright/captureShared.ts),
+// (getDOMCaptureScript / getAssertionToolbarScript in
+// src/main/playwright/browserScripts/captureShared.ts),
 // and BrowserController exposes no CDP endpoint an external script could attach to. Instead
 // this compiles captureShared.ts standalone (it has zero runtime `electron` import — only
 // `import type { BrowserWindow }`) and runs the two injected scripts in a real headless
@@ -28,7 +29,9 @@ function rmrf(p) {
   fs.rmSync(p, { recursive: true, force: true })
 }
 
-const SRC_DIR = path.join(PROJECT_ROOT, 'src', 'main', 'playwright')
+// D3 (project references) moved captureShared.ts into its own browserScripts/ subdirectory
+// so it could get its own DOM-enabled tsconfig — see tsconfig.recorder-dom.json.
+const SRC_DIR = path.join(PROJECT_ROOT, 'src', 'main', 'playwright', 'browserScripts')
 const SCRATCH_TS = path.join(SRC_DIR, 'captureShared.a12scratch.ts')
 
 /** Compiles captureShared.ts (+ its two relative deps) to CommonJS JS so it can be
@@ -42,7 +45,7 @@ const SCRATCH_TS = path.join(SRC_DIR, 'captureShared.a12scratch.ts')
  *     never calls) — a *syntax* error under `--module commonjs` regardless of whether it runs.
  *     Compiling a scratch copy with that one expression replaced sidesteps it without editing
  *     the real source. The scratch file sits next to the original (not in a temp dir) so its
- *     relative imports ("../errorChannel", "../../shared/types") still resolve during
+ *     relative imports ("../../errorChannel", "../../../shared/types") still resolve during
  *     compilation, and is always removed in a `finally`. */
 function compileCaptureShared() {
   rmrf(OUT_DIR)
@@ -72,7 +75,7 @@ function compileCaptureShared() {
   } finally {
     rmrf(SCRATCH_TS)
   }
-  return require(path.join(OUT_DIR, 'main', 'playwright', 'captureShared.a12scratch.js'))
+  return require(path.join(OUT_DIR, 'main', 'playwright', 'browserScripts', 'captureShared.a12scratch.js'))
 }
 
 let pass = 0

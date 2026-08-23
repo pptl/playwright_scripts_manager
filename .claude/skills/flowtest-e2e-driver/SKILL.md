@@ -29,17 +29,25 @@ description: 這個 skill 應該在需要對 FlowTest（這個 Electron app 本�
     a14-envvar-popover-outside-click.js — EnvVarPickerPopover 在 modal 內的 outside-click（5 項檢查）
     a12-assert-escape-press.js          — 斷言 dock Escape 取消不應多錄 press（4 項檢查）——
                                            **不用 `_electron`**，見下方獨立說明
+    a15-flow-external-edit-focus-reload.js — focus reload 是否撿得到外部修改的流程檔（無/有
+                                           ledger 記錄兩種情境）+ undo 歷史是否正確被清空（9 項檢查）
+    c12-selector-helpers-unified.js     — 點擊路徑與斷言 pick 路徑的 selector/locatorExpr
+                                           是否真的共用同一份實作、注入順序是否正確、含雙引號
+                                           的 aria-label 是否兩條路徑都正確跳脫（7 項檢查）——
+                                           跟 a12 一樣**不用 `_electron`**
 ```
 
-**`a12-assert-escape-press.js` 是這個目錄裡唯一不驅動 Electron app 本體的測試。** A12 的
-bug 活在注入到「被錄製頁面」裡的原始 JS（`getDOMCaptureScript()` /
-`getAssertionToolbarScript()`，定義在 `src/main/playwright/captureShared.ts`），跟 Electron
-UI 無關；`BrowserController` 沒有暴露 CDP/remote-debugging 通道，`launchApp()` 開的 Electron
-app 本體搆不到它另外用 `playwright-core` 開出來的錄製瀏覽器視窗。這支測試改用
-`npx tsc`（實際上是直接 `node node_modules/typescript/lib/tsc.js`，避開 Windows shell 對
-帶空白路徑的引號問題）把 `captureShared.ts` 獨立編譯成 CommonJS，`require()` 進來後直接在一個
-真的（headless）Chromium page 裡執行這兩支注入腳本，重現真實的事件時序（capture phase 監聽器
-的註冊順序）。編譯用的暫存檔在 `tests/.a12-scratch/`（已加入 `.gitignore`）。
+**`a12-assert-escape-press.js` / `c12-selector-helpers-unified.js` 是這個目錄裡唯二不驅動
+Electron app 本體的測試。** 兩者的行為都活在注入到「被錄製頁面」裡的原始 JS
+（`getDOMCaptureScript()` / `getAssertionToolbarScript()`，定義在
+`src/main/playwright/browserScripts/captureShared.ts`），跟 Electron UI 無關；`BrowserController` 沒有暴露
+CDP/remote-debugging 通道，`launchApp()` 開的 Electron app 本體搆不到它另外用
+`playwright-core` 開出來的錄製瀏覽器視窗。這兩支測試改用 `npx tsc`（實際上是直接
+`node node_modules/typescript/lib/tsc.js`，避開 Windows shell 對帶空白路徑的引號問題）把
+`captureShared.ts` 獨立編譯成 CommonJS，`require()` 進來後直接在一個真的（headless）
+Chromium page 裡執行這些注入腳本，重現真實的事件時序（a12：capture phase 監聽器的註冊順序；
+c12：`getSelectorHelpersScript()` 必須先於另外兩支注入,兩者各自的編譯暫存檔分別在
+`tests/.a12-scratch/` 與 `tests/.c12-scratch/`（都已加入 `.gitignore`）。
 
 每支測試都是獨立可執行的 Node 腳本，內建自己的 PASS/FAIL/SKIP 報表，結尾都會呼叫
 `driver.assertRealSettingsUntouched()` 驗證沒有動到使用者真正的 `%APPDATA%/flowtest/settings.json`。
@@ -125,8 +133,12 @@ node ".\.claude\skills\flowtest-e2e-driver\tests\<要跑的測試>.js"
 - **刪除失敗 toast**（`FlowStorage.delete` 的錯誤路徑）——icacls 擋不住這台機器上的刪除，
   需要換個方式製造真的刪除失敗（例如檔案被另一個程式佔用鎖定），或在非管理員帳號下測。
 - **連線被拒 warning**——需要真的連線被拒場景，沒有動到共用瀏覽器安裝的前提下無法決定性重現。
-- **undo 歷史在 focus 事件後是否仍在**（A15 殘留疑點的一部分）——renderer 的 Zustand store
-  沒有暴露到 `window`，腳本內省不到 undo stack，只能驗證「沒有觸發 reload/沒有寫入磁碟」這個外顯行為。
+
+**undo 歷史在 focus 事件後是否仍在**（A15）已在 `a15-flow-external-edit-focus-reload.js` 裡
+自動化：renderer 的 Zustand store 雖然沒有暴露到 `window`，腳本內省不到 undo stack 本身，
+但可以間接驗證——先用 `dragNode` 製造一筆可復原的位移，等真的觸發外部 reload 後按 Ctrl+Z，
+比對節點的螢幕座標（`boundingBox()`）在復原前後有沒有變化，藉此判斷 `past`/`future` 是否真
+的被 `setCurrentFlow` 清空。
 
 ## 加新測試的建議模式
 

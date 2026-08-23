@@ -15,7 +15,6 @@ import type {
   ResolutionContext,
   WorkspaceInfo,
 } from '../../shared/types'
-import { isCallFlowAction } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
 import { Recorder } from '../playwright/recorder'
 import { Replayer, newReplaySession, isReplayCancelled } from '../playwright/replayer'
@@ -40,6 +39,7 @@ import { hasChromium, isMissingBrowserError } from '../playwright/browserCheck'
 import {
   resolvePlaywrightCli,
   runPlaywright,
+  killProcessOnPort,
   MISSING_CLI_MESSAGE,
   HTML_REPORT_DIR,
 } from '../playwright/runner'
@@ -284,7 +284,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
   ipcMain.handle(
     IPC_CHANNELS.FLOW_CHECK_CYCLE,
     async (_e, { currentFlowId, candidateSubFlowId }: { currentFlowId: string; candidateSubFlowId: string }) => {
-      return await hasCallFlowCycle(currentFlowId, candidateSubFlowId)
+      return await FlowStorage.hasCallFlowCycle(currentFlowId, candidateSubFlowId)
     },
   )
 
@@ -594,73 +594,3 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
-async function hasCallFlowCycle(
-  startFlowId: string,
-  candidateSubFlowId: string,
-  visited = new Set<string>(),
-): Promise<boolean> {
-  if (candidateSubFlowId === startFlowId) return true
-  if (visited.has(candidateSubFlowId)) return false
-  visited.add(candidateSubFlowId)
-
-  const subFlow = await FlowStorage.load(candidateSubFlowId)
-  if (!subFlow) return false
-
-  const nestedCallIds = subFlow.nodes
-    .filter((n) => isCallFlowAction(n.action))
-    .map((n) => n.action.subFlowId!)
-
-  for (const nestedId of nestedCallIds) {
-    if (await hasCallFlowCycle(startFlowId, nestedId, visited)) return true
-  }
-  return false
-}
-
-/** Kill any process listening on the given port, then wait briefly for the OS to free it. */
-function killProcessOnPort(port: number): Promise<void> {
-  return new Promise((resolve) => {
-    if (process.platform === 'win32') {
-      const finder = spawn('cmd', ['/c', `netstat -ano | findstr :${port}`], { shell: false })
-      let output = ''
-      finder.stdout.on('data', (d: Buffer) => { output += d.toString() })
-      finder.on('close', () => {
-        const pids = new Set<string>()
-        for (const line of output.split('\n')) {
-          // Match only lines where port is the LOCAL address and state is LISTENING
-          if (/LISTENING/i.test(line)) {
-            const localAddr = line.trim().split(/\s+/)[1] ?? ''
-            if (localAddr.endsWith(`:${port}`)) {
-              const pid = line.trim().split(/\s+/).at(-1) ?? ''
-              if (/^\d+$/.test(pid)) pids.add(pid)
-            }
-          }
-        }
-        if (pids.size === 0) return resolve()
-        let remaining = pids.size
-        const done = () => { if (--remaining === 0) setTimeout(resolve, 300) }
-        for (const pid of pids) {
-          const killer = spawn('taskkill', ['/F', '/PID', pid], { shell: true })
-          killer.on('close', done)
-          killer.on('error', done)
-        }
-      })
-      finder.on('error', () => resolve())
-    } else {
-      const finder = spawn('sh', ['-c', `lsof -ti :${port}`], { shell: false })
-      let output = ''
-      finder.stdout.on('data', (d: Buffer) => { output += d.toString() })
-      finder.on('close', () => {
-        const pids = output.trim().split('\n').filter((p) => /^\d+$/.test(p))
-        if (pids.length === 0) return resolve()
-        let remaining = pids.length
-        const done = () => { if (--remaining === 0) setTimeout(resolve, 300) }
-        for (const pid of pids) {
-          const killer = spawn('kill', ['-9', pid], { shell: false })
-          killer.on('close', done)
-          killer.on('error', done)
-        }
-      })
-      finder.on('error', () => resolve())
-    }
-  })
-}

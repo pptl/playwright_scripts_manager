@@ -123,4 +123,28 @@ export class FlowStorage {
       }
     }
   }
+
+  /** Whether adding candidateSubFlowId as a sub-flow of startFlowId would create a cycle —
+   *  recursively walks the candidate's own callFlow graph looking for a path back to start. */
+  static async hasCallFlowCycle(
+    startFlowId: string,
+    candidateSubFlowId: string,
+    visited = new Set<string>(),
+  ): Promise<boolean> {
+    if (candidateSubFlowId === startFlowId) return true
+    if (visited.has(candidateSubFlowId)) return false
+    visited.add(candidateSubFlowId)
+
+    const subFlow = await FlowStorage.load(candidateSubFlowId)
+    if (!subFlow) return false
+
+    const nestedCallIds = subFlow.nodes
+      .filter((n) => isCallFlowAction(n.action))
+      .map((n) => n.action.subFlowId!)
+
+    for (const nestedId of nestedCallIds) {
+      if (await FlowStorage.hasCallFlowCycle(startFlowId, nestedId, visited)) return true
+    }
+    return false
+  }
 }

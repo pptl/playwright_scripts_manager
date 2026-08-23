@@ -1,13 +1,14 @@
 import { BrowserContext, CDPSession, Frame, Page } from 'playwright-core'
 import { basename } from 'path'
 import { v4 as uuidv4 } from 'uuid'
-import type { Action, ActionUpdatedPayload, LocatorOption } from '../../shared/types'
+import type { Action, ActionUpdatedPayload, LocatorOption } from '../../../shared/types'
 import {
   type ActionCallback,
   type RawEvent,
   type LastInteraction,
   type AssertPickResult,
   getBrowserInitScript,
+  getSelectorHelpersScript,
   getDOMCaptureScript,
   getCursorHighlightScript,
   buildAction,
@@ -146,6 +147,13 @@ export class CodegenCapture {
     const initScript = getBrowserInitScript()
     if (initScript) await this.context.addInitScript(initScript)
 
+    // Shared selector-generation helpers (window.__ftCssSelector / __ftLocatorExpr) —
+    // must run in every frame, same as captureScript below, since both consumers need
+    // them there for iframe recording. Registered before both so the globals exist
+    // when captureScript/toolbarScript run.
+    const selectorHelpersScript = getSelectorHelpersScript()
+    await this.context.addInitScript(selectorHelpersScript)
+
     const captureScript = getDOMCaptureScript()
     await this.context.addInitScript(captureScript)
 
@@ -158,6 +166,7 @@ export class CodegenCapture {
     // addInitScript only runs on future navigations; evaluate immediately so
     // branch recording (page already loaded, no upcoming navigation) works too.
     if (initScript) await page.evaluate(initScript).catch(() => {})
+    await page.evaluate(selectorHelpersScript).catch(() => {})
     await page.evaluate(captureScript).catch(() => {})
     await page.evaluate(cursorScript).catch(() => {})
     await page.evaluate(toolbarScript).catch(() => {})

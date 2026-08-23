@@ -1,6 +1,6 @@
 import { Page } from 'playwright-core'
 import type { Action, LocatorOption } from '../../shared/types'
-import { CodegenCapture, type ActionUpdatedCallback, type ActionRemovedCallback, type FilesImportedCallback } from './codegenCapture'
+import { CodegenCapture, type ActionUpdatedCallback, type ActionRemovedCallback, type FilesImportedCallback } from './browserScripts/codegenCapture'
 
 type ActionCallback = (action: Action, alternatives?: LocatorOption[]) => void
 

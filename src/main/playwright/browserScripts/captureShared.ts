@@ -3,8 +3,8 @@ import * as fs from 'fs'
 import * as vm from 'vm'
 import * as path from 'path'
 import { createRequire } from 'module'
-import type { Action, LocatorOption } from '../../shared/types'
-import { reportToUser, describeError } from '../errorChannel'
+import type { Action, LocatorOption } from '../../../shared/types'
+import { reportToUser, describeError } from '../../errorChannel'
 
 export type ActionCallback = (action: Action, alternatives?: LocatorOption[]) => void
 
@@ -170,6 +170,46 @@ try{
   return _initScript
 }
 
+// ── Shared selector-generation helpers ──────────────────────────────────────────
+//
+// generateCSSSelector (fallback CSS builder) and getLocatorExpr (Playwright locator,
+// falling back to the CSS builder) are needed both here and inside the assertion
+// toolbar's picker (getAssertionToolbarScript). Every consumer here is a `Function`
+// serialized via `.toString()` and injected into an isolated browser context — nothing
+// injected can `import` or close over an outer-scope variable — so the two call sites
+// can't just share a normal TS function. Instead this is installed once as globals via
+// its own addInitScript (see codegenCapture.ts, registered before both consumers), and
+// getDOMCaptureScript() / getAssertionToolbarScript() delegate to
+// window.__ftCssSelector / window.__ftLocatorExpr instead of each keeping its own copy
+// (which had already drifted: only one of the two copies escaped quotes in
+// aria-label/name, and only one guarded the __ftGetLocator call with try/catch — this
+// merged version keeps the more defensive behaviour of each).
+export function getSelectorHelpersScript(): string {
+  return `(function(){
+  function generateCSSSelector(el) {
+    var testId = el.getAttribute('data-testid');
+    if (testId) return '[data-testid="' + testId + '"]';
+    if (el.id) return '#' + el.id;
+    var aria = el.getAttribute('aria-label');
+    if (aria) return '[aria-label="' + aria.replace(/"/g, '\\\\"') + '"]';
+    var name = el.getAttribute('name');
+    if (name) return '[name="' + name.replace(/"/g, '\\\\"') + '"]';
+    var tag = el.tagName.toLowerCase();
+    var type = (el.type || '').toLowerCase();
+    return (type && !['text', ''].includes(type)) ? tag + '[type="' + type + '"]' : tag;
+  }
+  function getLocatorExpr(el) {
+    try {
+      var loc = window.__ftGetLocator && window.__ftGetLocator(el);
+      if (loc) return loc;
+    } catch (e) {}
+    return 'locator(' + JSON.stringify(generateCSSSelector(el)) + ')';
+  }
+  window.__ftCssSelector = generateCSSSelector;
+  window.__ftLocatorExpr = getLocatorExpr;
+})();`
+}
+
 // Returns the DOM-side event capture script to pass to page.addInitScript().
 //
 // Event filtering mirrors Playwright's RecordActionTool / JsonRecordActionTool:
@@ -180,25 +220,11 @@ try{
 //             modifier+char, Enter outside textarea; excludes Backspace/Delete/paste)
 export function getDOMCaptureScript(): () => void {
   return () => {
-    function generateCSSSelector(el: Element): string {
-      const h = el as HTMLElement
-      const testId = h.getAttribute('data-testid')
-      if (testId) return `[data-testid="${testId}"]`
-      if (h.id) return `#${h.id}`
-      const aria = h.getAttribute('aria-label')
-      if (aria) return `[aria-label="${aria}"]`
-      const name = h.getAttribute('name')
-      if (name) return `[name="${name}"]`
-      const tag = el.tagName.toLowerCase()
-      const type = ((el as HTMLInputElement).type || '').toLowerCase()
-      return type && !['text', ''].includes(type) ? `${tag}[type="${type}"]` : tag
-    }
-
-    function getLocatorExpr(el: Element): string {
-      const loc = (window as any).__ftGetLocator?.(el) as string | null
-      if (loc) return loc
-      return `locator(${JSON.stringify(generateCSSSelector(el))})`
-    }
+    // Installed on window by getSelectorHelpersScript, injected before this script —
+    // see codegenCapture.ts's init-script order. Kept as local aliases so every call
+    // site below reads exactly as it did when this was a standalone copy.
+    const generateCSSSelector = (window as any).__ftCssSelector as (el: Element) => string
+    const getLocatorExpr = (window as any).__ftLocatorExpr as (el: Element) => string
 
     // Hidden file inputs carry no name/label, so Playwright's generator usually falls back
     // to a bare input[type="file"] — a strict-mode violation on any page with more than one.
@@ -660,26 +686,10 @@ export function getAssertionToolbarScript(): string {
     var prevOutline = '';
     var prevOutlineOffset = '';
 
-    function generateCSSSelector(el) {
-      var testId = el.getAttribute('data-testid');
-      if (testId) return '[data-testid="' + testId + '"]';
-      if (el.id) return '#' + el.id;
-      var aria = el.getAttribute('aria-label');
-      if (aria) return '[aria-label="' + aria.replace(/"/g, '\\\\"') + '"]';
-      var name = el.getAttribute('name');
-      if (name) return '[name="' + name.replace(/"/g, '\\\\"') + '"]';
-      var tag = el.tagName.toLowerCase();
-      var type = (el.type || '').toLowerCase();
-      return (type && !['text', ''].includes(type)) ? tag + '[type="' + type + '"]' : tag;
-    }
-
-    function getLocatorExpr(el) {
-      try {
-        var loc = window.__ftGetLocator && window.__ftGetLocator(el);
-        if (loc) return loc;
-      } catch(e) {}
-      return 'locator(' + JSON.stringify(generateCSSSelector(el)) + ')';
-    }
+    // Installed on window by getSelectorHelpersScript, injected before this script —
+    // see codegenCapture.ts's init-script order.
+    var generateCSSSelector = window.__ftCssSelector;
+    var getLocatorExpr = window.__ftLocatorExpr;
 
     function clearHighlight() {
       if (highlighted) {

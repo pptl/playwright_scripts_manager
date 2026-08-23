@@ -7,6 +7,11 @@ out/
 dist-electron/
 release/
 
+# `npm run typecheck` (tsc -b, project references) — declaration/.tsbuildinfo output for
+# the four leaf tsconfigs (main/preload/renderer/recorder-dom). Type-check-only, never the
+# real build (electron-vite/esbuild owns that, into out/ above and ignores these files).
+.tsbuild/
+
 # Playwright / FlowTest run artifacts.
 # The repo root has been used as a workspace, and its playwright.config.ts points
 # testDir at ./exports — so generated specs and run output land here. .flowtest/
@@ -16,9 +21,11 @@ exports/
 test-results/
 playwright-report/
 
-# Scratch compile output for the a12 e2e test (needs to live under the project root so
+# Scratch compile output for the a12/c12 e2e tests (needs to live under the project root so
 # Node's module resolution can find node_modules/uuid from the compiled file).
 .claude/skills/flowtest-e2e-driver/tests/.a12-scratch/
-# Safety net: the a12 test's temp source copy is always removed in a `finally`, but in case
-# a crash skips that, never let it get committed.
-src/main/playwright/captureShared.a12scratch.ts
+.claude/skills/flowtest-e2e-driver/tests/.c12-scratch/
+# Safety net: these tests' temp source copies are always removed in a `finally`, but in case
+# a crash skips that, never let them get committed.
+src/main/playwright/browserScripts/captureShared.a12scratch.ts
+src/main/playwright/browserScripts/captureShared.c12scratch.ts

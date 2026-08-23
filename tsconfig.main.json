@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2020"],
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": ".tsbuild/main"
+  },
+  "include": ["src/main/**/*.ts", "src/shared/**/*.ts", "electron.vite.config.ts"],
+  "exclude": ["src/main/playwright/browserScripts/**"],
+  "references": [{ "path": "./tsconfig.recorder-dom.json" }]
+}

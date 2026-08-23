@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": ".tsbuild/recorder-dom"
+  },
+  "include": [
+    "src/main/playwright/browserScripts/**/*.ts",
+    "src/main/errorChannel.ts",
+    "src/shared/**/*.ts"
+  ]
+}

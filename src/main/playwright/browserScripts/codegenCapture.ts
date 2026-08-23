@@ -79,7 +79,12 @@ export class CodegenCapture {
     this.onActionRemoved = onActionRemoved ?? null
   }
 
-  async start(): Promise<void> {
+  /**
+   * @param baseURL - if provided, navigate to this URL once capture is fully wired up.
+   *                  Omit for branch recording (already at the right page after silent replay).
+   */
+  async start(baseURL?: string): Promise<void> {
+    if (this.active) return
     this.active = true
     this.lastInteraction = null
     this.lastEmitted = null
@@ -182,6 +187,10 @@ export class CodegenCapture {
       this.attachNavListener(newPage)
       this.attributeOpensPage(alias)
     })
+
+    if (baseURL) {
+      await page.goto(baseURL)
+    }
   }
 
   /**

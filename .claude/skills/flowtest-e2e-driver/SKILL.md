@@ -35,6 +35,9 @@ description: 這個 skill 應該在需要對 FlowTest（這個 Electron app 本�
                                            是否真的共用同一份實作、注入順序是否正確、含雙引號
                                            的 aria-label 是否兩條路徑都正確跳脫（7 項檢查）——
                                            跟 a12 一樣**不用 `_electron`**
+    b8-codegencapture-merge.js          — Recorder 併入 CodegenCapture 之後，一般錄製仍會
+                                           navigate + 錄到 goto、分支錄製仍正確跳過 navigate
+                                           （7 項檢查）
 ```
 
 **`a12-assert-escape-press.js` / `c12-selector-helpers-unified.js` 是這個目錄裡唯二不驅動

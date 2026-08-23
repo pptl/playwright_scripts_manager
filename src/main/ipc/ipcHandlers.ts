@@ -16,7 +16,7 @@ import type {
   WorkspaceInfo,
 } from '../../shared/types'
 import { BrowserController } from '../playwright/browserController'
-import { Recorder } from '../playwright/recorder'
+import { CodegenCapture } from '../playwright/browserScripts/codegenCapture'
 import { Replayer, newReplaySession, isReplayCancelled } from '../playwright/replayer'
 import type { CancelSignal } from '../playwright/replayer'
 import { FlowStorage } from '../storage/flowStorage'
@@ -45,7 +45,7 @@ import {
 } from '../playwright/runner'
 
 let browserController: BrowserController | null = null
-let recorder: Recorder | null = null
+let recorder: CodegenCapture | null = null
 /** Stop switch for the in-flight replay — the signal only, never the Replayer: holding the
  *  Replayer module-level would retain the finished run's Page and session vars (see the
  *  handler-local note in REPLAY_TO_NODE). Nulled in that handler's finally. */
@@ -155,8 +155,8 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         // so every action arrives here finalised and is forwarded straight to the renderer.
         // Built into a local and published to `recorder` only once it is actually recording:
         // otherwise a ⏹ landing inside start() would call stop() on a half-started recorder.
-        const started = new Recorder(
-          page,
+        const started = new CodegenCapture(
+          page.context(),
           (action) => {
             win.webContents.send(IPC_CHANNELS.ACTION_CAPTURED, action)
           },

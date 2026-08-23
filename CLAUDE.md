@@ -38,12 +38,11 @@ Main Process (Node.js)         Preload Bridge         Renderer (React)
 ──────────────────────         ──────────────         ────────────────
 ipcHandlers.ts                 preload/index.ts       App.tsx
   ├── BrowserController          contextBridge          ├── WelcomeScreen (no workspace)
-  ├── Recorder                   window.electronAPI     └── Toolbar/FlowList/Canvas/PropertyPanel
+  ├── CodegenCapture              window.electronAPI     └── Toolbar/FlowList/Canvas/PropertyPanel
   ├── Replayer                                          Zustand stores (flowStore, projectStore, workspaceStore)
-  ├── CodegenCapture                                    Hooks (usePlaywright, usePlaywrightEvents,
-  ├── runner (bundled Playwright CLI)                         useWorkspace, useUndoRedo, useFlowManager)
-  ├── browserCheck                                      Canvas utils (treeLayout, groups, subflowExtraction)
-  ├── workspace ◄── every path below resolves through this
+  ├── runner (bundled Playwright CLI)                   Hooks (usePlaywright, usePlaywrightEvents,
+  ├── browserCheck                                             useWorkspace, useUndoRedo, useFlowManager)
+  ├── workspace ◄── every path below resolves through this     Canvas utils (treeLayout, groups, subflowExtraction)
   ├── FlowStorage
   ├── ProjectStorage
   ├── FixtureStorage
@@ -101,7 +100,7 @@ Replay *can* be cancelled (`REPLAY_CANCEL`), and cancelling **does not close the
 
 ### Recording pipeline
 
-1. `Recorder.start()` → `CodegenCapture.start()` extracts Playwright's `InjectedScript` from `playwright-core/lib/coreBundle.js` at runtime (parses the `source3` string literal via `captureShared.ts`) and injects it with `page.addInitScript()` **plus an immediate `page.evaluate()`** so listeners are active even when the page is already loaded (branch recording). Exposes `__flowtest_report`, `__flowtest_assert_report`, `__flowtest_assert_cancel`, `__flowtest_locator_resolved` via `page.exposeFunction()`.
+1. `CodegenCapture.start(baseURL?)` extracts Playwright's `InjectedScript` from `playwright-core/lib/coreBundle.js` at runtime (parses the `source3` string literal via `captureShared.ts`) and injects it with `page.addInitScript()` **plus an immediate `page.evaluate()`** so listeners are active even when the page is already loaded (branch recording). Exposes `__flowtest_report`, `__flowtest_assert_report`, `__flowtest_assert_cancel`, `__flowtest_locator_resolved` via `page.exposeFunction()`.
 2. Browser JS calls `__flowtest_report(rawEvent)` on click/fill/selectOption/check/uncheck/press
 3. `captureShared.ts` builds Actions with high-quality locators via `window.__ftGetLocator(el)` (Playwright's own `generateSelectorSimple` + `asLocator`), falling back to a CSS selector builder
 4. Navigation suppression: events within `NAV_SUPPRESSION_MS = 5000` after a click/press/fill are not re-recorded as `goto` (redirect side-effects). A 50 ms delay lets pending IPC settle so SPA navigations are also suppressed.
@@ -169,17 +168,17 @@ Each action resolves its target through two hops: `pageFor(action)` picks the pa
 When the user picks "從此節點分支錄製" from node N's context menu:
 1. `startBranchRecording(N)` sets `recordingHeadId = N`, passes `branchFromNodeId: N` + `branchNodes` + `ctx` (from `buildResolutionContext`) in `RecordingStartPayload`
 2. Main process relaunches the browser, then silently replays from root → N using a `Replayer` (200 ms/step default, no UI events)
-3. `Recorder.start()` begins WITHOUT navigating to `baseURL` — browser is already at N's page state
+3. `CodegenCapture.start()` begins WITHOUT navigating to `baseURL` — browser is already at N's page state
 4. New actions append as children of N; `recordingHeadId` tracks the last-added node so subsequent actions chain correctly
 
 #### Cancelling a recording start
 
-The silent replay in step 2 runs while the Toolbar already shows ⏹ 停止錄製, so that button has to mean something before a `Recorder` exists at all. `RECORDING_START` therefore installs a module-level switch, `activeRecordingStart`, and `RECORDING_STOP` fires it **before** `recorder?.stop()`.
+The silent replay in step 2 runs while the Toolbar already shows ⏹ 停止錄製, so that button has to mean something before a `CodegenCapture` exists at all. `RECORDING_START` therefore installs a module-level switch, `activeRecordingStart`, and `RECORDING_STOP` fires it **before** `recorder?.stop()`.
 
-- It is shaped `{ cancelled, kill }`-style like `activeRun`, **not** like `activeReplaySignal`, because what must be interruptible is a *sequence* — browser launch → silent replay → `Recorder.start()` — not one await. A signal alone covers only the replay; the `cancelled` flag covers the gaps around it, and each gap is checked. A cancel honoured in only some of them is indistinguishable from the bug this replaced (see below).
+- It is shaped `{ cancelled, kill }`-style like `activeRun`, **not** like `activeReplaySignal`, because what must be interruptible is a *sequence* — browser launch → silent replay → `CodegenCapture.start()` — not one await. A signal alone covers only the replay; the `cancelled` flag covers the gaps around it, and each gap is checked. A cancel honoured in only some of them is indistinguishable from the bug this replaced (see below).
 - The silent replay gets a real `ReplaySession` whose signal `cancel()` fires, so it interrupts mid-action exactly as `REPLAY_CANCEL` does — and likewise **leaves the browser open**.
 - `RECORDING_START` resolves with `RecordingStartResult`; `started: false` means the sequence was abandoned and no action will ever be captured, so the renderer clears `isRecording` / `recordingHeadId` itself.
-- The `Recorder` is built into a local and published to the module-level `recorder` only once `start()` has returned, so a ⏹ landing inside `start()` cannot stop a half-started recorder.
+- The `CodegenCapture` is built into a local and published to the module-level `recorder` only once `start()` has returned, so a ⏹ landing inside `start()` cannot stop a half-started recorder.
 - The `finally` clears the switch **only if it is still its own** — a cancelled start unwinds asynchronously, and a second ▶ can install its switch first; a bare `= null` would disarm it.
 
 **What this fixes:** `recorder` is null for the whole silent replay, so the old `RECORDING_STOP` was a no-op — while the renderer's `finally` had already cleared `recordingHeadId`. The replay then finished invisibly, built the recorder, and every captured action was appended with a null head: new nodes piled up as floating roots at the canvas start position while the UI showed nothing recording. `usePlaywrightEvents` also drops actions arriving while `isRecording` is false, as a backstop for the same failure.
@@ -437,10 +436,9 @@ Colours that appear in exactly one file and are tuned against their own dark bac
 | File | Role |
 |------|------|
 | `src/main/index.ts` | Electron entry — creates BrowserWindow, registers IPC handlers, opens external links in default browser |
-| `src/main/ipc/ipcHandlers.ts` | Central orchestrator — all 35 Renderer→Main channel handlers; attaches the error channel's sink; holds singleton BrowserController/Recorder (the Replayer is handler-local) plus the three cancel switches `activeReplaySignal` / `activeRun` / `activeRecordingStart` (switch only, never the object; cleared in a `finally`); pushes `WORKSPACE_RELOAD` after a successful passphrase change |
+| `src/main/ipc/ipcHandlers.ts` | Central orchestrator — all 35 Renderer→Main channel handlers; attaches the error channel's sink; holds singleton BrowserController/CodegenCapture (the Replayer is handler-local) plus the three cancel switches `activeReplaySignal` / `activeRun` / `activeRecordingStart` (switch only, never the object; cleared in a `finally`); pushes `WORKSPACE_RELOAD` after a successful passphrase change |
 | `src/main/playwright/browserController.ts` | Wraps playwright-core chromium: launch, context, page, auto-cleanup on disconnect |
-| `src/main/playwright/recorder.ts` | Thin wrapper around CodegenCapture; tracks recording state; pause/resume; assertion-pick entry |
-| `src/main/playwright/browserScripts/codegenCapture.ts` | Multi-page recorder: injects scripts (initScript + DOM capture + cursor + assertion dock, top-frame UI via `topFrameOnly`), exposes report/assert/locator-resolved functions, filters navigation, buffers input clicks + dblclick merge, assigns page aliases & `opensPage` (incl. `ACTION_UPDATED` retro-patch), builds iframe `framePath` chains, imports upload paths over CDP, drives in-browser locator picker |
+| `src/main/playwright/browserScripts/codegenCapture.ts` | Multi-page recorder: `start(baseURL?)` wires up scripts (initScript + DOM capture + cursor + assertion dock, top-frame UI via `topFrameOnly`) then optionally navigates (skipped for branch recording — already at the right page), reentrant-guarded; exposes report/assert/locator-resolved functions, filters navigation, buffers input clicks + dblclick merge, assigns page aliases & `opensPage` (incl. `ACTION_UPDATED` retro-patch), builds iframe `framePath` chains, imports upload paths over CDP, drives in-browser locator picker; `stop()`/`pause()`/`resume()` round out the recording lifecycle |
 | `src/main/playwright/browserScripts/captureShared.ts` | Shared utilities: extracts InjectedScript from coreBundle.js, DOM event capture (blacklist, Shadow DOM-aware), locator builder, nav-suppression logic, assertion dock + pick overlay scripts, in-browser locator-picker script, cursor highlight, `buildAction`. Lives in `browserScripts/` (with `codegenCapture.ts`) so it can carry its own DOM-enabled `tsconfig.recorder-dom.json` — see the Commands section |
 | `src/main/playwright/replayer.ts` | Action execution (incl. the three assert types); parentId-chain path traversal; fires REPLAY_NODE_* events; constructor `(page, baseURL, ctx: ResolutionContext, session?: ReplaySession)`; cancellation (`CancelSignal` / `ReplayCancelledError` / `race()` / interruptible `sleep()`), shared down to nested Replayers via the session; `pageFor`/`scopeFor` resolve `pageAlias` + `framePath`; `substituteOrigin` swaps goto origin for the project env var `domain`; `buildCodeVars` backs `code` nodes; resolves subFlowProfileMapping + envValues for callFlow at any depth |
 | `src/main/security/vault.ts` | **Private data**: scrypt + AES-256-GCM over an `enc:v1:iv:ct` envelope; `load`/`setup`/`unlock`/`lock`/`changePassphrase`, `encrypt`/`decrypt`/`decryptIfNeeded`/`decryptMap`/`isCiphertext`; vault meta merge-written into `.flowtest.json`, passphrase cached via `safeStorage` in userData |

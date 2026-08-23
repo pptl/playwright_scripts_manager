@@ -11,6 +11,7 @@ import {
 } from '../../shared/types'
 import { getWorkspaceRoot } from './workspace'
 import { writeJsonAtomic } from './atomicWrite'
+import { readJsonDir } from './readJsonDir'
 import { reportToUser, describeError, isNotFound } from '../errorChannel'
 
 function projectsDir(): string {
@@ -85,26 +86,16 @@ export class ProjectStorage {
     await ProjectStorage.ensureDefault()
     const files = await fs.readdir(projectsDir())
     const results: Pick<Project, 'id' | 'name' | 'updatedAt'>[] = []
-    // One report for the whole scan — see the same note in FlowStorage.list.
-    const corrupted: string[] = []
 
-    for (const file of files) {
-      if (!file.endsWith('.json')) continue
-      try {
-        const raw = await fs.readFile(join(projectsDir(), file), 'utf-8')
-        const project = JSON.parse(raw) as Project
-        results.push({ id: project.id, name: project.name, updatedAt: project.updatedAt })
-      } catch (err) {
-        corrupted.push(`${file} — ${describeError(err)}`)
-      }
-    }
-
-    if (corrupted.length) {
-      reportToUser(
+    await readJsonDir<Project>(
+      projectsDir(),
+      files,
+      (project) => results.push({ id: project.id, name: project.name, updatedAt: project.updatedAt }),
+      (corrupted) => reportToUser(
         `有 ${corrupted.length} 個專案檔案無法讀取，已跳過`,
         `${corrupted.join('\n')}\n\n這些專案底下的流程會歸到「未分類」。`,
-      )
-    }
+      ),
+    )
 
     results.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     return results

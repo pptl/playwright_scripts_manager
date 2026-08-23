@@ -7,7 +7,7 @@ import { join } from 'path'
  * PLAYWRIGHT_BROWSERS_PATH wins when set (0 means "next to the package", which we
  * cannot enumerate reliably — treated as "unknown", see hasChromium).
  */
-export function browsersRoot(): string | null {
+function browsersRoot(): string | null {
   const override = process.env.PLAYWRIGHT_BROWSERS_PATH
   if (override) return override === '0' ? null : override
 

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { v4 as uuidv4 } from 'uuid'
-import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile } from '../../shared/types'
+import type { Flow, FlowListItem, FlowNode, Action, NodePosition, FlowProfile, ProfileVariable } from '../../shared/types'
 import { computeGroupAwareLayout } from '../utils/groups'
 import { persistFlow } from './persistence'
 import { reportError } from './errorStore'
@@ -42,6 +42,18 @@ const historySuppressed = () => suppressDepth > 0
 /** True when the node graph itself actually changed between two flow snapshots. */
 const graphChanged = (a: Flow, b: Flow) =>
   a.nodes !== b.nodes || a.rootNodeId !== b.rootNodeId || a.groups !== b.groups
+
+/** Deep-clones a profile's vars for a new profile (addProfile) or a copy (duplicateProfile),
+ *  carrying envValues/secret across so a clone never silently drops the private flag. */
+function cloneProfileVars(vars: ProfileVariable[]): ProfileVariable[] {
+  return vars.map((v) => ({
+    key: v.key,
+    value: v.value,
+    description: v.description ?? '',
+    ...(v.envValues ? { envValues: { ...v.envValues } } : {}),
+    ...(v.secret ? { secret: true } : {}),
+  }))
+}
 
 interface FlowStore {
   // State
@@ -251,7 +263,10 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       nodes: [],
       rootNodeId: '',
     }
-    set({ currentFlow: flow, activeProfileId: null })
+    // Go through the same reset as opening any other flow — a bare `set` here left
+    // selectedNodeId / replayStatus / replayErrors / recordingHeadId / undo history / flowEpoch
+    // untouched for callers that skip their own follow-up setCurrentFlow (see A17).
+    get().setCurrentFlow(flow)
     return flow
   },
 
@@ -802,13 +817,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       name,
       // Carry envValues and secret across: a new profile that silently dropped the
       // private flag would store the same key in the clear.
-      vars: existingVars.map((v) => ({
-        key: v.key,
-        value: v.value,
-        description: v.description ?? '',
-        ...(v.envValues ? { envValues: { ...v.envValues } } : {}),
-        ...(v.secret ? { secret: true } : {}),
-      })),
+      vars: cloneProfileVars(existingVars),
     }
     // Extend all callFlow node mappings to include the new profile.
     // Default to the same sub-flow profile as the last existing profile (best-guess default).
@@ -885,13 +894,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       id: uuidv4(),
       name: `${source.name}-副本`,
       // Unlike addProfile, a copy must carry the per-environment overrides too.
-      vars: source.vars.map((v) => ({
-        key: v.key,
-        value: v.value,
-        description: v.description ?? '',
-        ...(v.envValues ? { envValues: { ...v.envValues } } : {}),
-        ...(v.secret ? { secret: true } : {}),
-      })),
+      vars: cloneProfileVars(source.vars),
     }
     // Extend all callFlow node mappings, inheriting the source profile's mapping.
     const updatedNodes = flow.nodes.map((n) => {

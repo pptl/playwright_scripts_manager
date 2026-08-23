@@ -6,6 +6,14 @@ import { useFlowStore } from '../../stores/flowStore'
 import { useVault } from '../../hooks/useVault'
 import { notify } from '../../stores/confirmStore'
 import { formatError } from '../../stores/errorStore'
+import { Input, FieldLabel } from '../common/Input'
+import { Button } from '../common/Button'
+import { token } from '../../styles/tokens'
+
+/** Amber used for the private-value border. No token matches this exact shade
+ *  (--ft-warning-dark is a darker #78350f) — kept as a local literal per the
+ *  single-file-use convention documented in tokens.css. */
+const SECRET_BORDER = '#a16207'
 
 const isCiphertext = (v: string): boolean => v.startsWith(SECRET_ENVELOPE_PREFIX)
 
@@ -236,11 +244,12 @@ export function PropertyPanel() {
           <>
             {/* Description */}
             <Field label="描述">
-              <input
+              <Input
+                block={false}
                 value={desc}
                 onChange={(e) => setDesc(e.target.value)}
                 onKeyDown={fieldKeyDown}
-                style={inputStyle}
+                style={{ padding: '5px 8px', fontSize: 12, width: 200 }}
               />
             </Field>
 
@@ -250,11 +259,12 @@ export function PropertyPanel() {
               selectedNode.action.type !== 'callFlow' &&
               selectedNode.action.type !== 'code' && (
               <Field label="Selector">
-                <input
+                <Input
+                  block={false}
                   value={selector}
                   onChange={(e) => setSelector(e.target.value)}
                   onKeyDown={fieldKeyDown}
-                  style={inputStyle}
+                  style={{ padding: '5px 8px', fontSize: 12, width: 200 }}
                 />
               </Field>
             )}
@@ -264,11 +274,12 @@ export function PropertyPanel() {
               selectedNode.action.type !== 'callFlow' &&
               selectedNode.action.locatorExpr !== undefined && (
               <Field label="Locator">
-                <input
+                <Input
+                  block={false}
                   value={locatorExpr}
                   onChange={(e) => setLocatorExpr(e.target.value)}
                   onKeyDown={fieldKeyDown}
-                  style={{ ...inputStyle, width: 260 }}
+                  style={{ padding: '5px 8px', fontSize: 12, width: 260 }}
                 />
                 <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
                   可插入變數，如 <code style={{ color: '#7dd3fc' }}>{'{{randomText}}'}</code>
@@ -284,33 +295,47 @@ export function PropertyPanel() {
                 selectedNode.action.type === 'upload' ? '檔案路徑' : '值'
               }>
                 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <input
+                  <Input
+                    block={false}
                     type={secret ? 'password' : 'text'}
                     value={value}
                     onChange={(e) => { setValue(e.target.value); setValueDirty(true) }}
                     onKeyDown={fieldKeyDown}
                     placeholder={secret && !valueDirty ? '（已加密，輸入以覆寫）' : undefined}
-                    style={{ ...inputStyle, ...(secret ? { borderColor: '#a16207' } : {}) }}
+                    style={{
+                      padding: '5px 8px',
+                      fontSize: 12,
+                      width: 200,
+                      ...(secret ? { borderColor: SECRET_BORDER } : {}),
+                    }}
                   />
-                  {isSecretable(selectedNode.action.type) && (
-                    <button
+                  {isSecretable(selectedNode.action) && (
+                    <Button
+                      tone="ghost"
+                      size="sm"
                       onClick={() => void toggleSecret()}
                       title={secret
                         ? '目前為私密資料（加密儲存）— 點擊取消'
                         : '設為私密資料：值會加密後才寫入檔案，描述中的明文也會一併遮蔽'}
                       style={{
-                        ...pickBtnStyle,
+                        whiteSpace: 'nowrap',
                         opacity: secret ? 1 : 0.45,
                         filter: secret ? undefined : 'grayscale(1)',
                       }}
                     >
                       🔐
-                    </button>
+                    </Button>
                   )}
                   {selectedNode.action.type === 'upload' && (
-                    <button onClick={pickFiles} style={pickBtnStyle} title="選擇檔案（會複製到 fixtures/）">
+                    <Button
+                      tone="ghost"
+                      size="sm"
+                      onClick={pickFiles}
+                      title="選擇檔案（會複製到 fixtures/）"
+                      style={{ whiteSpace: 'nowrap' }}
+                    >
                       📂 選擇檔案…
-                    </button>
+                    </Button>
                   )}
                 </div>
                 <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
@@ -418,9 +443,9 @@ export function PropertyPanel() {
             )}
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button onClick={() => void saveNode()} style={saveBtnStyle}>
+              <Button tone="primary" size="sm" onClick={() => void saveNode()}>
                 儲存
-              </button>
+              </Button>
             </div>
           </>
         ) : null}
@@ -432,43 +457,12 @@ export function PropertyPanel() {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
-      <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600, textTransform: 'uppercase' }}>
+      <FieldLabel
+        style={{ fontSize: 11, color: token.textMuted, fontWeight: 600, textTransform: 'uppercase', marginBottom: 0 }}
+      >
         {label}
-      </span>
+      </FieldLabel>
       {children}
     </div>
   )
-}
-
-const inputStyle: React.CSSProperties = {
-  padding: '5px 8px',
-  background: '#0f172a',
-  border: '1px solid #334155',
-  borderRadius: 5,
-  color: '#e2e8f0',
-  fontSize: 12,
-  outline: 'none',
-  width: 200,
-}
-
-const pickBtnStyle: React.CSSProperties = {
-  padding: '5px 10px',
-  borderRadius: 5,
-  border: '1px solid #334155',
-  background: '#0f172a',
-  color: '#cbd5e1',
-  cursor: 'pointer',
-  fontSize: 12,
-  whiteSpace: 'nowrap',
-}
-
-const saveBtnStyle: React.CSSProperties = {
-  padding: '5px 16px',
-  borderRadius: 5,
-  border: 'none',
-  background: '#3b82f6',
-  color: '#fff',
-  cursor: 'pointer',
-  fontSize: 12,
-  fontWeight: 600,
 }

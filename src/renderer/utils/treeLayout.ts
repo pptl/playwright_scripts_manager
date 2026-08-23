@@ -25,13 +25,17 @@ export interface NodeSize {
  *  An expanded group passes its full box footprint here so the tree reserves space for it. */
 export type SizeOf = (nodeId: string) => NodeSize
 
+function defaultSizeOf(nodeMap: Map<string, FlowNode>): SizeOf {
+  return (id) => ({ width: NODE_WIDTH, height: nodeHeightOf(nodeMap.get(id)) })
+}
+
 export function computeTreeLayout(
   nodes: FlowNode[],
   rootNodeId: string,
   sizeOf?: SizeOf,
 ): Map<string, NodePosition> {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-  const resolvedSizeOf: SizeOf = sizeOf ?? ((id) => ({ width: NODE_WIDTH, height: nodeHeightOf(nodeMap.get(id)) }))
+  const resolvedSizeOf: SizeOf = sizeOf ?? defaultSizeOf(nodeMap)
   const positions = new Map<string, NodePosition>()
 
   function subtreeWidth(nodeId: string): number {
@@ -78,7 +82,7 @@ export function computeAllRootsLayout(
   sizeOf?: SizeOf,
 ): Map<string, NodePosition> {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-  const resolvedSizeOf: SizeOf = sizeOf ?? ((id) => ({ width: NODE_WIDTH, height: nodeHeightOf(nodeMap.get(id)) }))
+  const resolvedSizeOf: SizeOf = sizeOf ?? defaultSizeOf(nodeMap)
   const result = new Map<string, NodePosition>()
   const roots = nodes
     .filter((n) => n.parentId === null)

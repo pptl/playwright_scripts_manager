@@ -30,7 +30,7 @@ import { usePlaywright } from '../../hooks/usePlaywright'
 import { CallFlowModal } from '../CallFlowModal/CallFlowModal'
 import { AddNodeModal } from '../AddNodeModal/AddNodeModal'
 import type { Action, Flow } from '@shared/types'
-import { hasValueField } from '@shared/actionFields'
+import { hasValueField, TYPE_COLORS } from '@shared/actionFields'
 import { computeTreeLayout } from '../../utils/treeLayout'
 import { validateExtraction, extractSubflow } from '../../utils/subflowExtraction'
 import { getGroupBoundary, groupBoxRect } from '../../utils/groups'
@@ -632,13 +632,7 @@ function FlowCanvasInner() {
           nodeColor={(n) => {
             const d = n.data as ActionNodeData
             const type = d?.flowNode?.action?.type
-            const colors: Record<string, string> = {
-              goto: '#3b82f6',
-              fill: '#8b5cf6',
-              selectOption: '#8b5cf6',
-              click: '#6b7280',
-            }
-            return colors[type] ?? '#6b7280'
+            return (type && TYPE_COLORS[type]) ?? '#6b7280'
           }}
           style={{ background: '#1e293b' }}
         />

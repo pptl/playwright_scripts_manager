@@ -18,22 +18,9 @@ import { menuSurfaceStyle } from '../common/Menu'
 import { token, zIndex } from '../../styles/tokens'
 
 const btn = (label: string, onClick: () => void, disabled = false, danger = false) => (
-  <button
-    onClick={onClick}
-    disabled={disabled}
-    style={{
-      padding: '6px 14px',
-      borderRadius: 6,
-      border: 'none',
-      cursor: disabled ? 'not-allowed' : 'pointer',
-      background: danger ? token.danger : disabled ? token.bgDisabled : token.accent,
-      color: disabled ? token.textDisabled : token.textOnAccent,
-      fontSize: 13,
-      fontWeight: 500,
-    }}
-  >
+  <Button tone={danger ? 'danger' : 'primary'} size="md" disabled={disabled} onClick={onClick}>
     {label}
-  </button>
+  </Button>
 )
 
 const workspacePathStyle: React.CSSProperties = {

@@ -38,7 +38,7 @@ import { setErrorSink, drainBufferedErrors } from '../errorChannel'
 import { hasChromium, isMissingBrowserError } from '../playwright/browserCheck'
 import {
   resolvePlaywrightCli,
-  runPlaywright,
+  runTracked,
   killProcessOnPort,
   MISSING_CLI_MESSAGE,
   HTML_REPORT_DIR,
@@ -60,6 +60,22 @@ let activeRun: { cancelled: boolean; kill: () => void } | null = null
  *  alone would only cover the replay; the `cancelled` flag covers every gap around it.
  *  Nulled in that handler's finally. */
 let activeRecordingStart: { cancelled: boolean; cancel: () => void } | null = null
+
+/** Registers `run` as the shared activeRun switch for the duration of `body`, clearing it
+ *  in a finally — the {cancelled,kill} + activeRun + finally boilerplate RUN_TESTS and
+ *  BROWSER_INSTALL both need because they share one ⏹ button. `body` gets `run` so it can
+ *  check `run.cancelled` in whatever gap its own pre-spawn work creates. */
+async function withActiveRun<T>(
+  body: (run: { cancelled: boolean; kill: () => void }) => Promise<T>,
+): Promise<T> {
+  const run = { cancelled: false, kill: () => {} }
+  activeRun = run
+  try {
+    return await body(run)
+  } finally {
+    activeRun = null
+  }
+}
 
 export function registerIpcHandlers(win: BrowserWindow): void {
   // Give the error channel its window. Reports raised before the renderer drains (every
@@ -310,10 +326,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     // Registered before the export phase so a ⏹ landing there is still honoured —
     // ScriptExporter.export cannot itself be interrupted, but it takes milliseconds and we
     // check the flag the moment it returns, before anything is spawned.
-    const run = { cancelled: false, kill: () => {} }
-    activeRun = run
-
-    try {
+    await withActiveRun(async (run) => {
       const cli = resolvePlaywrightCli()
       if (!cli) {
         out(MISSING_CLI_MESSAGE)
@@ -356,12 +369,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
       out(`✓ 執行器: ${cli.path} (v${cli.version})\n`)
       out(`▶ playwright ${args.join(' ')}\n\n`)
 
-      const handle = runPlaywright(cli, args, cwd, out, secretEnv)
-      run.kill = handle.cancel
-      // ⏹ can land in the gap between the spawn above and the assignment.
-      if (run.cancelled) handle.cancel()
-
-      const { exitCode, output, cancelled } = await handle.promise
+      const { exitCode, output, cancelled } = await runTracked(run, cli, args, cwd, out, secretEnv)
 
       if (cancelled) {
         out('\n⏹ 測試已中止\n')
@@ -371,9 +379,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         out('\n⚠ 缺少 Chromium 瀏覽器 — 請點擊「安裝瀏覽器」後重試。\n')
       }
       finish(exitCode)
-    } finally {
-      activeRun = null
-    }
+    })
   })
 
   ipcMain.handle(IPC_CHANNELS.TEST_CANCEL, async () => {
@@ -410,14 +416,8 @@ export function registerIpcHandlers(win: BrowserWindow): void {
     // Shares activeRun with RUN_TESTS: both stream into the same TestOutputModal, so its
     // ⏹ has to reach whichever one is running. Aborting a 150 MB download on a bad
     // connection is arguably the more valuable of the two.
-    const run = { cancelled: false, kill: () => {} }
-    activeRun = run
-    try {
-      const handle = runPlaywright(cli, ['install', 'chromium'], getWorkspaceRoot(), out)
-      run.kill = handle.cancel
-      if (run.cancelled) handle.cancel()
-
-      const { exitCode, cancelled } = await handle.promise
+    return withActiveRun(async (run) => {
+      const { exitCode, cancelled } = await runTracked(run, cli, ['install', 'chromium'], getWorkspaceRoot(), out)
       out(cancelled
         ? '\n⏹ 安裝已中止\n'
         : exitCode === 0 ? '\n✓ 瀏覽器安裝完成\n' : `\n✗ 安裝失敗 (exit ${exitCode})\n`)
@@ -427,9 +427,7 @@ export function registerIpcHandlers(win: BrowserWindow): void {
         cancelled,
       })
       return exitCode === 0 && !cancelled
-    } finally {
-      activeRun = null
-    }
+    })
   })
 
   // ── Workspace ────────────────────────────────────────────

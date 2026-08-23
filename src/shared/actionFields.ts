@@ -59,6 +59,12 @@ const SECRETABLE_TYPES: ReadonlySet<ActionType> = new Set([
   'fill', 'press', 'selectOption', 'assertText', 'assertValue',
 ])
 
-export function isSecretable(type: ActionType): boolean {
-  return SECRETABLE_TYPES.has(type)
+export function isSecretable(action: { type: ActionType; values?: string[] }): boolean {
+  if (!SECRETABLE_TYPES.has(action.type)) return false
+  // A multi-select's values[] takes precedence over `value` at replay/export, but only
+  // `value` can be encrypted — marking it secret would leave the real selections in
+  // plaintext while giving a false sense of protection. Same reasoning as the `upload`
+  // exclusion above.
+  if (action.type === 'selectOption' && (action.values?.length ?? 0) > 1) return false
+  return true
 }

@@ -229,6 +229,27 @@ export function runPlaywright(
   }
 }
 
+/**
+ * `runPlaywright` plus the cancel-race wiring every caller needs: wire `run.kill` to the
+ * handle the moment it exists, then immediately re-check `run.cancelled` — a ⏹ can land in
+ * the gap between deciding to spawn and this handle existing, and that gap is real (RUN_TESTS
+ * has an async export phase before it ever gets here). Shared by RUN_TESTS and
+ * BROWSER_INSTALL, the only two runPlaywright call sites.
+ */
+export function runTracked(
+  run: { cancelled: boolean; kill: () => void },
+  cli: PlaywrightCli,
+  args: string[],
+  cwd: string,
+  onOutput: (chunk: string) => void,
+  extraEnv?: Record<string, string>,
+): Promise<SpawnResult> {
+  const handle = runPlaywright(cli, args, cwd, onOutput, extraEnv)
+  run.kill = handle.cancel
+  if (run.cancelled) handle.cancel()
+  return handle.promise
+}
+
 export const MISSING_CLI_MESSAGE =
   '✗ 找不到內建的測試執行器 (@playwright/test)。\n' +
   '  這是打包問題，不是設定問題 — 請確認建置時有包含並解壓 node_modules/@playwright/test。\n'

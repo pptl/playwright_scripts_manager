@@ -12,9 +12,9 @@ import { token, zIndex } from '../../styles/tokens'
  * The catcher approach won: it dismisses on any outside mousedown without a ref,
  * an effect, or a listener that has to be torn down.
  *
- * `MenuSurface` is just the card — for anchored dropdowns that position themselves
- * relative to a button. `Menu` adds the catcher and absolute positioning at a
- * point, for right-click menus.
+ * `menuSurfaceStyle` is the card's look — consumed directly by anchored dropdowns
+ * that position themselves relative to a button (Toolbar), and by `Menu` below,
+ * which adds the catcher and absolute positioning at a point for right-click menus.
  */
 
 export const menuSurfaceStyle: React.CSSProperties = {
@@ -23,16 +23,6 @@ export const menuSurfaceStyle: React.CSSProperties = {
   borderRadius: 8,
   padding: '4px 0',
   boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-}
-
-export function MenuSurface({
-  children,
-  style,
-}: {
-  children: React.ReactNode
-  style?: React.CSSProperties
-}) {
-  return <div style={{ ...menuSurfaceStyle, ...style }}>{children}</div>
 }
 
 export function Menu({
@@ -52,9 +42,9 @@ export function Menu({
 }) {
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: z }} onMouseDown={onClose}>
-      <MenuSurface style={{ position: 'absolute', left: x, top: y, minWidth }}>
+      <div style={{ ...menuSurfaceStyle, position: 'absolute', left: x, top: y, minWidth }}>
         <div onMouseDown={(e) => e.stopPropagation()}>{children}</div>
-      </MenuSurface>
+      </div>
     </div>
   )
 }

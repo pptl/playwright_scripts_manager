@@ -4,6 +4,7 @@ import type { Flow, FlowListItem } from '../../shared/types'
 import { isCallFlowAction } from '../../shared/types'
 import { getWorkspaceRoot } from './workspace'
 import { writeJsonAtomic } from './atomicWrite'
+import { readJsonDir } from './readJsonDir'
 import { reportToUser, describeError, isNotFound } from '../errorChannel'
 
 function flowsDir(): string {
@@ -72,15 +73,11 @@ export class FlowStorage {
     const summaries: Omit<FlowListItem, 'refCount'>[] = []
     // subFlowId → how many callFlow nodes (across all flows) reference it
     const usage = new Map<string, number>()
-    // Collected rather than reported per file: one unreadable directory would otherwise
-    // raise a toast per file and blow straight past the 4-deep stack.
-    const corrupted: string[] = []
 
-    for (const file of files) {
-      if (!file.endsWith('.json')) continue
-      try {
-        const raw = await fs.readFile(join(flowsDir(), file), 'utf-8')
-        const flow = JSON.parse(raw) as Flow
+    await readJsonDir<Flow>(
+      flowsDir(),
+      files,
+      (flow) => {
         summaries.push({
           id: flow.id,
           name: flow.name,
@@ -94,17 +91,12 @@ export class FlowStorage {
             usage.set(subId, (usage.get(subId) ?? 0) + 1)
           }
         }
-      } catch (err) {
-        corrupted.push(`${file} — ${describeError(err)}`)
-      }
-    }
-
-    if (corrupted.length) {
-      reportToUser(
+      },
+      (corrupted) => reportToUser(
         `有 ${corrupted.length} 個流程檔案無法讀取，已跳過`,
         `${corrupted.join('\n')}\n\n這些流程不會出現在清單中。`,
-      )
-    }
+      ),
+    )
 
     return summaries
       .map((s) => ({ ...s, refCount: usage.get(s.id) ?? 0 }))

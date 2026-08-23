@@ -4,10 +4,12 @@ import { isCallFlowAction } from '@shared/types'
 import type { Flow } from '@shared/types'
 import { confirm } from '../../stores/confirmStore'
 import { SecretValue } from '../common/SecretValue'
+import { SidebarSection } from '../common/SidebarSection'
+import { useCopyBadge } from '../../hooks/useCopyBadge'
 
 export function SessionVarList() {
   const { currentFlow, updateNode, runWithoutHistory } = useFlowStore()
-  const [copiedName, setCopiedName] = useState<string | null>(null)
+  const { copied, copy } = useCopyBadge()
   const [subFlowVars, setSubFlowVars] = useState<{ flowName: string; varName: string; placeholder: string }[]>([])
 
   const sessionVars = (currentFlow?.nodes ?? [])
@@ -72,199 +74,165 @@ export function SessionVarList() {
     })
   }
 
-  const copyToClipboard = (placeholder: string, varName: string) => {
-    navigator.clipboard.writeText(placeholder).then(() => {
-      setCopiedName(varName)
-      setTimeout(() => setCopiedName(null), 1500)
-    })
-  }
-
   return (
-    <div
-      style={{
-        background: '#1e293b',
-        borderTop: '1px solid #334155',
-        display: 'flex',
-        flexDirection: 'column',
-        flexShrink: 0,
-        maxHeight: 220,
-        overflow: 'hidden',
-      }}
-    >
-      <div
-        style={{
-          padding: '12px 14px',
-          borderBottom: '1px solid #334155',
-          fontSize: 12,
-          color: '#64748b',
-          fontWeight: 600,
-          textTransform: 'uppercase',
-          letterSpacing: '0.06em',
-          flexShrink: 0,
-        }}
-      >
-        區域變數
-      </div>
-
-      <div style={{ overflowY: 'auto', flex: 1 }}>
-        {/* Sub-flow session vars from ancestor callFlow nodes */}
-        {subFlowVars.length > 0 && (
-          <>
-            <div style={{
-              padding: '8px 14px 4px',
-              fontSize: 10,
-              color: '#f59e0b',
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: '0.06em',
-              borderBottom: '1px solid #334155',
-            }}>
-              ⛓ 子流程變數
-            </div>
-            {subFlowVars.map((v) => (
-              <div
-                key={`subflow-${v.varName}`}
-                onClick={() => copyToClipboard(v.placeholder, `subflow-${v.varName}`)}
-                title={`點擊複製 ${v.placeholder}（來自 ${v.flowName}）`}
-                style={{
-                  padding: '6px 14px',
-                  cursor: 'pointer',
-                  borderBottom: '1px solid #0f172a',
-                  userSelect: 'none',
-                }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#1c1a12' }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <code style={{
-                    fontSize: 11,
-                    background: '#0f172a',
-                    color: '#f59e0b',
-                    padding: '1px 5px',
-                    borderRadius: 3,
-                    border: '1px solid #78350f',
-                  }}>
-                    {v.placeholder}
-                  </code>
-                  {copiedName === `subflow-${v.varName}` && (
-                    <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>已複製</span>
-                  )}
-                </div>
-                <div style={{ fontSize: 10, color: '#78350f', marginTop: 2 }}>{v.flowName}</div>
-              </div>
-            ))}
-          </>
-        )}
-
-        {sessionVars.length === 0 && subFlowVars.length === 0 ? (
-          <div style={{ padding: '16px 14px', color: '#64748b', fontSize: 12 }}>
-            尚無區域變數。
-            <br />
-            <span style={{ color: '#334155', marginTop: 6, display: 'block' }}>
-              右鍵節點 →「將值儲存為區域變數」
-            </span>
+    <SidebarSection title="區域變數">
+      {/* Sub-flow session vars from ancestor callFlow nodes */}
+      {subFlowVars.length > 0 && (
+        <>
+          <div style={{
+            padding: '8px 14px 4px',
+            fontSize: 10,
+            color: '#f59e0b',
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em',
+            borderBottom: '1px solid #334155',
+          }}>
+            ⛓ 子流程變數
           </div>
-        ) : sessionVars.length > 0 ? (
-          sessionVars.map((v) => (
+          {subFlowVars.map((v) => (
             <div
-              key={v.varName}
-              onClick={() => copyToClipboard(v.placeholder, v.varName)}
-              title={`點擊複製 ${v.placeholder}`}
+              key={`subflow-${v.varName}`}
+              onClick={() => copy(v.placeholder, `subflow-${v.varName}`)}
+              title={`點擊複製 ${v.placeholder}（來自 ${v.flowName}）`}
               style={{
-                padding: '8px 14px',
+                padding: '6px 14px',
                 cursor: 'pointer',
                 borderBottom: '1px solid #0f172a',
                 userSelect: 'none',
               }}
-              onMouseEnter={(e) => {
-                (e.currentTarget as HTMLDivElement).style.background = '#1e3a5f'
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLDivElement).style.background = 'transparent'
-              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#1c1a12' }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                <code
-                  style={{
-                    fontSize: 11,
-                    background: '#0f172a',
-                    color: '#a78bfa',
-                    padding: '1px 5px',
-                    borderRadius: 3,
-                    border: '1px solid #4c1d95',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <code style={{
+                  fontSize: 11,
+                  background: '#0f172a',
+                  color: '#f59e0b',
+                  padding: '1px 5px',
+                  borderRadius: 3,
+                  border: '1px solid #78350f',
+                }}>
                   {v.placeholder}
                 </code>
-                {copiedName === v.varName && (
+                {copied === `subflow-${v.varName}` && (
                   <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>已複製</span>
                 )}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    deleteVar(v.nodeId)
-                  }}
-                  title="刪除變數"
-                  style={{
-                    flexShrink: 0,
-                    marginLeft: 'auto',
-                    background: 'transparent',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: '#f87171',
-                    padding: '2px 4px',
-                    borderRadius: 3,
-                    fontSize: 16,
-                    lineHeight: 1,
-                    opacity: 0.85,
-                  }}
-                  onMouseEnter={(e) => {
-                    e.stopPropagation()
-                    ;(e.currentTarget as HTMLButtonElement).style.opacity = '1'
-                    ;(e.currentTarget as HTMLButtonElement).style.background = '#450a0a'
-                  }}
-                  onMouseLeave={(e) => {
-                    e.stopPropagation()
-                    ;(e.currentTarget as HTMLButtonElement).style.opacity = '0.7'
-                    ;(e.currentTarget as HTMLButtonElement).style.background = 'transparent'
-                  }}
-                >
-                  🗑
-                </button>
               </div>
-              <div
+              <div style={{ fontSize: 10, color: '#78350f', marginTop: 2 }}>{v.flowName}</div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {sessionVars.length === 0 && subFlowVars.length === 0 ? (
+        <div style={{ padding: '16px 14px', color: '#64748b', fontSize: 12 }}>
+          尚無區域變數。
+          <br />
+          <span style={{ color: '#334155', marginTop: 6, display: 'block' }}>
+            右鍵節點 →「將值儲存為區域變數」
+          </span>
+        </div>
+      ) : sessionVars.length > 0 ? (
+        sessionVars.map((v) => (
+          <div
+            key={v.varName}
+            onClick={() => copy(v.placeholder, v.varName)}
+            title={`點擊複製 ${v.placeholder}`}
+            style={{
+              padding: '8px 14px',
+              cursor: 'pointer',
+              borderBottom: '1px solid #0f172a',
+              userSelect: 'none',
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLDivElement).style.background = '#1e3a5f'
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLDivElement).style.background = 'transparent'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+              <code
                 style={{
                   fontSize: 11,
-                  color: '#94a3b8',
+                  background: '#0f172a',
+                  color: '#a78bfa',
+                  padding: '1px 5px',
+                  borderRadius: 3,
+                  border: '1px solid #4c1d95',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                 }}
               >
-                {v.description}
-              </div>
-              {v.value && (
-                <div
-                  onClick={(e) => e.stopPropagation()}
-                  style={{
-                    fontSize: 10,
-                    color: '#64748b',
-                    marginTop: 2,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  值：<SecretValue value={v.value} secret={v.secret} />
-                </div>
+                {v.placeholder}
+              </code>
+              {copied === v.varName && (
+                <span style={{ fontSize: 10, color: '#4ade80', flexShrink: 0 }}>已複製</span>
               )}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  deleteVar(v.nodeId)
+                }}
+                title="刪除變數"
+                style={{
+                  flexShrink: 0,
+                  marginLeft: 'auto',
+                  background: 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  color: '#f87171',
+                  padding: '2px 4px',
+                  borderRadius: 3,
+                  fontSize: 16,
+                  lineHeight: 1,
+                  opacity: 0.85,
+                }}
+                onMouseEnter={(e) => {
+                  e.stopPropagation()
+                  ;(e.currentTarget as HTMLButtonElement).style.opacity = '1'
+                  ;(e.currentTarget as HTMLButtonElement).style.background = '#450a0a'
+                }}
+                onMouseLeave={(e) => {
+                  e.stopPropagation()
+                  ;(e.currentTarget as HTMLButtonElement).style.opacity = '0.7'
+                  ;(e.currentTarget as HTMLButtonElement).style.background = 'transparent'
+                }}
+              >
+                🗑
+              </button>
             </div>
-          ))
-        ) : null}
-      </div>
-    </div>
+            <div
+              style={{
+                fontSize: 11,
+                color: '#94a3b8',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {v.description}
+            </div>
+            {v.value && (
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  fontSize: 10,
+                  color: '#64748b',
+                  marginTop: 2,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                值：<SecretValue value={v.value} secret={v.secret} />
+              </div>
+            )}
+          </div>
+        ))
+      ) : null}
+    </SidebarSection>
   )
 }

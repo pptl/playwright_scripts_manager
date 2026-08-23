@@ -713,6 +713,18 @@ export function getAssertionToolbarScript(): string {
       if (window.__ft_setDockPicking) window.__ft_setDockPicking(false);
     }
 
+    // Both exit paths (click-to-confirm and Escape-to-cancel) must tear down the same
+    // overlay/tooltip/highlight/dock state AND the same keydown listener — routed through
+    // one function so neither path can drift from the other and leak the listener.
+    var escHandler;
+    function cleanup() {
+      overlay.remove();
+      tooltip.remove();
+      clearHighlight();
+      finish();
+      window.removeEventListener('keydown', escHandler, true);
+    }
+
     var overlay = document.createElement('div');
     overlay.id = '__ft_pick_overlay';
     overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:transparent;';
@@ -745,10 +757,7 @@ export function getAssertionToolbarScript(): string {
     overlay.addEventListener('click', function(e) {
       overlay.style.display = 'none';
       var el = document.elementFromPoint(e.clientX, e.clientY);
-      overlay.remove();
-      tooltip.remove();
-      clearHighlight();
-      finish();
+      cleanup();
       if (!el) return;
       var selector = generateCSSSelector(el);
       var locatorExpr = getLocatorExpr(el);
@@ -763,16 +772,13 @@ export function getAssertionToolbarScript(): string {
       } catch(e) {}
     });
 
-    window.addEventListener('keydown', function escHandler(e) {
+    escHandler = function(e) {
       if (e.key !== 'Escape') return;
       e.stopPropagation();
-      overlay.remove();
-      tooltip.remove();
-      clearHighlight();
-      finish();
-      window.removeEventListener('keydown', escHandler, true);
+      cleanup();
       try { window.__flowtest_assert_cancel(); } catch(e) {}
-    }, true);
+    };
+    window.addEventListener('keydown', escHandler, true);
   };
 
   // ── Dock UI ────────────────────────────────────────────────────────────────

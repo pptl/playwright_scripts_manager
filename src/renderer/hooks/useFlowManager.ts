@@ -13,6 +13,10 @@ import { v4 as uuidv4 } from 'uuid'
  * every sequence that spans both domains lives here, which is what keeps each store
  * readable as a closed unit.
  */
+// Bumped on every openFlow call, compared after each await, so a call superseded by a
+// newer one (rapid clicks in FlowList) bails instead of committing stale state on top.
+let openFlowRequestId = 0
+
 export function useFlowManager() {
   const { setFlows, createFlow, setCurrentFlow } = useFlowStore()
 
@@ -23,8 +27,9 @@ export function useFlowManager() {
 
   const openFlow = useCallback(
     async (flowId: string) => {
+      const requestId = ++openFlowRequestId
       const flow = await window.electronAPI.loadFlow(flowId)
-      if (!flow) return
+      if (!flow || requestId !== openFlowRequestId) return
       // Read the OUTGOING project context before anything changes it — that is what decides
       // whether the active environment can be carried over.
       const { projects, currentProject, activeEnvironmentId } = useProjectStore.getState()
@@ -36,6 +41,7 @@ export function useFlowManager() {
 
       setCurrentFlow(flow)
       const project = await window.electronAPI.loadProject(pid)
+      if (requestId !== openFlowRequestId) return
       // Preserve the active environment when staying in the same project; reset otherwise.
       const keepEnv =
         stayingInProject && !!prevEnvId && !!project?.environments.some((e) => e.id === prevEnvId)

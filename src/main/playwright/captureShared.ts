@@ -753,14 +753,14 @@ export function getAssertionToolbarScript(): string {
       } catch(e) {}
     });
 
-    document.addEventListener('keydown', function escHandler(e) {
+    window.addEventListener('keydown', function escHandler(e) {
       if (e.key !== 'Escape') return;
       e.stopPropagation();
       overlay.remove();
       tooltip.remove();
       clearHighlight();
       finish();
-      document.removeEventListener('keydown', escHandler, true);
+      window.removeEventListener('keydown', escHandler, true);
       try { window.__flowtest_assert_cancel(); } catch(e) {}
     }, true);
   };

@@ -55,10 +55,13 @@ export function EnvVarPickerPopover({
         close()
       }
     }
-    document.addEventListener('mousedown', onMouseDown)
+    // Capture phase: Modal's card stops propagation of `mousedown` in the bubble phase
+    // (so clicking inside the card doesn't trigger the backdrop's onClose), which would
+    // otherwise swallow this before it ever reaches document in the bubble phase.
+    document.addEventListener('mousedown', onMouseDown, true)
     document.addEventListener('keydown', onKeyDown)
     return () => {
-      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('mousedown', onMouseDown, true)
       document.removeEventListener('keydown', onKeyDown)
     }
   }, [anchor])

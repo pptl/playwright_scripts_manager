@@ -15,3 +15,10 @@ release/
 exports/
 test-results/
 playwright-report/
+
+# Scratch compile output for the a12 e2e test (needs to live under the project root so
+# Node's module resolution can find node_modules/uuid from the compiled file).
+.claude/skills/flowtest-e2e-driver/tests/.a12-scratch/
+# Safety net: the a12 test's temp source copy is always removed in a `finally`, but in case
+# a crash skips that, never let it get committed.
+src/main/playwright/captureShared.a12scratch.ts

@@ -26,7 +26,20 @@ description: 這個 skill 應該在需要對 FlowTest（這個 Electron app 本�
     a7-a16-vault-repassphrase.js        — vault 換通行碼全有或全無 + A16 reload（20 項檢查）
     a3-error-channel.js                 — error channel toast/modal 全套（20 項檢查 + 2 項標記為需人工）
     a13-project-env-focus-reload.js     — focus reload 套用外部修改的 project env var（4 項檢查）
+    a14-envvar-popover-outside-click.js — EnvVarPickerPopover 在 modal 內的 outside-click（5 項檢查）
+    a12-assert-escape-press.js          — 斷言 dock Escape 取消不應多錄 press（4 項檢查）——
+                                           **不用 `_electron`**，見下方獨立說明
 ```
+
+**`a12-assert-escape-press.js` 是這個目錄裡唯一不驅動 Electron app 本體的測試。** A12 的
+bug 活在注入到「被錄製頁面」裡的原始 JS（`getDOMCaptureScript()` /
+`getAssertionToolbarScript()`，定義在 `src/main/playwright/captureShared.ts`），跟 Electron
+UI 無關；`BrowserController` 沒有暴露 CDP/remote-debugging 通道，`launchApp()` 開的 Electron
+app 本體搆不到它另外用 `playwright-core` 開出來的錄製瀏覽器視窗。這支測試改用
+`npx tsc`（實際上是直接 `node node_modules/typescript/lib/tsc.js`，避開 Windows shell 對
+帶空白路徑的引號問題）把 `captureShared.ts` 獨立編譯成 CommonJS，`require()` 進來後直接在一個
+真的（headless）Chromium page 裡執行這兩支注入腳本，重現真實的事件時序（capture phase 監聽器
+的註冊順序）。編譯用的暫存檔在 `tests/.a12-scratch/`（已加入 `.gitignore`）。
 
 每支測試都是獨立可執行的 Node 腳本，內建自己的 PASS/FAIL/SKIP 報表，結尾都會呼叫
 `driver.assertRealSettingsUntouched()` 驗證沒有動到使用者真正的 `%APPDATA%/flowtest/settings.json`。

@@ -335,16 +335,18 @@ export class ScriptExporter {
     // parentId === null). It can go stale — e.g. connectNodes attaching a new parent
     // in front of the current root doesn't update it — so walk up the parentId chain
     // from it to the true root, mirroring Replayer.replayToNode's traversal, instead of
-    // trusting the cached pointer blindly.
+    // trusting the cached pointer blindly. A parentId naming a node that no longer
+    // exists ends the walk there — that node IS the root, exactly as the Replayer
+    // treats it; stepping onto the missing parent would leave no root and export an
+    // empty describe ("No tests found").
+    const isRoot = (n: FlowNode) => n.parentId === null || !nodeMap.has(n.parentId)
     let root = nodeMap.get(flow.rootNodeId)
-    if (root?.parentId) {
-      const seen = new Set<string>()
-      while (root?.parentId && !seen.has(root.id)) {
-        seen.add(root.id)
-        root = nodeMap.get(root.parentId)
-      }
+    const seen = new Set<string>()
+    while (root && !isRoot(root) && !seen.has(root.id)) {
+      seen.add(root.id)
+      root = nodeMap.get(root.parentId!)
     }
-    root = root ?? flow.nodes.find((n) => n.parentId === null)
+    root = root ?? flow.nodes.find(isRoot)
     if (root) walk(root, [], [])
 
     return paths

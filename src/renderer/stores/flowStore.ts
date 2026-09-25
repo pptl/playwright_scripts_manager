@@ -221,6 +221,21 @@ function omitKey<T>(map: Record<string, T>, key: string): Record<string, T> {
   return rest
 }
 
+/** Where the recording head goes when nodes are deleted: unchanged if it survived,
+ *  otherwise its nearest surviving ancestor (null if none). Without this a delete
+ *  during recording leaves the head naming a node that is gone, and every action
+ *  captured afterwards would be attached to it. */
+function survivingHead(flow: Flow, headId: string | null, deleted: Set<string>): string | null {
+  const nodeMap = new Map(flow.nodes.map((n) => [n.id, n]))
+  const seen = new Set<string>()
+  let cur = headId
+  while (cur && deleted.has(cur) && !seen.has(cur)) {
+    seen.add(cur)
+    cur = nodeMap.get(cur)?.parentId ?? null
+  }
+  return cur && nodeMap.has(cur) && !deleted.has(cur) ? cur : null
+}
+
 /** Apply a state change without recording an undo entry. Used by actions that are pure
  *  view state (group collapse), automatic bookkeeping (one-time layout materialization),
  *  or any write to flow CONFIG (profiles, name, project assignment). */
@@ -395,8 +410,11 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     // Deduplicate: reject if this action ID already exists
     if (flow.nodes.some((n) => n.id === action.id)) return {} as FlowNode
 
-    // Determine position
-    const parent = parentId ? flow.nodes.find((n) => n.id === parentId) : null
+    // Determine position. A parentId that names no node (a stale recording head) is
+    // dropped rather than written through — a dangling parentId makes the node look
+    // attached while no root is reachable from it, so export finds no paths.
+    const parent = parentId ? flow.nodes.find((n) => n.id === parentId) ?? null : null
+    if (!parent) parentId = null
     const siblingCount = parent ? parent.childIds.length : 0
     const position: NodePosition = parent
       ? {
@@ -504,7 +522,11 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       rootNodeId: newRoot?.id ?? '',
       updatedAt: new Date().toISOString(),
     }
-    set({ currentFlow: updatedFlow, selectedNodeId: null })
+    set({
+      currentFlow: updatedFlow,
+      selectedNodeId: null,
+      recordingHeadId: survivingHead(flow, get().recordingHeadId, toDelete),
+    })
     void persistFlow(updatedFlow)
   },
 
@@ -533,7 +555,11 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       rootNodeId: newRoot?.id ?? '',
       updatedAt: new Date().toISOString(),
     }
-    set({ currentFlow: updatedFlow, selectedNodeId: null })
+    set({
+      currentFlow: updatedFlow,
+      selectedNodeId: null,
+      recordingHeadId: survivingHead(flow, get().recordingHeadId, toDelete),
+    })
     void persistFlow(updatedFlow)
   },
 
